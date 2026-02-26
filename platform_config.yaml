@@ -1,0 +1,84 @@
+# ============================================
+# Polymarket Dashboard - Platform Configuration
+# ============================================
+# This file controls the entire platform behavior.
+# OpenClaw can modify this file to change settings.
+# Changes take effect on next scheduler cycle or page refresh.
+
+platform:
+  name: "Polymarket Agent Dashboard"
+  version: "1.0.0"
+  refresh_interval_minutes: 30
+  log_level: "info"                    # debug | info | warn | error
+  max_log_retention_days: 30
+
+# --- Budget & Cost Control ---
+budgets:
+  monthly_total_usd: 50.00
+  daily_limit_usd: 5.00
+  per_agent_daily_usd: 1.00
+  alert_threshold_percent: 80          # Alert when 80% of budget used
+  auto_pause_on_budget_exceeded: true  # Pause agents when budget exceeded
+
+# --- Telegram Alerts to YOU ---
+alerts:
+  enabled: true
+  on_budget_warning: true
+  on_circuit_breaker: true
+  on_new_suggestion: true
+  on_trade_executed: true
+  on_agent_error: true
+  on_daily_summary: true
+  daily_summary_hour: 20               # 20:00 UTC
+
+# --- Circuit Breaker ---
+circuit_breaker:
+  max_consecutive_losses: 3
+  pause_hours: 24
+  auto_reset: true                     # Reset after pause_hours
+
+# --- Model Routing (cost optimization) ---
+model_routing:
+  analysis: "claude-sonnet"            # Complex analysis
+  parsing: "gemini-flash"              # Cheap data parsing
+  sentiment: "haiku"                   # Cheap sentiment scoring
+  summarization: "haiku"               # Cheap summarization
+  default: "claude-sonnet"
+
+# --- Response Cache ---
+cache:
+  enabled: true
+  ttl_minutes: 30                      # Same question within 30 min -> cache hit
+  max_entries: 1000
+
+# --- Polymarket Settings ---
+polymarket:
+  markets_limit: 50                    # Max markets to track
+  min_volume_usd: 1000                 # Only track markets with this min volume
+  min_liquidity_usd: 500
+  categories:                          # Categories to watch (empty = all)
+    - "politics"
+    - "crypto"
+    - "sports"
+    - "science"
+
+# --- Scheduler Jobs ---
+scheduler:
+  market_refresh:
+    enabled: true
+    interval_minutes: 30
+  sentiment_update:
+    enabled: true
+    interval_minutes: 60
+  cost_aggregation:
+    enabled: true
+    interval_minutes: 60
+  agent_health_check:
+    enabled: true
+    interval_minutes: 15
+  ml_retrain:
+    enabled: false                     # Enable after enough data
+    interval_days: 7
+  daily_summary:
+    enabled: true
+    hour: 20                           # 20:00 UTC

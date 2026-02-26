@@ -1,0 +1,22 @@
+# ============================================
+# Agent Configuration Template
+# ============================================
+# Copy this file and rename it to create a new agent.
+# The filename (without .yaml) becomes the agent ID.
+# OpenClaw can create new agents by adding YAML files here.
+
+agent:
+  name: "Agent Name"
+  role: "custom"                       # chief | observer | analyst | risk_manager | trader | backtester | custom
+  persona: |
+    Describe the agent's personality, expertise, and behavior here.
+    Be specific about what this agent should focus on.
+  skills:
+    - skill_name_1
+    - skill_name_2
+  schedule: "*/60 * * * *"            # Cron expression (how often to run)
+  budget_daily_usd: 0.50              # Max daily API cost for this agent
+  model: "haiku"                       # Preferred LLM model (haiku | sonnet | opus | gemini-flash)
+  enabled: true                        # Set to false to disable without deleting
+  priority: 5                          # 1 (highest) to 10 (lowest) for queue ordering
+  depends_on: []                       # List of agent IDs this agent depends on

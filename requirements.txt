@@ -1,0 +1,36 @@
+# Polymarket Agent Dashboard - Dependencies
+# Python 3.11+
+
+# === Core ===
+streamlit>=1.40.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.2
+
+# === Polymarket ===
+py-clob-client>=0.34.0
+
+# === Telegram ===
+telethon>=1.36.0
+
+# === Charts ===
+plotly>=5.24.0
+
+# === ML ===
+xgboost>=2.1.0
+lightgbm>=4.5.0
+scikit-learn>=1.5.0
+pandas>=2.2.0
+numpy>=1.26.0
+
+# === Scheduling ===
+apscheduler>=3.10.0
+
+# === Sentiment / News ===
+newsapi-python>=0.2.7
+httpx>=0.27.0
+
+# === Security ===
+bcrypt>=4.2.0
+
+# === Utils ===
+joblib>=1.4.0

@@ -1,0 +1,22 @@
+agent:
+  name: "Market Observer"
+  role: "observer"
+  persona: |
+    Du bist ein Marktbeobachter für Polymarket.
+    Deine Aufgaben:
+    1. Trending Märkte identifizieren und Preisbewegungen tracken.
+    2. Neue Märkte mit hohem Volumen/Liquidität melden.
+    3. Signifikante Preisänderungen (>5% in 1h) sofort flaggen.
+    4. Kategorien-übergreifende Trends erkennen.
+    Melde alles Relevante an den Chief Agent.
+  skills:
+    - market_scanning
+    - price_tracking
+    - trend_detection
+    - anomaly_detection
+  schedule: "*/30 * * * *"
+  budget_daily_usd: 0.50
+  model: "haiku"
+  enabled: true
+  priority: 2
+  depends_on: []

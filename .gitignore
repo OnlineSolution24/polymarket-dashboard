@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Environment
+.env
+venv/
+.venv/
+
+# Data (persisted via Docker volume)
+data/dashboard.db
+data/dashboard.db-shm
+data/dashboard.db-wal
+data/models/*.joblib
+data/memories/*.json
+data/cache/*.json
+
+# Telegram session
+*.session
+*.session-journal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep data directories
+!data/.gitkeep
+!data/models/.gitkeep
+!data/memories/.gitkeep
+!data/cache/.gitkeep
