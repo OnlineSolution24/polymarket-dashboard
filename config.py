@@ -18,8 +18,17 @@ AGENT_CONFIGS_DIR = ROOT_DIR / "agent_configs"
 PLUGINS_DIR = ROOT_DIR / "plugins"
 PLATFORM_CONFIG_PATH = ROOT_DIR / "platform_config.yaml"
 
-# Load .env
+# Load .env (local dev)
 load_dotenv(ROOT_DIR / ".env")
+
+# Also load Streamlit secrets into env vars (for Streamlit Cloud deployment)
+try:
+    import streamlit as st
+    for key, value in st.secrets.items():
+        if isinstance(value, str) and key not in os.environ:
+            os.environ[key] = value
+except Exception:
+    pass
 
 
 @dataclass
