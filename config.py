@@ -60,16 +60,20 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        def _int(key: str, default: int = 0) -> int:
+            val = os.getenv(key, "")
+            return int(val) if val.strip() else default
+
         return cls(
             polymarket_host=os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com"),
             polymarket_private_key=os.getenv("POLYMARKET_PRIVATE_KEY", ""),
-            polymarket_chain_id=int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
+            polymarket_chain_id=_int("POLYMARKET_CHAIN_ID", 137),
             polymarket_funder=os.getenv("POLYMARKET_FUNDER", ""),
-            telegram_api_id=int(os.getenv("TELEGRAM_API_ID", "0")),
+            telegram_api_id=_int("TELEGRAM_API_ID"),
             telegram_api_hash=os.getenv("TELEGRAM_API_HASH", ""),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            openclaw_chat_id=int(os.getenv("OPENCLAW_CHAT_ID", "0")),
-            alert_telegram_user_id=int(os.getenv("ALERT_TELEGRAM_USER_ID", "0")),
+            openclaw_chat_id=_int("OPENCLAW_CHAT_ID"),
+            alert_telegram_user_id=_int("ALERT_TELEGRAM_USER_ID"),
             newsapi_key=os.getenv("NEWSAPI_KEY", ""),
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
             db_path=os.getenv("DB_PATH", "data/dashboard.db"),

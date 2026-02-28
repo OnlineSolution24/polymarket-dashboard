@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Python deps (lightweight — no ML, no Telegram, no Polymarket)
+COPY requirements.dashboard.txt .
+RUN pip install --no-cache-dir -r requirements.dashboard.txt
+
+# App code
+COPY app.py config.py ./
+COPY .streamlit/ .streamlit/
+COPY components/ components/
+COPY pages/ pages/
+COPY services/bot_api_client.py services/
+
+EXPOSE 8501
+
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+
+CMD ["streamlit", "run", "app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true", \
+     "--browser.gatherUsageStats=false"]

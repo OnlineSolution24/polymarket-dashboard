@@ -51,6 +51,18 @@ cache:
   ttl_minutes: 30                      # Same question within 30 min -> cache hit
   max_entries: 1000
 
+# --- Trading Configuration ---
+# Controls how the bot executes trades.
+trading:
+  mode: "paper"                          # paper | semi-auto | full-auto
+  capital_usd: 100.00                    # Total trading capital available
+  limits:
+    max_position_pct: 5                  # Max 5% of capital per trade
+    max_daily_loss_usd: 50.00            # Stop trading after $50 daily loss
+    min_edge: 0.03                       # Only trade with >3% edge
+    min_trade_usd: 1.00                  # Minimum trade amount
+  category_blacklist: []                 # Categories to never trade (e.g. ["adult"])
+
 # --- Polymarket Settings ---
 polymarket:
   markets_limit: 50                    # Max markets to track
@@ -79,6 +91,9 @@ scheduler:
   ml_retrain:
     enabled: false                     # Enable after enough data
     interval_days: 7
+  trader_cycle:
+    enabled: true
+    interval_minutes: 5                # Check for approved trades every 5 min
   daily_summary:
     enabled: true
     hour: 20                           # 20:00 UTC

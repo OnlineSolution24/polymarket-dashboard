@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: polymarket-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - bot-data:/app/data
+      - ./platform_config.yaml:/app/platform_config.yaml
+      - ./agent_configs:/app/agent_configs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/api/docs'); assert r.status_code == 200"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  bot-data:

@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python deps
+COPY requirements.bot.txt .
+RUN pip install --no-cache-dir -r requirements.bot.txt
+
+# App code
+COPY . .
+
+# Data directory
+RUN mkdir -p data/models data/memories data/cache
+
+EXPOSE 8000
+
+CMD ["python", "bot_main.py"]

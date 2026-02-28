@@ -91,6 +91,14 @@ def start_scheduler(config: AppConfig) -> None:
                 id="daily_reset", replace_existing=True,
             )
 
+            # Trader cycle (checks for approved suggestions → executes trades)
+            trader_interval = sched_cfg.get("trader_cycle", {}).get("interval_minutes", 5)
+            _scheduler.add_job(
+                _job_run_trader_cycle, "interval", minutes=trader_interval,
+                id="trader_cycle", replace_existing=True, args=[config],
+            )
+            logger.info(f"Scheduled: trader_cycle every {trader_interval}min")
+
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
                 _job_cleanup_cache, "interval", hours=6,
@@ -193,6 +201,35 @@ def _job_run_agent_cycles(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Agent cycles failed: {e}")
+
+
+def _job_run_trader_cycle(config: AppConfig):
+    """Run the Trader agent cycle (process approved suggestions → execute trades)."""
+    try:
+        # Check if bot is paused
+        try:
+            from bot_main import bot_state
+            if bot_state.paused:
+                return
+        except ImportError:
+            pass
+
+        from config import load_agent_configs
+        from agents.agent_factory import create_agent
+        from services.telegram_bridge import get_bridge
+
+        bridge = get_bridge(config)
+
+        # Find the trader config
+        for cfg in load_agent_configs():
+            if cfg.role == "trader" and cfg.enabled:
+                agent = create_agent(cfg, bridge)
+                result = agent.run_cycle()
+                logger.debug(f"Trader cycle: {result.get('summary', '')[:100]}")
+                break
+
+    except Exception as e:
+        logger.error(f"Trader cycle failed: {e}")
 
 
 def _job_check_budgets(config: AppConfig):

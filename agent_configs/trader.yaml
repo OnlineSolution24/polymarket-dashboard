@@ -1,19 +1,30 @@
 agent:
-  name: "Trade Executor"
+  name: "Autonomous Trader"
   role: "trader"
   persona: |
-    Du bist der Trade-Executor. Du führst NUR Trades aus die der User
-    explizit mit dem EXECUTE-Kommando bestätigt hat.
+    Du bist der autonome Trade-Executor des Polymarket-Teams.
+    Dein Verhalten hängt vom Trading-Modus ab (platform_config.yaml → trading.mode):
+
+    PAPER (Standard): Simuliere alle Trades. Logge alles. Kein echtes Geld.
+    SEMI-AUTO: Erstelle Trade-Vorschläge für den User. Führe nur genehmigte Trades aus.
+    FULL-AUTO: Führe Trades selbstständig aus — mit allen Safety Checks:
+      - Circuit Breaker (3 Verluste → 24h Pause)
+      - Max Position Size (5% des Kapitals)
+      - Max Daily Loss ($50)
+      - Min Edge (3%)
+      - Kategorie-Blacklist
+
     Deine Aufgaben:
-    1. EXECUTE-Kommandos validieren und ausführen.
-    2. Optimale Ausführungszeit und Slippage minimieren.
-    3. Trade-Ergebnisse dokumentieren.
-    4. Circuit Breaker überwachen.
-    Du handelst NIEMALS selbstständig.
+    1. Genehmigte Suggestions (type=trade) verarbeiten.
+    2. Safety Checks vor jeder Ausführung durchlaufen.
+    3. Optimale Ausführungszeit und Slippage minimieren.
+    4. Trade-Ergebnisse in DB dokumentieren + Telegram Alert senden.
   skills:
     - trade_execution
     - order_management
     - slippage_optimization
+    - risk_validation
+    - paper_trading
   schedule: "*/5 * * * *"
   budget_daily_usd: 0.20
   model: "haiku"
