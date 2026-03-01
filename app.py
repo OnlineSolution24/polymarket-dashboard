@@ -291,16 +291,16 @@ from pages import (
 
 # --- Navigation ---
 pages = [
-    st.Page(home.render, title="Dashboard", icon="🏠", default=True),
-    st.Page(live_monitoring.render, title="Live Monitoring", icon="📈"),
-    st.Page(execution_control.render, title="Execution", icon="⚡"),
-    st.Page(suggestions.render, title="Vorschläge", icon="💡"),
-    st.Page(agent_manager.render, title="Agent Manager", icon="🤖"),
-    st.Page(cost_tracker_ui.render, title="Cost Tracker", icon="💰"),
-    st.Page(backtesting_ui.render, title="Backtesting", icon="📊"),
-    st.Page(ml_improvement.render, title="ML Improvement", icon="🧠"),
-    st.Page(system_config.render, title="System Config", icon="⚙️"),
-    st.Page(security_setup.render, title="Security & Setup", icon="🔒"),
+    st.Page(home.render, title="Dashboard", icon="🏠", default=True, url_path="dashboard"),
+    st.Page(live_monitoring.render, title="Live Monitoring", icon="📈", url_path="monitoring"),
+    st.Page(execution_control.render, title="Execution", icon="⚡", url_path="execution"),
+    st.Page(suggestions.render, title="Vorschläge", icon="💡", url_path="suggestions"),
+    st.Page(agent_manager.render, title="Agent Manager", icon="🤖", url_path="agents"),
+    st.Page(cost_tracker_ui.render, title="Cost Tracker", icon="💰", url_path="costs"),
+    st.Page(backtesting_ui.render, title="Backtesting", icon="📊", url_path="backtesting"),
+    st.Page(ml_improvement.render, title="ML Improvement", icon="🧠", url_path="ml"),
+    st.Page(system_config.render, title="System Config", icon="⚙️", url_path="config"),
+    st.Page(security_setup.render, title="Security & Setup", icon="🔒", url_path="security"),
 ]
 
 nav = st.navigation(pages)
