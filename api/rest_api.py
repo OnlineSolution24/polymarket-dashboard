@@ -329,7 +329,7 @@ def create_app(config: AppConfig) -> FastAPI:
         return BotActionResponse(ok=True, message="Bot resumed")
 
     # ------------------------------------------------------------------
-    # Config (read-only)
+    # Config
     # ------------------------------------------------------------------
 
     @app.get("/api/config", dependencies=[Depends(verify_api_key)])
@@ -337,5 +337,13 @@ def create_app(config: AppConfig) -> FastAPI:
         """Return platform config (without secrets)."""
         cfg = load_platform_config()
         return cfg
+
+    @app.post("/api/config", dependencies=[Depends(verify_api_key)])
+    def save_config(body: dict):
+        """Save platform config. Scheduler picks up changes on next cycle."""
+        from config import save_platform_config
+        save_platform_config(body)
+        logger.info("Platform config updated via API")
+        return BotActionResponse(ok=True, message="Config saved")
 
     return app
