@@ -1,13 +1,11 @@
 """
-Tab 6: Cost Tracker
-Real-time API cost tracking with budget warnings and provider breakdown.
+Cost Tracker — API cost monitoring via Bot REST API.
+Shows daily/monthly costs, provider breakdown, and agent costs.
 """
 
 import streamlit as st
-from datetime import date, datetime
 
-from db import engine
-from config import get_budget_config
+from services.bot_api_client import get_bot_client
 from components.charts import cost_pie_chart
 from components.status_cards import kpi_row
 
@@ -15,23 +13,13 @@ from components.status_cards import kpi_row
 def render():
     st.header("Cost Tracker")
 
-    budget = get_budget_config()
-    today = date.today().isoformat()
+    client = get_bot_client()
+    costs = client.get_costs(days=30)
+    config = client.get_config()
+    budget = config.get("budgets", {})
 
-    # --- Today's Costs ---
-    today_costs = engine.query(
-        "SELECT provider, SUM(cost_usd) as total, SUM(tokens_in) as tokens_in, SUM(tokens_out) as tokens_out "
-        "FROM api_costs WHERE date(created_at) = ? GROUP BY provider",
-        (today,),
-    )
-    today_total = sum(c["total"] for c in today_costs) if today_costs else 0
-
-    # Monthly costs
-    month_costs = engine.query(
-        "SELECT provider, SUM(cost_usd) as total "
-        "FROM api_costs WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') GROUP BY provider"
-    )
-    month_total = sum(c["total"] for c in month_costs) if month_costs else 0
+    today_total = costs.get("daily_total", 0)
+    month_total = costs.get("monthly_total", 0)
 
     # --- KPI Row ---
     daily_limit = budget.get("daily_limit_usd", 5.0)
@@ -74,21 +62,23 @@ def render():
     tab_today, tab_month = st.tabs(["Heute", "Monat"])
 
     with tab_today:
-        if today_costs:
-            costs_dict = {c["provider"]: round(c["total"], 4) for c in today_costs}
+        today_by_provider = costs.get("today_by_provider", [])
+        if today_by_provider:
+            costs_dict = {c["provider"]: round(c["total"], 4) for c in today_by_provider}
             st.plotly_chart(cost_pie_chart(costs_dict), use_container_width=True)
 
-            for cost in today_costs:
+            for cost in today_by_provider:
                 st.markdown(
                     f"**{cost['provider']}**: ${cost['total']:.4f} "
-                    f"({cost['tokens_in'] or 0} tokens in, {cost['tokens_out'] or 0} tokens out)"
+                    f"({cost.get('tokens_in') or 0} tokens in, {cost.get('tokens_out') or 0} tokens out)"
                 )
         else:
             st.info("Heute noch keine API-Kosten angefallen.")
 
     with tab_month:
-        if month_costs:
-            costs_dict = {c["provider"]: round(c["total"], 4) for c in month_costs}
+        month_by_provider = costs.get("month_by_provider", [])
+        if month_by_provider:
+            costs_dict = {c["provider"]: round(c["total"], 4) for c in month_by_provider}
             st.plotly_chart(cost_pie_chart(costs_dict), use_container_width=True)
         else:
             st.info("Diesen Monat noch keine API-Kosten angefallen.")
@@ -97,14 +87,10 @@ def render():
 
     # --- Agent Cost Breakdown ---
     st.subheader("Kosten pro Agent (Heute)")
-    agent_costs = engine.query(
-        "SELECT agent_id, SUM(cost_usd) as total FROM api_costs "
-        "WHERE date(created_at) = ? AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY total DESC",
-        (today,),
-    )
-    if agent_costs:
+    today_by_agent = costs.get("today_by_agent", [])
+    if today_by_agent:
         per_agent_limit = budget.get("per_agent_daily_usd", 1.0)
-        for ac in agent_costs:
+        for ac in today_by_agent:
             pct = min(ac["total"] / per_agent_limit, 1.0) if per_agent_limit > 0 else 0
             st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.4f} / ${per_agent_limit:.2f}")
     else:
@@ -114,14 +100,12 @@ def render():
 
     # --- Recent Cost Entries ---
     st.subheader("Letzte API-Aufrufe")
-    recent = engine.query(
-        "SELECT * FROM api_costs ORDER BY created_at DESC LIMIT 20"
-    )
-    if recent:
-        for entry in recent:
-            ts = entry["created_at"][:16] if entry["created_at"] else ""
+    entries = costs.get("entries", [])
+    if entries:
+        for entry in entries[:20]:
+            ts = (entry.get("created_at") or "")[:16]
             agent = entry.get("agent_id", "system") or "system"
             st.caption(
-                f"`{ts}` **{entry['provider']}** — ${entry['cost_usd']:.4f} "
+                f"`{ts}` **{entry.get('provider', '?')}** — ${entry.get('cost_usd', 0):.4f} "
                 f"(Agent: {agent}, Endpoint: {entry.get('endpoint', 'N/A')})"
             )

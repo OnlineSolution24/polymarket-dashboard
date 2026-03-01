@@ -1,5 +1,6 @@
 """
 Polymarket Agent Dashboard - Main Entrypoint
+Monitoring-only dashboard that reads data from the Trading Bot REST API.
 Run: streamlit run app.py
 """
 
@@ -14,7 +15,6 @@ st.set_page_config(
 )
 
 from config import AppConfig
-from db.migrations import initialize_database
 from components.auth_guard import require_auth
 
 # --- Dark Theme Custom CSS ---
@@ -268,31 +268,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- Initialize Database on Startup ---
-if "db_initialized" not in st.session_state:
-    initialize_database()
-    st.session_state["db_initialized"] = True
-
 # --- Load Config ---
 config = AppConfig.from_env()
-
-# --- Start Background Scheduler (once) ---
-if "scheduler_started" not in st.session_state:
-    try:
-        from services.scheduler import start_scheduler
-        start_scheduler(config)
-        st.session_state["scheduler_started"] = True
-    except Exception:
-        pass
-
-# --- Load Plugins (once) ---
-if "plugins_loaded" not in st.session_state:
-    try:
-        from plugins.plugin_loader import load_plugins
-        loaded = load_plugins()
-        st.session_state["plugins_loaded"] = loaded
-    except Exception:
-        st.session_state["plugins_loaded"] = []
 
 # --- Auth Gate ---
 if not require_auth(config):
@@ -315,15 +292,15 @@ from pages import (
 # --- Navigation ---
 pages = [
     st.Page(home.render, title="Dashboard", icon="🏠", default=True),
-    st.Page(security_setup.render, title="Security & Setup", icon="🔒"),
-    st.Page(agent_manager.render, title="Agent Manager", icon="🤖"),
     st.Page(live_monitoring.render, title="Live Monitoring", icon="📈"),
+    st.Page(execution_control.render, title="Execution", icon="⚡"),
+    st.Page(suggestions.render, title="Vorschläge", icon="💡"),
+    st.Page(agent_manager.render, title="Agent Manager", icon="🤖"),
+    st.Page(cost_tracker_ui.render, title="Cost Tracker", icon="💰"),
     st.Page(backtesting_ui.render, title="Backtesting", icon="📊"),
     st.Page(ml_improvement.render, title="ML Improvement", icon="🧠"),
-    st.Page(cost_tracker_ui.render, title="Cost Tracker", icon="💰"),
-    st.Page(suggestions.render, title="Vorschläge", icon="💡"),
-    st.Page(execution_control.render, title="Execution", icon="⚡"),
     st.Page(system_config.render, title="System Config", icon="⚙️"),
+    st.Page(security_setup.render, title="Security & Setup", icon="🔒"),
 ]
 
 nav = st.navigation(pages)
@@ -339,76 +316,94 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.divider()
 
-    # Quick status in sidebar
-    from db import engine
-    from datetime import date
+    # Quick status from Bot API
+    from services.bot_api_client import get_bot_client
+    client = get_bot_client()
+    status = client.get_status()
 
-    agents_row = engine.query_one("SELECT COUNT(*) as cnt FROM agents WHERE status = 'active'")
-    active_agents = agents_row['cnt'] if agents_row else 0
+    if status:
+        active_agents = status.get("active_agents", 0)
+        cost_today = status.get("cost_today_usd", 0)
+        pending = status.get("pending_suggestions", 0)
+        cb = status.get("circuit_breaker", {})
+        paused_until = cb.get("paused_until")
+        trading_mode = status.get("trading_mode", "?")
+        bot_paused = status.get("bot_paused", False)
 
-    today = date.today().isoformat()
-    cost_row = engine.query_one(
-        "SELECT COALESCE(SUM(cost_usd), 0) as total FROM api_costs WHERE date(created_at) = ?", (today,)
-    )
-    cost_today = cost_row['total'] if cost_row else 0.0
-
-    pending_row = engine.query_one("SELECT COUNT(*) as cnt FROM suggestions WHERE status = 'pending'")
-    pending = pending_row["cnt"] if pending_row else 0
-
-    cb = engine.query_one("SELECT * FROM circuit_breaker WHERE id = 1")
-    circuit_active = False
-    if cb and cb.get("paused_until"):
-        from datetime import datetime
-        try:
-            paused = datetime.fromisoformat(cb["paused_until"])
-            if paused > datetime.utcnow():
-                circuit_active = True
-        except Exception:
-            pass
-
-    # Status cards in sidebar
-    st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
-                padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
-        <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Aktive Agents</div>
-        <div style="color: #00D4AA; font-size: 1.5rem; font-weight: 700;">{active_agents}</div>
-    </div>
-    <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
-                padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
-        <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Kosten heute</div>
-        <div style="color: {'#FF5252' if cost_today > 4.0 else '#FFB74D' if cost_today > 2.0 else '#E8ECF1'};
-                    font-size: 1.5rem; font-weight: 700;">${cost_today:.2f}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if pending > 0:
+        # Bot connection indicator
+        mode_color = {"paper": "#FFB74D", "semi-auto": "#448AFF", "full-auto": "#00D4AA"}.get(trading_mode, "#888")
         st.markdown(f"""
-        <div style="background: rgba(255, 183, 77, 0.1); border-radius: 10px;
-                    padding: 14px; margin-bottom: 10px; border-left: 3px solid #FFB74D;">
-            <div style="color: #FFB74D; font-size: 0.85rem; font-weight: 600;">
-                ⚠️ {pending} offene Vorschläge
+        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
+                    padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
+            <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Bot Status</div>
+            <div style="color: {'#FF5252' if bot_paused else '#00D4AA'}; font-size: 1.2rem; font-weight: 700;">
+                {'PAUSIERT' if bot_paused else 'AKTIV'}
             </div>
+            <div style="color: {mode_color}; font-size: 0.75rem; margin-top: 4px;">Mode: {trading_mode}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    if circuit_active:
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
+                    padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
+            <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Aktive Agents</div>
+            <div style="color: #00D4AA; font-size: 1.5rem; font-weight: 700;">{active_agents}</div>
+        </div>
+        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
+                    padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
+            <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Kosten heute</div>
+            <div style="color: {'#FF5252' if cost_today > 4.0 else '#FFB74D' if cost_today > 2.0 else '#E8ECF1'};
+                        font-size: 1.5rem; font-weight: 700;">${cost_today:.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if pending > 0:
+            st.markdown(f"""
+            <div style="background: rgba(255, 183, 77, 0.1); border-radius: 10px;
+                        padding: 14px; margin-bottom: 10px; border-left: 3px solid #FFB74D;">
+                <div style="color: #FFB74D; font-size: 0.85rem; font-weight: 600;">
+                    {pending} offene Vorschläge
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        circuit_active = False
+        if paused_until:
+            from datetime import datetime
+            try:
+                paused = datetime.fromisoformat(paused_until)
+                if paused > datetime.utcnow():
+                    circuit_active = True
+            except Exception:
+                pass
+
+        if circuit_active:
+            st.markdown("""
+            <div style="background: rgba(255, 82, 82, 0.1); border-radius: 10px;
+                        padding: 14px; margin-bottom: 10px; border-left: 3px solid #FF5252;
+                        animation: pulse 2s infinite;">
+                <div style="color: #FF5252; font-size: 0.85rem; font-weight: 700;">
+                    CIRCUIT BREAKER AKTIV
+                </div>
+            </div>
+            <style>
+                @keyframes pulse { 0%,100% {opacity:1;} 50% {opacity:0.7;} }
+            </style>
+            """, unsafe_allow_html=True)
+    else:
         st.markdown("""
         <div style="background: rgba(255, 82, 82, 0.1); border-radius: 10px;
-                    padding: 14px; margin-bottom: 10px; border-left: 3px solid #FF5252;
-                    animation: pulse 2s infinite;">
-            <div style="color: #FF5252; font-size: 0.85rem; font-weight: 700;">
-                🔴 Circuit Breaker AKTIV
+                    padding: 14px; margin-bottom: 10px; border-left: 3px solid #FF5252;">
+            <div style="color: #FF5252; font-size: 0.85rem; font-weight: 600;">
+                Bot nicht erreichbar
             </div>
         </div>
-        <style>
-            @keyframes pulse { 0%,100% {opacity:1;} 50% {opacity:0.7;} }
-        </style>
         """, unsafe_allow_html=True)
 
     st.divider()
     st.markdown("""
     <div style="text-align: center; color: #3A4258; font-size: 0.65rem; padding-top: 4px;">
-        v1.0 &middot; Config-Driven &middot; Self-Extending
+        v2.0 &middot; Remote Monitoring &middot; REST API
     </div>
     """, unsafe_allow_html=True)
 

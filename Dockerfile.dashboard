@@ -11,7 +11,8 @@ COPY app.py config.py ./
 COPY .streamlit/ .streamlit/
 COPY components/ components/
 COPY pages/ pages/
-COPY services/bot_api_client.py services/
+COPY services/__init__.py services/__init__.py
+COPY services/bot_api_client.py services/bot_api_client.py
 
 EXPOSE 8501
 

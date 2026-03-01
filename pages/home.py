@@ -1,44 +1,32 @@
 """
 Home Page - KPI Dashboard Overview.
 Shows the 5 most important metrics at a glance.
+All data loaded from Bot REST API.
 """
 
 import streamlit as st
-from datetime import datetime, date
+from datetime import datetime
 
-from db import engine
+from services.bot_api_client import get_bot_client
 from components.status_cards import kpi_row, status_badge
 
 
 def render():
     st.header("Dashboard Overview")
 
+    client = get_bot_client()
+    status = client.get_status()
+
+    if not status:
+        st.error("Bot API nicht erreichbar. Prüfe die Verbindung.")
+        return
+
     # --- KPI Row 1: Key Numbers ---
-    today = date.today().isoformat()
-
-    # Active agents
-    agents_row = engine.query_one("SELECT COUNT(*) as cnt FROM agents WHERE status = 'active'")
-    active_agents = agents_row["cnt"] if agents_row else 0
-
-    # Open positions (trades with status 'executed' and result 'open')
-    open_row = engine.query_one("SELECT COUNT(*) as cnt FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL)")
-    open_positions = open_row["cnt"] if open_row else 0
-
-    # Today's PnL
-    pnl_row = engine.query_one(
-        "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE date(executed_at) = ?", (today,)
-    )
-    today_pnl = pnl_row["total_pnl"] if pnl_row else 0
-
-    # Today's AI costs
-    cost_row = engine.query_one(
-        "SELECT COALESCE(SUM(cost_usd), 0) as total_cost FROM api_costs WHERE date(created_at) = ?", (today,)
-    )
-    today_cost = cost_row["total_cost"] if cost_row else 0
-
-    # Pending suggestions
-    sugg_row = engine.query_one("SELECT COUNT(*) as cnt FROM suggestions WHERE status = 'pending'")
-    pending_suggestions = sugg_row["cnt"] if sugg_row else 0
+    active_agents = status.get("active_agents", 0)
+    open_positions = status.get("open_positions", 0)
+    today_pnl = status.get("pnl_today", 0)
+    today_cost = status.get("cost_today_usd", 0)
+    pending_suggestions = status.get("pending_suggestions", 0)
 
     kpi_row([
         {"label": "Aktive Agents", "value": active_agents},
@@ -55,32 +43,34 @@ def render():
 
     with col1:
         st.subheader("Circuit Breaker")
-        cb = engine.query_one("SELECT * FROM circuit_breaker WHERE id = 1")
-        if cb and cb.get("paused_until"):
-            paused_until = cb["paused_until"]
-            if paused_until and datetime.fromisoformat(paused_until) > datetime.utcnow():
-                status_badge("Trading", "paused")
-                st.warning(f"Pausiert bis: {paused_until}")
-            else:
-                status_badge("Trading", "active")
+        cb = status.get("circuit_breaker", {})
+        paused_until = cb.get("paused_until")
+        losses = cb.get("consecutive_losses", 0)
+
+        is_paused = False
+        if paused_until:
+            try:
+                if datetime.fromisoformat(paused_until) > datetime.utcnow():
+                    is_paused = True
+            except Exception:
+                pass
+
+        if is_paused:
+            status_badge("Trading", "paused")
+            st.warning(f"Pausiert bis: {paused_until}")
         else:
             status_badge("Trading", "active")
 
-        losses = cb["consecutive_losses"] if cb else 0
         st.caption(f"Verluste in Folge: {losses}/3")
 
     with col2:
         st.subheader("Budget Status")
-        from config import get_budget_config
-        budget = get_budget_config()
+        config = client.get_config()
+        budget = config.get("budgets", {})
         daily_limit = budget.get("daily_limit_usd", 5.0)
         monthly_limit = budget.get("monthly_total_usd", 50.0)
 
-        # Monthly costs
-        monthly_row = engine.query_one(
-            "SELECT COALESCE(SUM(cost_usd), 0) as total FROM api_costs WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')"
-        )
-        monthly_cost = monthly_row["total"] if monthly_row else 0
+        monthly_cost = status.get("cost_month_usd", 0)
 
         daily_pct = (today_cost / daily_limit * 100) if daily_limit > 0 else 0
         monthly_pct = (monthly_cost / monthly_limit * 100) if monthly_limit > 0 else 0
@@ -92,13 +82,11 @@ def render():
 
     # --- Recent Activity ---
     st.subheader("Letzte Aktivität")
-    recent_logs = engine.query(
-        "SELECT agent_id, level, message, created_at FROM agent_logs ORDER BY created_at DESC LIMIT 10"
-    )
+    recent_logs = client.get_logs(limit=10)
     if recent_logs:
         for log in recent_logs:
-            level_icon = {"info": "ℹ️", "warn": "⚠️", "error": "❌", "debug": "🔍"}.get(log["level"], "📝")
-            ts = log["created_at"][:16] if log["created_at"] else ""
-            st.caption(f"{level_icon} `{ts}` **{log['agent_id']}**: {log['message']}")
+            level_icon = {"info": "ℹ️", "warn": "⚠️", "error": "❌", "debug": "🔍"}.get(log.get("level", ""), "📝")
+            ts = (log.get("created_at") or "")[:16]
+            st.caption(f"{level_icon} `{ts}` **{log.get('agent_id', 'system')}**: {log.get('message', '')}")
     else:
-        st.info("Noch keine Agent-Aktivitäten. Starte die Agents im Agent Manager.")
+        st.info("Noch keine Agent-Aktivitäten.")

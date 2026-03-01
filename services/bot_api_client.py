@@ -74,6 +74,9 @@ class BotAPIClient:
             params["status"] = status
         return self._get("/api/trades", params) or []
 
+    def get_trade_stats(self) -> dict:
+        return self._get("/api/trades/stats") or {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0}
+
     def get_agents(self) -> list:
         return self._get("/api/agents") or []
 

@@ -79,6 +79,20 @@ def create_app(config: AppConfig) -> FastAPI:
             "SELECT COUNT(*) as cnt FROM trades WHERE date(created_at) = ?",
             (today,),
         )
+        open_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL)"
+        )
+        pnl_row = engine.query_one(
+            "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE date(executed_at) = ?",
+            (today,),
+        )
+        pending_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM suggestions WHERE status = 'pending'"
+        )
+        monthly_cost_row = engine.query_one(
+            "SELECT COALESCE(SUM(cost_usd), 0) as total FROM api_costs "
+            "WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')"
+        )
         cb = engine.query_one("SELECT * FROM circuit_breaker WHERE id = 1")
 
         return {
@@ -86,7 +100,11 @@ def create_app(config: AppConfig) -> FastAPI:
             "trading_mode": trading_cfg.get("mode", "paper"),
             "active_agents": agent_count["cnt"] if agent_count else 0,
             "cost_today_usd": round(cost_row["total"], 4) if cost_row else 0,
+            "cost_month_usd": round(monthly_cost_row["total"], 4) if monthly_cost_row else 0,
             "trades_today": trade_row["cnt"] if trade_row else 0,
+            "open_positions": open_row["cnt"] if open_row else 0,
+            "pnl_today": round(pnl_row["total_pnl"], 4) if pnl_row else 0,
+            "pending_suggestions": pending_row["cnt"] if pending_row else 0,
             "circuit_breaker": {
                 "consecutive_losses": cb["consecutive_losses"] if cb else 0,
                 "paused_until": cb["paused_until"] if cb else None,
@@ -130,6 +148,17 @@ def create_app(config: AppConfig) -> FastAPI:
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return engine.query(sql, tuple(params))
+
+    @app.get("/api/trades/stats", dependencies=[Depends(verify_api_key)])
+    def get_trade_stats():
+        stats = engine.query_one("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) as losses,
+                   COALESCE(SUM(pnl), 0) as total_pnl
+            FROM trades WHERE result IS NOT NULL
+        """)
+        return stats or {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0}
 
     # ------------------------------------------------------------------
     # Agents
@@ -186,9 +215,28 @@ def create_app(config: AppConfig) -> FastAPI:
             "SELECT COALESCE(SUM(cost_usd), 0) as total FROM api_costs "
             "WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')"
         )
+        # Provider breakdowns
+        today_by_provider = engine.query(
+            "SELECT provider, SUM(cost_usd) as total, SUM(tokens_in) as tokens_in, SUM(tokens_out) as tokens_out "
+            "FROM api_costs WHERE date(created_at) = ? GROUP BY provider",
+            (today,),
+        )
+        month_by_provider = engine.query(
+            "SELECT provider, SUM(cost_usd) as total "
+            "FROM api_costs WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') GROUP BY provider"
+        )
+        # Agent breakdown (today)
+        today_by_agent = engine.query(
+            "SELECT agent_id, SUM(cost_usd) as total FROM api_costs "
+            "WHERE date(created_at) = ? AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY total DESC",
+            (today,),
+        )
         return {
             "daily_total": round(daily_row["total"], 4) if daily_row else 0,
             "monthly_total": round(monthly_row["total"], 4) if monthly_row else 0,
+            "today_by_provider": today_by_provider or [],
+            "month_by_provider": month_by_provider or [],
+            "today_by_agent": today_by_agent or [],
             "entries": rows,
         }
 
