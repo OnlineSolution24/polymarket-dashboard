@@ -122,6 +122,9 @@ class BotAPIClient:
     def resume_bot(self) -> dict | None:
         return self._post("/api/bot/resume")
 
+    def reload_scheduler(self) -> dict | None:
+        return self._post("/api/scheduler/reload")
+
     # ------------------------------------------------------------------
     # Health check
     # ------------------------------------------------------------------

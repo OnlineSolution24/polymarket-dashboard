@@ -346,4 +346,32 @@ def create_app(config: AppConfig) -> FastAPI:
         logger.info("Platform config updated via API")
         return BotActionResponse(ok=True, message="Config saved")
 
+    @app.post("/api/scheduler/reload", dependencies=[Depends(verify_api_key)])
+    def reload_scheduler():
+        """Stop and restart the scheduler with current config."""
+        try:
+            from services.scheduler import _scheduler, start_scheduler, _lock
+            import services.scheduler as sched_module
+
+            with _lock:
+                if _scheduler is not None:
+                    _scheduler.shutdown(wait=False)
+                    sched_module._scheduler = None
+                    logger.info("Scheduler stopped for reload")
+
+            start_scheduler(config)
+            logger.info("Scheduler reloaded with new config")
+
+            try:
+                from services.telegram_alerts import get_alerts
+                alerts = get_alerts(config)
+                alerts.send("🔄 <b>Scheduler neu geladen</b> (via Dashboard)")
+            except Exception:
+                pass
+
+            return BotActionResponse(ok=True, message="Scheduler reloaded")
+        except Exception as e:
+            logger.error(f"Scheduler reload failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     return app

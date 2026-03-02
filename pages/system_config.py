@@ -112,7 +112,12 @@ def render():
 
         result = client.save_config(config)
         if result and result.get("ok"):
-            st.success("Konfiguration gespeichert! Änderungen wirken beim nächsten Bot-Neustart.")
+            # Auto-reload scheduler so changes take effect immediately
+            reload = client.reload_scheduler()
+            if reload and reload.get("ok"):
+                st.success("Konfiguration gespeichert & Scheduler neu geladen! Änderungen sind sofort aktiv.")
+            else:
+                st.success("Konfiguration gespeichert! Scheduler-Reload fehlgeschlagen — Änderungen wirken beim nächsten Bot-Neustart.")
         else:
             st.error("Fehler beim Speichern.")
 
@@ -154,11 +159,42 @@ def render():
                 else:
                     result = client.save_config(parsed)
                     if result and result.get("ok"):
-                        st.success("YAML gespeichert!")
+                        reload = client.reload_scheduler()
+                        if reload and reload.get("ok"):
+                            st.success("YAML gespeichert & Scheduler neu geladen!")
+                        else:
+                            st.success("YAML gespeichert! Scheduler-Reload fehlgeschlagen — Änderungen wirken beim nächsten Bot-Neustart.")
                     else:
                         st.error("Fehler beim Speichern.")
             except yaml.YAMLError as e:
                 st.error(f"YAML Fehler: {e}")
 
     st.divider()
-    st.caption("Änderungen werden beim nächsten Scheduler-Zyklus wirksam. Für sofortige Wirkung: Bot neu starten.")
+
+    # --- Manual Scheduler Reload ---
+    st.subheader("Bot-Steuerung")
+    rc1, rc2, rc3 = st.columns(3)
+    with rc1:
+        if st.button("Scheduler neu laden", type="secondary"):
+            reload = client.reload_scheduler()
+            if reload and reload.get("ok"):
+                st.success("Scheduler neu geladen!")
+            else:
+                st.error("Scheduler-Reload fehlgeschlagen.")
+    with rc2:
+        if st.button("Bot pausieren", type="secondary"):
+            result = client.pause_bot()
+            if result and result.get("ok"):
+                st.warning("Bot pausiert!")
+            else:
+                st.error("Fehler beim Pausieren.")
+    with rc3:
+        if st.button("Bot fortsetzen", type="primary"):
+            result = client.resume_bot()
+            if result and result.get("ok"):
+                st.success("Bot läuft wieder!")
+            else:
+                st.error("Fehler beim Fortsetzen.")
+
+    st.divider()
+    st.caption("Konfigurationsänderungen laden den Scheduler automatisch neu.")
