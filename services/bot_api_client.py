@@ -55,6 +55,39 @@ class BotAPIClient:
             logger.error(f"API request failed: {path} → {e}")
             return None
 
+    def _put(self, path: str, json_body: dict = None) -> dict | None:
+        try:
+            resp = httpx.put(
+                f"{self.base_url}{path}",
+                headers=self._headers,
+                json=json_body,
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"API error {e.response.status_code}: {path}")
+            return None
+        except Exception as e:
+            logger.error(f"API request failed: {path} → {e}")
+            return None
+
+    def _delete(self, path: str) -> dict | None:
+        try:
+            resp = httpx.delete(
+                f"{self.base_url}{path}",
+                headers=self._headers,
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"API error {e.response.status_code}: {path}")
+            return None
+        except Exception as e:
+            logger.error(f"API request failed: {path} → {e}")
+            return None
+
     # ------------------------------------------------------------------
     # Read endpoints
     # ------------------------------------------------------------------
@@ -124,6 +157,55 @@ class BotAPIClient:
 
     def reload_scheduler(self) -> dict | None:
         return self._post("/api/scheduler/reload")
+
+    # ------------------------------------------------------------------
+    # Strategy endpoints
+    # ------------------------------------------------------------------
+
+    def get_strategies(self, status: str = None) -> list:
+        params = {}
+        if status:
+            params["status"] = status
+        return self._get("/api/strategies", params) or []
+
+    def get_strategy(self, strategy_id: str) -> dict | None:
+        return self._get(f"/api/strategies/{strategy_id}")
+
+    def create_strategy(self, data: dict) -> dict | None:
+        return self._post("/api/strategies", data)
+
+    def update_strategy_status(self, strategy_id: str, status: str, approved_by: str = "user") -> dict | None:
+        return self._put(f"/api/strategies/{strategy_id}/status", {"status": status, "approved_by": approved_by})
+
+    def delete_strategy(self, strategy_id: str) -> dict | None:
+        return self._delete(f"/api/strategies/{strategy_id}")
+
+    # ------------------------------------------------------------------
+    # Backtest endpoints
+    # ------------------------------------------------------------------
+
+    def run_backtest(self, strategy_id: str) -> dict | None:
+        return self._post(f"/api/backtest/{strategy_id}")
+
+    def get_backtest_results(self, strategy_id: str) -> dict | None:
+        return self._get(f"/api/backtest/{strategy_id}/results")
+
+    # ------------------------------------------------------------------
+    # Analytics endpoints
+    # ------------------------------------------------------------------
+
+    def get_patterns(self) -> dict | None:
+        return self._get("/api/analytics/patterns")
+
+    def get_strategy_signals(self, strategy_id: str) -> list:
+        return self._get(f"/api/analytics/strategy-signals/{strategy_id}") or []
+
+    # ------------------------------------------------------------------
+    # Snapshot endpoints
+    # ------------------------------------------------------------------
+
+    def get_snapshots(self, market_id: str, hours: int = 48) -> list:
+        return self._get(f"/api/snapshots/{market_id}", {"hours": hours}) or []
 
     # ------------------------------------------------------------------
     # Health check

@@ -97,3 +97,18 @@ scheduler:
   daily_summary:
     enabled: true
     hour: 20                           # 20:00 UTC
+  snapshot_cleanup:
+    enabled: true
+    interval_hours: 24
+
+# --- Strategy Discovery ---
+strategy:
+  max_active_strategies: 5
+  min_confidence_score: 0.5            # Min backtest confidence to validate
+  retire_after_trades: 50              # Retire after 50 live trades
+  retire_on_drawdown_pct: 20           # Retire if >20% drawdown
+
+# --- MCP Server ---
+mcp:
+  enabled: true
+  bot_api_internal_url: "http://polymarket-bot:8000"

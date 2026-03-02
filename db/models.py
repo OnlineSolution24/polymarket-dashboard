@@ -1,9 +1,9 @@
 """
-SQLite table definitions (9 tables).
+SQLite table definitions (12 tables).
 Each table has a CREATE TABLE statement and helper CRUD functions.
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 TABLES = {
     "schema_version": """
@@ -134,6 +134,65 @@ TABLES = {
             expires_at      TIMESTAMP NOT NULL
         )
     """,
+
+    # --- Strategy Discovery Tables ---
+
+    "strategies": """
+        CREATE TABLE IF NOT EXISTS strategies (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            version         INTEGER DEFAULT 1,
+            description     TEXT,
+            definition      TEXT NOT NULL,
+            status          TEXT DEFAULT 'draft',
+            category        TEXT,
+            discovered_by   TEXT,
+            approved_by     TEXT,
+            backtest_pnl        REAL,
+            backtest_win_rate   REAL,
+            backtest_sharpe     REAL,
+            backtest_max_dd     REAL,
+            backtest_trades     INTEGER,
+            backtest_results    TEXT,
+            live_pnl            REAL DEFAULT 0,
+            live_win_rate       REAL,
+            live_trades         INTEGER DEFAULT 0,
+            confidence_score    REAL DEFAULT 0,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            retired_at      TIMESTAMP
+        )
+    """,
+
+    "strategy_trades": """
+        CREATE TABLE IF NOT EXISTS strategy_trades (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id     TEXT NOT NULL,
+            trade_id        INTEGER,
+            market_id       TEXT NOT NULL,
+            side            TEXT NOT NULL,
+            entry_price     REAL,
+            exit_price      REAL,
+            amount_usd      REAL,
+            pnl             REAL,
+            result          TEXT,
+            is_backtest     INTEGER DEFAULT 0,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
+
+    "market_snapshots": """
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id       TEXT NOT NULL,
+            yes_price       REAL,
+            no_price        REAL,
+            volume          REAL,
+            liquidity       REAL,
+            sentiment_score REAL,
+            snapshot_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
 }
 
 # Indexes for performance
@@ -147,4 +206,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status)",
     "CREATE INDEX IF NOT EXISTS idx_markets_updated ON markets(last_updated DESC)",
     "CREATE INDEX IF NOT EXISTS idx_cache_expires ON response_cache(expires_at)",
+    # Strategy indexes
+    "CREATE INDEX IF NOT EXISTS idx_strategies_status ON strategies(status)",
+    "CREATE INDEX IF NOT EXISTS idx_strategies_confidence ON strategies(confidence_score DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_strategy_trades_strategy ON strategy_trades(strategy_id)",
+    "CREATE INDEX IF NOT EXISTS idx_strategy_trades_trade ON strategy_trades(trade_id)",
+    # Market snapshot indexes
+    "CREATE INDEX IF NOT EXISTS idx_snapshots_market_time ON market_snapshots(market_id, snapshot_at DESC)",
 ]

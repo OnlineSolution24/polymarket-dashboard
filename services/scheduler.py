@@ -105,6 +105,12 @@ def start_scheduler(config: AppConfig) -> None:
                 id="cache_cleanup", replace_existing=True,
             )
 
+            # Snapshot cleanup (daily, remove snapshots older than 30 days)
+            _scheduler.add_job(
+                _job_cleanup_snapshots, "interval", hours=24,
+                id="snapshot_cleanup", replace_existing=True,
+            )
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
@@ -135,7 +141,18 @@ def _job_refresh_markets(config: AppConfig):
                  datetime.utcnow().isoformat()),
             )
 
-        logger.info(f"Market refresh: {len(markets)} markets updated")
+        # Also save snapshots for historical analysis
+        for market in markets:
+            engine.execute(
+                """INSERT INTO market_snapshots
+                   (market_id, yes_price, no_price, volume, liquidity, sentiment_score, snapshot_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (market["id"], market.get("yes_price", 0), market.get("no_price", 0),
+                 market.get("volume", 0), market.get("liquidity", 0),
+                 None, datetime.utcnow().isoformat()),
+            )
+
+        logger.info(f"Market refresh: {len(markets)} markets updated + snapshots saved")
     except Exception as e:
         logger.error(f"Market refresh failed: {e}")
 
@@ -330,3 +347,15 @@ def _job_cleanup_cache():
         logger.debug("Cache cleanup completed")
     except Exception as e:
         logger.error(f"Cache cleanup failed: {e}")
+
+
+def _job_cleanup_snapshots():
+    """Remove market snapshots older than 30 days."""
+    try:
+        from db import engine
+        engine.execute(
+            "DELETE FROM market_snapshots WHERE snapshot_at < datetime('now', '-30 days')"
+        )
+        logger.debug("Snapshot cleanup completed")
+    except Exception as e:
+        logger.error(f"Snapshot cleanup failed: {e}")
