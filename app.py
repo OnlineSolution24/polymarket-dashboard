@@ -294,14 +294,14 @@ from pages import (
 pages = [
     st.Page(home.render, title="Dashboard", icon="🏠", default=True, url_path="dashboard"),
     st.Page(live_monitoring.render, title="Live Monitoring", icon="📈", url_path="monitoring"),
-    st.Page(execution_control.render, title="Execution", icon="⚡", url_path="execution"),
+    st.Page(execution_control.render, title="Trade Execution", icon="⚡", url_path="execution"),
     st.Page(strategies.render, title="Strategien", icon="🎯", url_path="strategies"),
     st.Page(suggestions.render, title="Vorschläge", icon="💡", url_path="suggestions"),
     st.Page(agent_manager.render, title="Agent Manager", icon="🤖", url_path="agents"),
-    st.Page(cost_tracker_ui.render, title="Cost Tracker", icon="💰", url_path="costs"),
+    st.Page(cost_tracker_ui.render, title="Kosten Tracker", icon="💰", url_path="costs"),
     st.Page(backtesting_ui.render, title="Backtesting", icon="📊", url_path="backtesting"),
-    st.Page(ml_improvement.render, title="ML Improvement", icon="🧠", url_path="ml"),
-    st.Page(system_config.render, title="System Config", icon="⚙️", url_path="config"),
+    st.Page(ml_improvement.render, title="ML Optimierung", icon="🧠", url_path="ml"),
+    st.Page(system_config.render, title="System Konfig", icon="⚙️", url_path="config"),
     st.Page(security_setup.render, title="Security & Setup", icon="🔒", url_path="security"),
 ]
 
@@ -310,10 +310,14 @@ nav = st.navigation(pages)
 # --- Sidebar (always visible) ---
 with st.sidebar:
     st.markdown("""
-    <div style="text-align:center; padding: 8px 0 4px 0;">
-        <span style="font-size: 2rem;">📊</span><br>
-        <span style="font-size: 1.1rem; font-weight: 700; color: #00D4AA;">Polymarket</span><br>
-        <span style="font-size: 0.75rem; color: #5A6478; letter-spacing: 0.1em;">AGENT DASHBOARD</span>
+    <div style="text-align:center; padding: 12px 0 8px 0;">
+        <div style="font-size: 2.2rem; margin-bottom: 4px;">📊</div>
+        <div style="font-size: 1.2rem; font-weight: 700; color: #00D4AA; letter-spacing: -0.01em;">
+            Polymarket
+        </div>
+        <div style="font-size: 0.7rem; color: #5A6478; letter-spacing: 0.15em; margin-top: 2px;">
+            AGENT DASHBOARD
+        </div>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
@@ -332,42 +336,60 @@ with st.sidebar:
         trading_mode = status.get("trading_mode", "?")
         bot_paused = status.get("bot_paused", False)
 
-        # Bot connection indicator
-        mode_color = {"paper": "#FFB74D", "semi-auto": "#448AFF", "full-auto": "#00D4AA"}.get(trading_mode, "#888")
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
-                    padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
-            <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Bot Status</div>
-            <div style="color: {'#FF5252' if bot_paused else '#00D4AA'}; font-size: 1.2rem; font-weight: 700;">
-                {'PAUSIERT' if bot_paused else 'AKTIV'}
-            </div>
-            <div style="color: {mode_color}; font-size: 0.75rem; margin-top: 4px;">Mode: {trading_mode}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Mode styling
+        mode_styles = {
+            "paper": ("#FFB74D", "rgba(255,183,77,0.08)", "Paper"),
+            "semi-auto": ("#448AFF", "rgba(68,138,255,0.08)", "Semi-Auto"),
+            "full-auto": ("#00D4AA", "rgba(0,212,170,0.08)", "Full-Auto"),
+        }
+        mode_color, mode_bg, mode_label = mode_styles.get(trading_mode, ("#888", "rgba(136,136,136,0.08)", trading_mode))
+        status_color = "#FF5252" if bot_paused else "#00D4AA"
+        status_dot = "🔴" if bot_paused else "🟢"
+        status_label = "Pausiert" if bot_paused else "Aktiv"
 
+        # Combined status card
         st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
-                    padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
-            <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Aktive Agents</div>
-            <div style="color: #00D4AA; font-size: 1.5rem; font-weight: 700;">{active_agents}</div>
-        </div>
-        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 10px;
-                    padding: 14px; margin-bottom: 10px; border: 1px solid rgba(0,212,170,0.1);">
-            <div style="color: #5A6478; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;">Kosten heute</div>
-            <div style="color: {'#FF5252' if cost_today > 4.0 else '#FFB74D' if cost_today > 2.0 else '#E8ECF1'};
-                        font-size: 1.5rem; font-weight: 700;">${cost_today:.2f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if pending > 0:
-            st.markdown(f"""
-            <div style="background: rgba(255, 183, 77, 0.1); border-radius: 10px;
-                        padding: 14px; margin-bottom: 10px; border-left: 3px solid #FFB74D;">
-                <div style="color: #FFB74D; font-size: 0.85rem; font-weight: 600;">
-                    {pending} offene Vorschläge
+        <div style="background: linear-gradient(135deg, #1A1F2E, #1E2538); border-radius: 12px;
+                    padding: 16px; margin-bottom: 12px; border: 1px solid rgba(0,212,170,0.12);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <div>
+                    <div style="color: #5A6478; font-size: 0.65rem; text-transform: uppercase;
+                                letter-spacing: 0.1em; margin-bottom: 2px;">Bot Status</div>
+                    <div style="color: {status_color}; font-size: 1.1rem; font-weight: 700;">
+                        {status_dot} {status_label}
+                    </div>
+                </div>
+                <div style="background: {mode_bg}; border: 1px solid {mode_color}33;
+                            border-radius: 20px; padding: 4px 12px;">
+                    <span style="color: {mode_color}; font-size: 0.7rem; font-weight: 600;">{mode_label}</span>
                 </div>
             </div>
-            """, unsafe_allow_html=True)
+            <div style="display: flex; gap: 12px;">
+                <div style="flex: 1; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px; text-align: center;">
+                    <div style="color: #5A6478; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em;">Agents</div>
+                    <div style="color: #00D4AA; font-size: 1.3rem; font-weight: 700;">{active_agents}</div>
+                </div>
+                <div style="flex: 1; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px; text-align: center;">
+                    <div style="color: #5A6478; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em;">Kosten</div>
+                    <div style="color: {'#FF5252' if cost_today > 4.0 else '#FFB74D' if cost_today > 2.0 else '#E8ECF1'};
+                                font-size: 1.3rem; font-weight: 700;">${cost_today:.2f}</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Alerts section
+        alerts_html = ""
+        if pending > 0:
+            alerts_html += f"""
+            <div style="background: rgba(255,183,77,0.08); border-radius: 8px;
+                        padding: 10px 12px; margin-bottom: 8px; border-left: 3px solid #FFB74D;
+                        display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 1rem;">💡</span>
+                <span style="color: #FFB74D; font-size: 0.8rem; font-weight: 600;">
+                    {pending} offene Vorschläge
+                </span>
+            </div>"""
 
         circuit_active = False
         if paused_until:
@@ -380,32 +402,36 @@ with st.sidebar:
                 pass
 
         if circuit_active:
-            st.markdown("""
-            <div style="background: rgba(255, 82, 82, 0.1); border-radius: 10px;
-                        padding: 14px; margin-bottom: 10px; border-left: 3px solid #FF5252;
+            alerts_html += """
+            <div style="background: rgba(255,82,82,0.08); border-radius: 8px;
+                        padding: 10px 12px; margin-bottom: 8px; border-left: 3px solid #FF5252;
+                        display: flex; align-items: center; gap: 8px;
                         animation: pulse 2s infinite;">
-                <div style="color: #FF5252; font-size: 0.85rem; font-weight: 700;">
-                    CIRCUIT BREAKER AKTIV
-                </div>
+                <span style="font-size: 1rem;">🚨</span>
+                <span style="color: #FF5252; font-size: 0.8rem; font-weight: 700;">
+                    Circuit Breaker Aktiv
+                </span>
             </div>
-            <style>
-                @keyframes pulse { 0%,100% {opacity:1;} 50% {opacity:0.7;} }
-            </style>
-            """, unsafe_allow_html=True)
+            <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}</style>"""
+
+        if alerts_html:
+            st.markdown(alerts_html, unsafe_allow_html=True)
     else:
         st.markdown("""
-        <div style="background: rgba(255, 82, 82, 0.1); border-radius: 10px;
-                    padding: 14px; margin-bottom: 10px; border-left: 3px solid #FF5252;">
-            <div style="color: #FF5252; font-size: 0.85rem; font-weight: 600;">
+        <div style="background: rgba(255,82,82,0.08); border-radius: 10px;
+                    padding: 14px; margin-bottom: 12px; border-left: 3px solid #FF5252;
+                    display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 1rem;">⚠️</span>
+            <span style="color: #FF5252; font-size: 0.8rem; font-weight: 600;">
                 Bot nicht erreichbar
-            </div>
+            </span>
         </div>
         """, unsafe_allow_html=True)
 
     st.divider()
     st.markdown("""
-    <div style="text-align: center; color: #3A4258; font-size: 0.65rem; padding-top: 4px;">
-        v2.0 &middot; Remote Monitoring &middot; REST API
+    <div style="text-align: center; color: #3A4258; font-size: 0.6rem; padding-top: 2px;">
+        v2.0 · Polymarket Agent Platform
     </div>
     """, unsafe_allow_html=True)
 
