@@ -37,9 +37,10 @@ class BaseAgent(ABC):
         """
         ...
 
-    def think(self, prompt: str) -> Optional[str]:
+    def think(self, prompt: str, task_type: str = "default") -> Optional[str]:
         """
-        Send a prompt to OpenClaw via Telegram and get a response.
+        Send a prompt to an LLM and get a response.
+        Uses OpenRouter API directly. Falls back to Telegram Bridge if available.
         Checks budget before sending. Logs cost after response.
         """
         # Check budget
@@ -48,31 +49,50 @@ class BaseAgent(ABC):
             self.log("warn", f"Budget erschöpft: {budget_status['reason']}")
             return None
 
-        # Build full prompt with agent context
-        full_prompt = (
-            f"[Agent: {self.name} | Rolle: {self.role}]\n"
+        # Build system prompt from agent persona
+        system_prompt = (
+            f"Du bist {self.name}, ein {self.role} Agent.\n"
             f"{self.config.persona}\n\n"
-            f"---\n{prompt}"
+            f"Antworte immer auf Deutsch. Sei präzise und analytisch."
         )
 
-        # Send via bridge
-        if self.bridge and self.bridge.is_connected():
+        response = None
+
+        # 1. Try direct LLM call via OpenRouter
+        try:
+            from services.llm_client import call_llm
+            response = call_llm(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                task_type=task_type,
+            )
+            if response:
+                self.log("debug", f"LLM response via OpenRouter ({len(response)} chars)")
+        except Exception as e:
+            self.log("warn", f"OpenRouter call failed: {e}")
+
+        # 2. Fallback: Telegram Bridge
+        if not response and self.bridge and self.bridge.is_connected():
+            full_prompt = f"{system_prompt}\n\n---\n{prompt}"
             response = self.bridge.send_and_wait(full_prompt, timeout=120)
-        else:
-            self.log("warn", "Telegram Bridge nicht verbunden. Verwende Mock-Response.")
-            response = f"[Mock] Antwort auf: {prompt[:100]}..."
+            if response:
+                self.log("debug", "LLM response via Telegram Bridge")
+
+        # 3. No LLM available
+        if not response:
+            self.log("error", "Kein LLM verfügbar (OpenRouter + Telegram Bridge fehlgeschlagen)")
+            return None
 
         # Log cost
-        if response:
-            tokens_in = estimate_tokens(full_prompt)
-            tokens_out = estimate_tokens(response)
-            log_cost(
-                provider=self.config.model,
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                agent_id=self.id,
-                endpoint="telegram_bridge",
-            )
+        tokens_in = estimate_tokens(prompt)
+        tokens_out = estimate_tokens(response)
+        log_cost(
+            provider=self.config.model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            agent_id=self.id,
+            endpoint="openrouter",
+        )
 
         return response
 
