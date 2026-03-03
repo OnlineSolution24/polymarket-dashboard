@@ -25,7 +25,7 @@ alerts:
   enabled: true
   on_budget_warning: true
   on_circuit_breaker: true
-  on_new_suggestion: true
+  on_new_suggestion: false
   on_trade_executed: true
   on_agent_error: true
   on_daily_summary: true
