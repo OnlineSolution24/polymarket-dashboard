@@ -247,7 +247,21 @@ class TraderAgent(BaseAgent):
             from services.polymarket_client import PolymarketService
             service = PolymarketService(config)
 
-            token_id = market_id  # In production, resolve from market tokens
+            # Resolve correct CLOB token ID from market data
+            market_row = engine.query_one(
+                "SELECT yes_token_id, no_token_id FROM markets WHERE id = ?",
+                (market_id,),
+            )
+            if not market_row:
+                self._finalize_trade(trade_id, "failed", payload, error="Market not found in DB")
+                self.log("error", f"Market {market_id[:30]} nicht in DB gefunden")
+                return False
+
+            token_id = market_row.get("yes_token_id") if side == "YES" else market_row.get("no_token_id")
+            if not token_id:
+                self._finalize_trade(trade_id, "failed", payload, error="No CLOB token ID available")
+                self.log("error", f"Kein CLOB Token-ID für {market_id[:30]} (side={side})")
+                return False
 
             result = service.place_market_order(
                 token_id=token_id,

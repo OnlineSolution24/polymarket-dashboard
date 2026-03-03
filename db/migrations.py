@@ -17,6 +17,11 @@ def initialize_database() -> None:
     for index_sql in INDEXES:
         conn.execute(index_sql)
 
+    # Run migrations if needed
+    current = _get_schema_version_raw(conn)
+    if current < 3:
+        _upgrade_to_v3(conn)
+
     # Set schema version
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
@@ -29,6 +34,40 @@ def initialize_database() -> None:
         conn.execute("INSERT INTO circuit_breaker (id, consecutive_losses) VALUES (1, 0)")
 
     conn.commit()
+
+
+def _get_schema_version_raw(conn) -> int:
+    """Get schema version directly from connection."""
+    try:
+        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        return row["version"] if row else 0
+    except Exception:
+        return 0
+
+
+def _upgrade_to_v3(conn) -> None:
+    """Add Gamma API fields to markets table."""
+    new_columns = [
+        ("yes_token_id", "TEXT"),
+        ("no_token_id", "TEXT"),
+        ("best_bid", "REAL"),
+        ("best_ask", "REAL"),
+        ("spread", "REAL"),
+        ("volume_24h", "REAL"),
+        ("volume_1w", "REAL"),
+        ("volume_1m", "REAL"),
+        ("last_trade_price", "REAL"),
+        ("accepting_orders", "INTEGER DEFAULT 1"),
+        ("bid_ask_spread", "REAL"),
+        ("book_imbalance", "REAL"),
+        ("bid_depth", "REAL"),
+        ("ask_depth", "REAL"),
+    ]
+    for col_name, col_type in new_columns:
+        try:
+            conn.execute(f"ALTER TABLE markets ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass  # Column already exists
 
 
 def get_schema_version() -> int:

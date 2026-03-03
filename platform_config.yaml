@@ -54,7 +54,7 @@ cache:
 # --- Trading Configuration ---
 # Controls how the bot executes trades.
 trading:
-  mode: "paper"                          # paper | semi-auto | full-auto
+  mode: "full-auto"                       # paper | semi-auto | full-auto
   capital_usd: 100.00                    # Total trading capital available
   limits:
     max_position_pct: 5                  # Max 5% of capital per trade
@@ -78,7 +78,7 @@ polymarket:
 scheduler:
   market_refresh:
     enabled: true
-    interval_minutes: 30
+    interval_minutes: 15
   sentiment_update:
     enabled: true
     interval_minutes: 60
@@ -107,6 +107,14 @@ strategy:
   min_confidence_score: 0.5            # Min backtest confidence to validate
   retire_after_trades: 50              # Retire after 50 live trades
   retire_on_drawdown_pct: 20           # Retire if >20% drawdown
+
+# --- Gamma API Settings ---
+gamma_api:
+  base_url: "https://gamma-api.polymarket.com"
+  markets_limit: 100
+  min_volume_usd: 1000
+  min_liquidity_usd: 500
+  timeout_seconds: 30
 
 # --- MCP Server ---
 mcp:

@@ -121,7 +121,7 @@ def start_scheduler(config: AppConfig) -> None:
 
 
 def _job_refresh_markets(config: AppConfig):
-    """Refresh Polymarket data."""
+    """Refresh Polymarket data via Gamma API + compute order book signals."""
     try:
         from services.polymarket_client import PolymarketService
         from db import engine
@@ -129,19 +129,29 @@ def _job_refresh_markets(config: AppConfig):
         service = PolymarketService(config)
         markets = service.fetch_markets()
 
+        now = datetime.utcnow().isoformat()
+
         for market in markets:
             engine.execute(
                 """INSERT OR REPLACE INTO markets
-                   (id, question, slug, yes_price, no_price, volume, liquidity, end_date, category, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, question, slug, yes_price, no_price, volume, liquidity,
+                    end_date, category, yes_token_id, no_token_id,
+                    best_bid, best_ask, spread, volume_24h, volume_1w, volume_1m,
+                    last_trade_price, accepting_orders, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (market["id"], market["question"], market.get("slug", ""),
                  market.get("yes_price", 0), market.get("no_price", 0),
                  market.get("volume", 0), market.get("liquidity", 0),
                  market.get("end_date"), market.get("category", ""),
-                 datetime.utcnow().isoformat()),
+                 market.get("yes_token_id", ""), market.get("no_token_id", ""),
+                 market.get("best_bid", 0), market.get("best_ask", 0),
+                 market.get("spread", 0), market.get("volume_24h", 0),
+                 market.get("volume_1w", 0), market.get("volume_1m", 0),
+                 market.get("last_trade_price", 0),
+                 market.get("accepting_orders", 1), now),
             )
 
-        # Also save snapshots for historical analysis
+        # Save snapshots for historical analysis
         for market in markets:
             engine.execute(
                 """INSERT INTO market_snapshots
@@ -149,10 +159,34 @@ def _job_refresh_markets(config: AppConfig):
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (market["id"], market.get("yes_price", 0), market.get("no_price", 0),
                  market.get("volume", 0), market.get("liquidity", 0),
-                 None, datetime.utcnow().isoformat()),
+                 None, now),
             )
 
-        logger.info(f"Market refresh: {len(markets)} markets updated + snapshots saved")
+        # Compute order book signals for top 20 markets
+        ob_count = 0
+        try:
+            top_markets = engine.query(
+                "SELECT id, yes_token_id FROM markets "
+                "WHERE yes_token_id IS NOT NULL AND yes_token_id != '' "
+                "ORDER BY volume DESC LIMIT 20"
+            )
+            for m in top_markets:
+                analysis = service.get_order_book_analysis(m["yes_token_id"])
+                if analysis.get("bid_ask_spread") is not None:
+                    engine.execute(
+                        """UPDATE markets SET bid_ask_spread = ?, book_imbalance = ?,
+                           bid_depth = ?, ask_depth = ? WHERE id = ?""",
+                        (analysis["bid_ask_spread"], analysis["book_imbalance"],
+                         analysis["bid_depth"], analysis["ask_depth"], m["id"]),
+                    )
+                    ob_count += 1
+        except Exception as e:
+            logger.error(f"Order book signal computation failed: {e}")
+
+        logger.info(
+            f"Market refresh: {len(markets)} markets updated + snapshots saved + "
+            f"{ob_count} order books analyzed"
+        )
     except Exception as e:
         logger.error(f"Market refresh failed: {e}")
 
