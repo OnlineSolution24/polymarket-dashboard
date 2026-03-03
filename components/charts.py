@@ -53,7 +53,9 @@ def price_bar_chart(markets: list[dict], max_items: int = 20) -> go.Figure:
         y=df["short_q"], x=df["no_price"], name="NO",
         orientation="h", marker_color=COLORS["red"],
     ))
-    fig.update_layout(**CHART_LAYOUT, barmode="group", title="YES/NO Preise", yaxis=dict(autorange="reversed"))
+    layout = {**CHART_LAYOUT, "barmode": "group", "title": "YES/NO Preise"}
+    layout["yaxis"] = {**CHART_LAYOUT.get("yaxis", {}), "autorange": "reversed"}
+    fig.update_layout(**layout)
     return fig
 
 
