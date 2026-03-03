@@ -14,6 +14,8 @@ services:
       - bot-data:/app/data
       - ./platform_config.yaml:/app/platform_config.yaml
       - ./agent_configs:/app/agent_configs
+    networks:
+      - bot-net
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/api/docs'); assert r.status_code == 200"]
       interval: 60s
@@ -22,3 +24,7 @@ services:
 
 volumes:
   bot-data:
+
+networks:
+  bot-net:
+    external: true

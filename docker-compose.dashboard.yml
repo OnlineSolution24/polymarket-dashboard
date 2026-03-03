@@ -8,10 +8,18 @@ services:
     container_name: polymarket-dashboard
     restart: unless-stopped
     env_file: .env
+    environment:
+      - BOT_API_URL=http://polymarket-bot:8000
     ports:
       - "8501:8501"
+    networks:
+      - bot-net
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8501/_stcore/health"]
+      test: ["CMD-SHELL", "python -c 'import httpx; httpx.get(\"http://localhost:8501/_stcore/health\")' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+networks:
+  bot-net:
+    external: true
