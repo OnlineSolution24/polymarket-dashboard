@@ -56,12 +56,29 @@ class PolymarketService:
         return self._mock_markets()
 
     def _fetch_live_markets(self, limit: int) -> list[dict]:
-        """Fetch markets from actual Polymarket API."""
+        """Fetch markets from actual Polymarket API using cursor pagination."""
         try:
-            response = self._public_client.get_markets(limit=limit)
-            markets = []
+            all_data = []
+            next_cursor = None
 
-            data = response if isinstance(response, list) else response.get("data", [])
+            while len(all_data) < limit:
+                if next_cursor:
+                    response = self._public_client.get_markets(next_cursor=next_cursor)
+                else:
+                    response = self._public_client.get_markets()
+
+                if isinstance(response, list):
+                    all_data.extend(response)
+                    break
+                else:
+                    page = response.get("data", [])
+                    all_data.extend(page)
+                    next_cursor = response.get("next_cursor")
+                    if not next_cursor or not page:
+                        break
+
+            markets = []
+            data = all_data
 
             for item in data[:limit]:
                 tokens = item.get("tokens", [])
