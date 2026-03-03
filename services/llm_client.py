@@ -19,14 +19,14 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_MAP = {
     "claude-sonnet": "anthropic/claude-sonnet-4-20250514",
     "claude-opus": "anthropic/claude-opus-4-20250514",
-    "haiku": "anthropic/claude-3-5-haiku-20241022",
-    "gemini-flash": "google/gemini-flash-1.5",
+    "haiku": "anthropic/claude-haiku-3.5",
+    "gemini-flash": "google/gemini-2.0-flash-001",
     "gemini-pro": "google/gemini-2.0-flash-001",
     "gpt-4o-mini": "openai/gpt-4o-mini",
 }
 
 # Fallback if model not in map
-DEFAULT_MODEL = "anthropic/claude-3-5-haiku-20241022"
+DEFAULT_MODEL = "google/gemini-2.0-flash-001"
 
 
 def _resolve_model(config_model: str) -> str:
