@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.dashboard.txt
 COPY app.py config.py ./
 COPY .streamlit/ .streamlit/
 COPY components/ components/
-COPY pages/ pages/
+COPY views/ views/
 COPY services/__init__.py services/__init__.py
 COPY services/bot_api_client.py services/bot_api_client.py
 

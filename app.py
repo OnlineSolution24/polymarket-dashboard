@@ -276,7 +276,7 @@ if not require_auth(config):
     st.stop()
 
 # --- Import Pages ---
-from pages import (
+from views import (
     home,
     security_setup,
     agent_manager,

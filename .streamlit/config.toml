@@ -1,9 +1,6 @@
 [server]
 headless = true
 
-[pages]
-show_default_sidebar_navigation = false
-
 [browser]
 gatherUsageStats = false
 
