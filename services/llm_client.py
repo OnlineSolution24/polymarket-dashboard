@@ -17,8 +17,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Map config model names to OpenRouter model IDs
 MODEL_MAP = {
-    "claude-sonnet": "anthropic/claude-sonnet-4-20250514",
-    "claude-opus": "anthropic/claude-opus-4-20250514",
+    "claude-sonnet": "anthropic/claude-sonnet-4",
+    "claude-opus": "anthropic/claude-opus-4",
     "haiku": "anthropic/claude-3.5-haiku",
     "gemini-flash": "google/gemini-2.5-flash",
     "gemini-pro": "google/gemini-2.5-flash",
