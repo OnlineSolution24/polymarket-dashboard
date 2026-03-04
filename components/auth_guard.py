@@ -37,13 +37,15 @@ def _make_token(password: str) -> str:
 def _render_login_form(config: AppConfig) -> None:
     """Render a centered, styled login form."""
     # Vertical spacer
-    st.markdown("<div style='height: 12vh'></div>", unsafe_allow_html=True)
+    st.markdown("")
+    st.markdown("")
+    st.markdown("")
 
     col1, col2, col3 = st.columns([1.2, 1.6, 1.2])
     with col2:
         # Logo & Title
         st.markdown("""
-        <div style="text-align: center; padding: 0 0 30px 0;">
+        <div style="text-align: center; padding: 0 0 20px 0;">
             <div style="font-size: 4rem; margin-bottom: 8px;">📊</div>
             <div style="font-size: 2rem; font-weight: 700; color: #00D4AA; letter-spacing: -0.02em;">
                 Polymarket
@@ -52,14 +54,6 @@ def _render_login_form(config: AppConfig) -> None:
                 AGENT DASHBOARD
             </div>
         </div>
-        """, unsafe_allow_html=True)
-
-        # Login card
-        st.markdown("""
-        <div style="background: linear-gradient(135deg, #1A1F2E 0%, #1E2538 100%);
-                    border: 1px solid rgba(0, 212, 170, 0.15);
-                    border-radius: 16px; padding: 32px 28px 24px 28px;
-                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);">
         """, unsafe_allow_html=True)
 
         password = st.text_input(
@@ -77,5 +71,3 @@ def _render_login_form(config: AppConfig) -> None:
                 st.rerun()
             else:
                 st.error("Falsches Passwort.")
-
-        st.markdown("</div>", unsafe_allow_html=True)

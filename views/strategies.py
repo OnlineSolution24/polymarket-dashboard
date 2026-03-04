@@ -7,24 +7,33 @@ import json
 import streamlit as st
 from services.bot_api_client import get_bot_client
 
-# Status → color/label mapping
-STATUS_STYLES = {
-    "draft": ("#8892A4", "Draft"),
-    "pending_backtest": ("#FFB74D", "Pending Backtest"),
-    "backtested": ("#448AFF", "Backtested"),
-    "validated": ("#AB47BC", "Validated"),
-    "active": ("#00D4AA", "Active"),
-    "retired": ("#5A6478", "Retired"),
-    "rejected": ("#FF5252", "Rejected"),
+# Status → emoji/label mapping for expander titles (no HTML)
+STATUS_EMOJI = {
+    "draft": ("📝", "Draft"),
+    "pending_backtest": ("⏳", "Pending Backtest"),
+    "backtested": ("🔬", "Backtested"),
+    "validated": ("✅", "Validated"),
+    "active": ("🟢", "Active"),
+    "retired": ("⏸️", "Retired"),
+    "rejected": ("❌", "Rejected"),
+}
+
+# Status → color for HTML badges (used in markdown sections)
+STATUS_COLORS = {
+    "draft": "#8892A4",
+    "pending_backtest": "#FFB74D",
+    "backtested": "#448AFF",
+    "validated": "#AB47BC",
+    "active": "#00D4AA",
+    "retired": "#5A6478",
+    "rejected": "#FF5252",
 }
 
 
-def _status_badge(status: str) -> str:
-    color, label = STATUS_STYLES.get(status, ("#888", status))
-    return (
-        f'<span style="background:{color}20; color:{color}; padding:3px 10px; '
-        f'border-radius:12px; font-size:0.78rem; font-weight:600;">{label}</span>'
-    )
+def _status_label(status: str) -> str:
+    """Plain text status label for expander titles."""
+    emoji, label = STATUS_EMOJI.get(status, ("❓", status))
+    return f"{emoji} {label}"
 
 
 def _metric_card(label: str, value: str, color: str = "#E8ECF1") -> str:
@@ -100,7 +109,7 @@ def render():
         discovered_by = strat.get("discovered_by", "")
         description = strat.get("description", "")
 
-        with st.expander(f"**{name}**  {_status_badge(status)}", expanded=False):
+        with st.expander(f"**{name}**  —  {_status_label(status)}", expanded=False):
             # Description
             if description:
                 st.markdown(f"*{description}*")
