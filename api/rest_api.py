@@ -47,6 +47,18 @@ class StrategyCreate(BaseModel):
     discovered_by: str = "manual"
 
 
+class StrategyUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    hypothesis: Optional[str] = None
+    entry_rules: Optional[list[dict]] = None
+    exit_rules: Optional[list[dict]] = None
+    trade_params: Optional[dict] = None
+    category_filter: Optional[list[str]] = None
+    min_liquidity: Optional[float] = None
+    category: Optional[str] = None
+
+
 class StrategyStatusUpdate(BaseModel):
     status: str  # active, retired, rejected
     approved_by: str = "user"
@@ -469,6 +481,55 @@ def create_app(config: AppConfig) -> FastAPI:
         )
         logger.info(f"Strategy created: {strategy_id} ({body.name})")
         return {"ok": True, "strategy_id": strategy_id}
+
+    @app.put("/api/strategies/{strategy_id}", dependencies=[Depends(verify_api_key)])
+    def update_strategy(strategy_id: str, body: StrategyUpdate):
+        """Update strategy definition, rules, and metadata."""
+        row = engine.query_one("SELECT id, definition FROM strategies WHERE id = ?", (strategy_id,))
+        if not row:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        # Merge with existing definition
+        try:
+            definition = json.loads(row.get("definition") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            definition = {}
+
+        if body.entry_rules is not None:
+            definition["entry_rules"] = body.entry_rules
+        if body.exit_rules is not None:
+            definition["exit_rules"] = body.exit_rules
+        if body.trade_params is not None:
+            definition["trade_params"] = body.trade_params
+        if body.category_filter is not None:
+            definition["category_filter"] = body.category_filter
+        if body.min_liquidity is not None:
+            definition["min_liquidity"] = body.min_liquidity
+        if body.hypothesis is not None:
+            definition["hypothesis"] = body.hypothesis
+        if body.name is not None:
+            definition["name"] = body.name
+        if body.description is not None:
+            definition["description"] = body.description
+
+        # Update DB
+        updates = ["definition = ?", "updated_at = ?"]
+        params = [json.dumps(definition), datetime.utcnow().isoformat()]
+
+        if body.name is not None:
+            updates.append("name = ?")
+            params.append(body.name)
+        if body.description is not None:
+            updates.append("description = ?")
+            params.append(body.description)
+        if body.category is not None:
+            updates.append("category = ?")
+            params.append(body.category)
+
+        params.append(strategy_id)
+        engine.execute(f"UPDATE strategies SET {', '.join(updates)} WHERE id = ?", tuple(params))
+        logger.info(f"Strategy {strategy_id} updated")
+        return BotActionResponse(ok=True, message=f"Strategy {strategy_id} updated")
 
     @app.put("/api/strategies/{strategy_id}/status", dependencies=[Depends(verify_api_key)])
     def update_strategy_status(strategy_id: str, body: StrategyStatusUpdate):

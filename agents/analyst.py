@@ -15,11 +15,19 @@ class AnalystAgent(BaseAgent):
 
         try:
             # Get high-volume, active markets with all available signals
-            markets = engine.query(
-                """SELECT * FROM markets
-                   WHERE volume > 10000 AND accepting_orders = 1
-                   ORDER BY volume DESC LIMIT 10"""
-            )
+            try:
+                markets = engine.query(
+                    """SELECT * FROM markets
+                       WHERE volume > 10000 AND accepting_orders = 1
+                       ORDER BY volume DESC LIMIT 10"""
+                )
+            except Exception:
+                # Fallback if accepting_orders column doesn't exist yet
+                markets = engine.query(
+                    """SELECT * FROM markets
+                       WHERE volume > 10000
+                       ORDER BY volume DESC LIMIT 10"""
+                )
 
             if not markets:
                 self.log("info", "Keine Märkte für Analyse verfügbar.")
