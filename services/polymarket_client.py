@@ -195,8 +195,14 @@ class PolymarketService:
     def get_order_book_analysis(self, token_id: str) -> dict:
         """Analyze order book depth, imbalance, and spread for a token."""
         book = self.get_order_book(token_id)
-        bids = book.get("bids", [])
-        asks = book.get("asks", [])
+
+        # Handle both dict and OrderBookSummary object
+        if isinstance(book, dict):
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+        else:
+            bids = getattr(book, "bids", []) or []
+            asks = getattr(book, "asks", []) or []
 
         if not bids or not asks:
             return {
@@ -204,12 +210,15 @@ class PolymarketService:
                 "bid_depth": 0, "ask_depth": 0,
             }
 
-        best_bid = float(bids[0].get("price", 0))
-        best_ask = float(asks[0].get("price", 0))
+        def _get(obj, key, default=0):
+            return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+        best_bid = float(_get(bids[0], "price", 0))
+        best_ask = float(_get(asks[0], "price", 0))
         spread = best_ask - best_bid if best_ask > best_bid else 0
 
-        bid_depth = sum(float(b.get("size", 0)) for b in bids[:10])
-        ask_depth = sum(float(a.get("size", 0)) for a in asks[:10])
+        bid_depth = sum(float(_get(b, "size", 0)) for b in bids[:10])
+        ask_depth = sum(float(_get(a, "size", 0)) for a in asks[:10])
         total = bid_depth + ask_depth
         imbalance = (bid_depth - ask_depth) / total if total > 0 else 0
 
