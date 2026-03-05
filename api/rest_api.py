@@ -162,7 +162,7 @@ def create_app(config: AppConfig) -> FastAPI:
     def get_markets(
         limit: int = Query(50, ge=1, le=200),
         category: Optional[str] = None,
-        order_by: str = Query("volume", regex="^(volume|yes_price|last_updated)$"),
+        order_by: str = Query("volume", pattern="^(volume|yes_price|last_updated)$"),
     ):
         sql = "SELECT * FROM markets"
         params = []
@@ -288,7 +288,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/suggestions", dependencies=[Depends(verify_api_key)])
     def get_suggestions(
-        status: Optional[str] = Query(None, regex="^(pending|approved|rejected|auto_approved)$"),
+        status: Optional[str] = Query(None, pattern="^(pending|approved|rejected|auto_approved)$"),
         limit: int = Query(50, ge=1, le=200),
     ):
         sql = "SELECT * FROM suggestions"

@@ -69,7 +69,20 @@ class TelegramBridge:
                 self.config.telegram_api_hash,
             )
 
-            await self._client.start()
+            # Use bot_token if available (no interactive auth needed)
+            bot_token = getattr(self.config, "telegram_bot_token", None)
+            if bot_token:
+                await self._client.start(bot_token=bot_token)
+            else:
+                # Non-interactive: only works if session is already authorized
+                await self._client.connect()
+                if not await self._client.is_user_authorized():
+                    logger.warning(
+                        "Telethon session not authorized and no bot_token set. "
+                        "Bridge running without message listener."
+                    )
+                    return
+
             logger.info("Telethon client connected")
 
             # Listen for responses from OpenClaw
