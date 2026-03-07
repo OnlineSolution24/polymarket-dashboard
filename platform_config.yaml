@@ -91,6 +91,9 @@ scheduler:
   ml_retrain:
     enabled: false                     # Enable after enough data
     interval_days: 7
+  strategy_evaluation:
+    enabled: true
+    interval_minutes: 15               # Evaluate active strategies every 15 min
   trader_cycle:
     enabled: true
     interval_minutes: 5                # Check for approved trades every 5 min

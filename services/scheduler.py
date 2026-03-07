@@ -91,6 +91,15 @@ def start_scheduler(config: AppConfig) -> None:
                 id="daily_reset", replace_existing=True,
             )
 
+            # Strategy evaluation (active strategies → trade suggestions)
+            if sched_cfg.get("strategy_evaluation", {}).get("enabled", True):
+                strat_interval = sched_cfg["strategy_evaluation"].get("interval_minutes", 15)
+                _scheduler.add_job(
+                    _job_evaluate_strategies, "interval", minutes=strat_interval,
+                    id="strategy_evaluation", replace_existing=True, args=[config],
+                )
+                logger.info(f"Scheduled: strategy_evaluation every {strat_interval}min")
+
             # Trader cycle (checks for approved suggestions → executes trades)
             trader_interval = sched_cfg.get("trader_cycle", {}).get("interval_minutes", 5)
             _scheduler.add_job(
@@ -252,6 +261,91 @@ def _job_run_agent_cycles(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Agent cycles failed: {e}")
+
+
+def _job_evaluate_strategies(config: AppConfig):
+    """Evaluate active strategies → create trade suggestions for matching markets."""
+    try:
+        from db import engine
+        from services.strategy_evaluator import find_matching_markets, compute_trade_params
+
+        platform_cfg = load_platform_config()
+        trading_cfg = platform_cfg.get("trading", {})
+        strategy_cfg = platform_cfg.get("strategy", {})
+        mode = trading_cfg.get("mode", "paper")
+        capital = trading_cfg.get("capital_usd", 100.0)
+
+        strategies = engine.query(
+            "SELECT * FROM strategies WHERE status = 'active' ORDER BY confidence_score DESC"
+        )
+        if not strategies:
+            return
+
+        max_active = strategy_cfg.get("max_active_strategies", 5)
+        strategies = strategies[:max_active]
+
+        total_suggestions = 0
+        for strategy in strategies:
+            try:
+                import json as _json
+                definition = _json.loads(strategy["definition"]) if isinstance(strategy["definition"], str) else strategy["definition"]
+                trade_params = definition.get("trade_params", {})
+
+                matched = find_matching_markets(definition)
+                if not matched:
+                    continue
+
+                for market in matched:
+                    # Skip if we already have a pending/auto_approved suggestion for this market+strategy
+                    existing = engine.query_one(
+                        "SELECT id FROM suggestions WHERE type = 'trade' AND status IN ('pending', 'auto_approved') "
+                        "AND payload LIKE ? AND payload LIKE ?",
+                        (f'%"market_id": "{market["id"]}"%', f'%"strategy_id": "{strategy["id"]}"%'),
+                    )
+                    if existing:
+                        continue
+
+                    params = compute_trade_params(market, trade_params, capital)
+                    if not params:
+                        continue
+
+                    params["strategy_id"] = strategy["id"]
+                    params["strategy_name"] = strategy["name"]
+
+                    status = "auto_approved" if mode == "full-auto" else "pending"
+                    now = datetime.utcnow().isoformat()
+
+                    engine.execute(
+                        """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            strategy.get("discovered_by", "strategy-evaluator"),
+                            "trade",
+                            f"Strategy '{strategy['name']}': {params['side']} auf '{params['market_question'][:50]}...'",
+                            f"Edge: {params['edge']:.1%} | ${params['amount_usd']:.2f} auf {params['side']} | Strategie: {strategy['name']}",
+                            _json.dumps(params),
+                            status,
+                            now,
+                        ),
+                    )
+
+                    # Track in strategy_trades
+                    engine.execute(
+                        """INSERT INTO strategy_trades (strategy_id, market_id, side, entry_price, amount_usd, is_backtest, created_at)
+                           VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                        (strategy["id"], market["id"], params["side"], params["price"], params["amount_usd"], now),
+                    )
+
+                    total_suggestions += 1
+
+            except Exception as e:
+                logger.error(f"Strategy {strategy['id']} evaluation failed: {e}")
+
+        if total_suggestions > 0:
+            logger.info(f"Strategy evaluation: {total_suggestions} new suggestions from {len(strategies)} active strategies")
+
+    except Exception as e:
+        logger.error(f"Strategy evaluation failed: {e}")
 
 
 def _job_run_trader_cycle(config: AppConfig):
