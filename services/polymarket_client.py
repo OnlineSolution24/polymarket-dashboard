@@ -44,27 +44,14 @@ class PolymarketService:
 
             # Authenticated client (for trading)
             if self.config.polymarket_private_key:
-                import os
                 self._auth_client = ClobClient(
                     self.config.polymarket_host,
                     key=self.config.polymarket_private_key,
                     chain_id=self.config.polymarket_chain_id,
-                    signature_type=2,
+                    signature_type=1,
                     funder=self.config.polymarket_funder or None,
                 )
-                # Use pre-created Builder API credentials if available
-                clob_api_key = os.environ.get("CLOB_API_KEY", "")
-                clob_secret = os.environ.get("CLOB_SECRET", "")
-                clob_passphrase = os.environ.get("CLOB_PASSPHRASE", "")
-                if clob_api_key and clob_secret and clob_passphrase:
-                    from py_clob_client.clob_types import ApiCreds
-                    creds = ApiCreds(
-                        api_key=clob_api_key,
-                        api_secret=clob_secret,
-                        api_passphrase=clob_passphrase,
-                    )
-                else:
-                    creds = self._auth_client.create_or_derive_api_creds()
+                creds = self._auth_client.create_or_derive_api_creds()
                 self._auth_client.set_api_creds(creds)
                 logger.info("Authenticated Polymarket client initialized")
         except ImportError:
