@@ -246,14 +246,16 @@ class PolymarketService:
 
         try:
             from py_clob_client.order_builder.constants import BUY
+            from py_clob_client.clob_types import MarketOrderArgs
 
             # Always BUY the specific outcome token
             # (buying YES token = betting YES, buying NO token = betting NO)
-            order = self._auth_client.create_market_order(
+            order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
                 side=BUY,
             )
+            order = self._auth_client.create_market_order(order_args)
             result = self._auth_client.post_order(order)
             logger.info(f"Order placed: BUY ${amount} on token {token_id[:20]}... (side={side})")
             return {"ok": True, "result": result}
