@@ -48,7 +48,7 @@ class PolymarketService:
                     self.config.polymarket_host,
                     key=self.config.polymarket_private_key,
                     chain_id=self.config.polymarket_chain_id,
-                    signature_type=1,
+                    signature_type=2,
                     funder=self.config.polymarket_funder or None,
                 )
                 creds = self._auth_client.create_or_derive_api_creds()

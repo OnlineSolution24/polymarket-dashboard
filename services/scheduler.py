@@ -67,6 +67,14 @@ def start_scheduler(config: AppConfig) -> None:
                 )
                 logger.info(f"Scheduled: agent_cycles every {interval}min")
 
+            # Chief analysis cycle
+            chief_interval = sched_cfg.get("chief_analysis_interval", 15)
+            _scheduler.add_job(
+                _job_run_chief_cycle, "interval", minutes=chief_interval,
+                id="chief_analysis", replace_existing=True, args=[config],
+            )
+            logger.info(f"Scheduled: chief_analysis every {chief_interval}min")
+
             # ML retraining
             if sched_cfg.get("ml_retrain", {}).get("enabled", False):
                 days = sched_cfg["ml_retrain"].get("interval_days", 7)
@@ -99,6 +107,13 @@ def start_scheduler(config: AppConfig) -> None:
                     id="strategy_evaluation", replace_existing=True, args=[config],
                 )
                 logger.info(f"Scheduled: strategy_evaluation every {strat_interval}min")
+
+            # Strategy scoring (update confidence scores based on live performance)
+            _scheduler.add_job(
+                _job_score_strategies, "interval", hours=1,
+                id="strategy_scoring", replace_existing=True,
+            )
+            logger.info("Scheduled: strategy_scoring every 1h")
 
             # Trader cycle (checks for approved suggestions → executes trades)
             trader_interval = sched_cfg.get("trader_cycle", {}).get("interval_minutes", 5)
@@ -238,6 +253,8 @@ def _job_run_agent_cycles(config: AppConfig):
         for agent_cfg in configs:
             if not agent_cfg.enabled:
                 continue
+            if agent_cfg.role == "chief":
+                continue
 
             # Check budget before running
             budget = check_budget(agent_id=agent_cfg.id)
@@ -261,6 +278,32 @@ def _job_run_agent_cycles(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Agent cycles failed: {e}")
+
+
+def _job_run_chief_cycle(config: AppConfig):
+    """Run only the Chief agent cycle at a separate interval."""
+    try:
+        from config import load_agent_configs
+        from agents.agent_factory import create_agent
+        from services.telegram_bridge import get_bridge
+        from services.cost_tracker import check_budget
+
+        bridge = get_bridge(config)
+
+        for cfg in load_agent_configs():
+            if cfg.role == "chief" and cfg.enabled:
+                budget = check_budget(agent_id=cfg.id)
+                if not budget["allowed"]:
+                    logger.debug(f"Chief {cfg.id} skipped: {budget['reason']}")
+                    return
+
+                agent = create_agent(cfg, bridge)
+                result = agent.run_cycle()
+                logger.debug(f"Chief cycle: {result.get('summary', '')[:100]}")
+                return
+
+    except Exception as e:
+        logger.error(f"Chief cycle failed: {e}")
 
 
 def _job_evaluate_strategies(config: AppConfig):
@@ -348,6 +391,70 @@ def _job_evaluate_strategies(config: AppConfig):
         logger.error(f"Strategy evaluation failed: {e}")
 
 
+def _job_score_strategies():
+    """Update strategy confidence scores based on live trade performance."""
+    try:
+        from db import engine
+        import json as _json
+
+        platform_cfg = load_platform_config()
+        strategy_cfg = platform_cfg.get("strategy", {})
+        retire_trades = strategy_cfg.get("retire_after_trades", 50)
+        retire_dd = strategy_cfg.get("retire_on_drawdown_pct", 20)
+
+        strategies = engine.query("SELECT * FROM strategies WHERE status = 'active'")
+        for strategy in strategies:
+            trades = engine.query(
+                "SELECT pnl, result FROM strategy_trades st "
+                "JOIN trades t ON st.trade_id = t.id "
+                "WHERE st.strategy_id = ? AND t.result IS NOT NULL",
+                (strategy["id"],),
+            )
+            if not trades:
+                continue
+
+            total = len(trades)
+            wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
+            total_pnl = sum(t.get("pnl") or 0 for t in trades)
+            win_rate = wins / total if total > 0 else 0
+
+            # Confidence = weighted combination of win rate and profitability
+            pnl_score = min(max(total_pnl / 10, -1), 1)  # Normalize PnL to [-1, 1]
+            confidence = round(0.6 * win_rate + 0.4 * (pnl_score + 1) / 2, 3)
+
+            engine.execute(
+                "UPDATE strategies SET live_trades = ?, live_pnl = ?, live_win_rate = ?, "
+                "confidence_score = ?, updated_at = ? WHERE id = ?",
+                (total, round(total_pnl, 2), round(win_rate, 3), confidence,
+                 datetime.utcnow().isoformat(), strategy["id"]),
+            )
+
+            # Auto-retire on drawdown or trade limit
+            max_dd = 0
+            running_pnl = 0
+            peak = 0
+            for t in trades:
+                running_pnl += t.get("pnl") or 0
+                peak = max(peak, running_pnl)
+                dd = peak - running_pnl
+                max_dd = max(max_dd, dd)
+
+            capital = platform_cfg.get("trading", {}).get("capital_usd", 100)
+            dd_pct = (max_dd / capital * 100) if capital > 0 else 0
+
+            if total >= retire_trades or dd_pct >= retire_dd:
+                engine.execute(
+                    "UPDATE strategies SET status = 'retired', retired_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), strategy["id"]),
+                )
+                logger.info(f"Strategy {strategy['id']} retired (trades={total}, dd={dd_pct:.1f}%)")
+
+        logger.debug(f"Strategy scoring: updated {len(strategies)} strategies")
+
+    except Exception as e:
+        logger.error(f"Strategy scoring failed: {e}")
+
+
 def _job_run_trader_cycle(config: AppConfig):
     """Run the Trader agent cycle (process approved suggestions → execute trades)."""
     try:
@@ -403,12 +510,23 @@ def _job_check_budgets(config: AppConfig):
 
 
 def _job_ml_retrain():
-    """Automatically retrain ML models."""
+    """Automatically retrain ML models (requires min 20 completed trades)."""
     try:
+        from db import engine
+
+        # Check minimum data threshold
+        row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades WHERE result IS NOT NULL AND pnl IS NOT NULL"
+        )
+        count = row["cnt"] if row else 0
+        if count < 20:
+            logger.debug(f"ML retrain skipped: only {count}/20 completed trades")
+            return
+
         from ml.trainer import train_models
         results = train_models()
         if results.get("ok"):
-            logger.info("ML auto-retrain completed successfully")
+            logger.info(f"ML auto-retrain completed ({count} trades)")
         else:
             logger.warning(f"ML auto-retrain: {results.get('error', 'unknown')}")
     except Exception as e:

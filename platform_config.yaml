@@ -88,9 +88,10 @@ scheduler:
   agent_health_check:
     enabled: true
     interval_minutes: 15
+  chief_analysis_interval: 240
   ml_retrain:
-    enabled: false                     # Enable after enough data
-    interval_days: 7
+    enabled: true                      # Auto-skips if <20 completed trades
+    interval_days: 1
   strategy_evaluation:
     enabled: true
     interval_minutes: 15               # Evaluate active strategies every 15 min
