@@ -16,6 +16,11 @@ def render():
 
     st.caption("Der Chief Agent analysiert automatisch und erstellt Vorschläge. Hier kannst du sie genehmigen oder ablehnen.")
 
+    # Show code changes count if any pending
+    pending_code = client.get_pending_code_changes()
+    if pending_code:
+        st.warning(f"🔧 {len(pending_code)} wartende Code-Anderung(en) — [Anzeigen](/code-changes)")
+
     st.divider()
 
     # --- Pending Suggestions ---

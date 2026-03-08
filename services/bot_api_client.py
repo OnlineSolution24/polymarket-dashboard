@@ -208,6 +208,30 @@ class BotAPIClient:
         return self._get(f"/api/snapshots/{market_id}", {"hours": hours}) or []
 
     # ------------------------------------------------------------------
+    # Code changes (Self-Modification)
+    # ------------------------------------------------------------------
+
+    def get_pending_code_changes(self) -> list:
+        data = self._get("/api/code/pending")
+        return (data or {}).get("pending", [])
+
+    def get_code_change_history(self, status: str = None, limit: int = 50) -> list:
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        data = self._get("/api/code/history", params)
+        return (data or {}).get("changes", [])
+
+    def get_code_change_details(self, change_id: int) -> dict | None:
+        return self._get(f"/api/code/{change_id}")
+
+    def approve_code_change(self, change_id: int, approved: bool, comment: str = None) -> dict | None:
+        return self._post(f"/api/code/{change_id}/approve", {"approved": approved, "user_comment": comment})
+
+    def rollback_code_change(self, change_id: int) -> dict | None:
+        return self._post(f"/api/code/{change_id}/rollback")
+
+    # ------------------------------------------------------------------
     # Health check
     # ------------------------------------------------------------------
 

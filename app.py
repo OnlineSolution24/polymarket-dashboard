@@ -288,6 +288,7 @@ from views import (
     execution_control,
     system_config,
     strategies,
+    code_changes,
 )
 
 # --- Navigation ---
@@ -301,6 +302,7 @@ pages = [
     st.Page(cost_tracker_ui.render, title="Kosten Tracker", icon="💰", url_path="costs"),
     st.Page(backtesting_ui.render, title="Backtesting", icon="📊", url_path="backtesting"),
     st.Page(ml_improvement.render, title="ML Optimierung", icon="🧠", url_path="ml"),
+    st.Page(code_changes.render, title="Code-Anderungen", icon="🔧", url_path="code-changes"),
     st.Page(system_config.render, title="System Konfig", icon="⚙️", url_path="config"),
     st.Page(security_setup.render, title="Security & Setup", icon="🔒", url_path="security"),
 ]
