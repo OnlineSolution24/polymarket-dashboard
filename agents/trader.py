@@ -11,7 +11,7 @@ Supports 3 modes (configured in platform_config.yaml → trading.mode):
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from agents.base_agent import BaseAgent
 from config import AppConfig, load_platform_config
@@ -47,6 +47,7 @@ class TraderAgent(BaseAgent):
             if mode == "full-auto":
                 executed = self._process_auto_approved()
                 executed += self._process_user_approved()
+                self._check_and_execute_hedges()
             elif mode == "semi-auto":
                 executed = self._process_user_approved()
                 self._create_trade_suggestions()
@@ -331,6 +332,120 @@ class TraderAgent(BaseAgent):
             "UPDATE trades SET status = ?, executed_at = ? WHERE id = ?",
             (status, datetime.utcnow().isoformat(), trade_id),
         )
+
+    # ------------------------------------------------------------------
+    # Profit Hedging
+    # ------------------------------------------------------------------
+
+    def _check_and_execute_hedges(self) -> int:
+        """Check open positions for profit-taking opportunities."""
+        trading_cfg = self._get_trading_config()
+        hedge_cfg = trading_cfg.get("hedging", {})
+        if not hedge_cfg.get("enabled", False):
+            return 0
+
+        threshold_pct = hedge_cfg.get("profit_threshold_pct", 15)
+        hedge_amount_pct = hedge_cfg.get("hedge_amount_pct", 50) / 100
+        min_profit_usd = hedge_cfg.get("min_profit_usd", 1.0)
+        cooldown_min = hedge_cfg.get("cooldown_minutes", 60)
+
+        # Get all open positions (executed trades)
+        positions = engine.query(
+            "SELECT id, market_id, side, amount_usd, price, executed_at "
+            "FROM trades WHERE status = 'executed' ORDER BY executed_at"
+        )
+        if not positions:
+            return 0
+
+        hedged = 0
+        for pos in positions:
+            market_id = pos["market_id"]
+            entry_price = pos.get("price") or 0
+            if entry_price <= 0:
+                continue
+
+            # Cooldown: check if we recently hedged this market
+            recent_hedge = engine.query_one(
+                "SELECT id FROM trades WHERE market_id = ? AND user_cmd LIKE 'hedge:%' "
+                "AND executed_at > ?",
+                (market_id, (datetime.utcnow() - timedelta(minutes=cooldown_min)).isoformat()),
+            )
+            if recent_hedge:
+                continue
+
+            # Get current market price
+            market = engine.query_one(
+                "SELECT yes_price, no_price, yes_token_id, no_token_id "
+                "FROM markets WHERE id = ?",
+                (market_id,),
+            )
+            if not market:
+                continue
+
+            current_price = market.get("yes_price") if pos["side"] == "YES" else market.get("no_price")
+            if not current_price or current_price <= 0:
+                continue
+
+            # Calculate profit
+            profit_pct = ((current_price - entry_price) / entry_price) * 100
+            profit_usd = (current_price - entry_price) * (pos["amount_usd"] / entry_price)
+
+            if profit_pct < threshold_pct or profit_usd < min_profit_usd:
+                continue
+
+            # Execute hedge: sell portion of position
+            sell_amount = round(pos["amount_usd"] * hedge_amount_pct, 2)
+            token_id = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
+            if not token_id:
+                continue
+
+            self.log("info",
+                f"Hedging: {pos['side']} Position in {market_id[:30]}... "
+                f"Profit: {profit_pct:.1f}% (${profit_usd:.2f}), selling ${sell_amount:.2f}")
+
+            try:
+                config = AppConfig.from_env()
+                if not config.polymarket_private_key:
+                    self.log("info", f"[PAPER-HEDGE] Wuerde ${sell_amount:.2f} verkaufen")
+                    continue
+
+                from services.polymarket_client import PolymarketService
+                service = PolymarketService(config)
+                result = service.place_sell_order(token_id=token_id, amount=sell_amount)
+
+                if result.get("ok"):
+                    # Record hedge trade
+                    engine.execute(
+                        """INSERT INTO trades
+                           (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at)
+                           VALUES (?, ?, ?, ?, ?, 'executed', ?, ?, ?, ?)""",
+                        (market_id, f"HEDGE: {pos.get('market_question', '')[:50]}",
+                         pos["side"], -sell_amount, current_price,
+                         self.id, f"hedge:{pos['id']}",
+                         datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+                    )
+                    self.log("info", f"Hedge ausgefuehrt: SELL ${sell_amount:.2f} (Profit: {profit_pct:.1f}%)")
+
+                    try:
+                        from services.telegram_alerts import get_alerts
+                        alerts = get_alerts(config)
+                        alerts.send(
+                            f"🛡 <b>Profit-Hedge ausgefuehrt</b>\n"
+                            f"Markt: {market_id[:40]}...\n"
+                            f"Profit: {profit_pct:.1f}% (${profit_usd:.2f})\n"
+                            f"Verkauft: ${sell_amount:.2f} ({pos['side']})"
+                        )
+                    except Exception:
+                        pass
+
+                    hedged += 1
+                else:
+                    self.log("warn", f"Hedge fehlgeschlagen: {result.get('error', '?')}")
+
+            except Exception as e:
+                self.log("error", f"Hedge Exception: {e}")
+
+        return hedged
 
     # ------------------------------------------------------------------
     # Helpers

@@ -264,6 +264,32 @@ class PolymarketService:
             logger.error(f"Order failed: {e}")
             return {"error": str(e)}
 
+    def place_sell_order(self, token_id: str, amount: float) -> dict:
+        """
+        Place a SELL market order for outcome tokens we already hold.
+        Used for profit-taking / hedging.
+        """
+        if not self._auth_client:
+            return {"error": "Authenticated client not configured. Set POLYMARKET_PRIVATE_KEY in .env"}
+
+        try:
+            from py_clob_client.order_builder.constants import SELL
+            from py_clob_client.clob_types import MarketOrderArgs
+
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=amount,
+                side=SELL,
+            )
+            order = self._auth_client.create_market_order(order_args)
+            result = self._auth_client.post_order(order)
+            logger.info(f"Order placed: SELL ${amount} on token {token_id[:20]}...")
+            return {"ok": True, "result": result}
+
+        except Exception as e:
+            logger.error(f"Sell order failed: {e}")
+            return {"error": str(e)}
+
     # ------------------------------------------------------------------
     # CLOB API fallback
     # ------------------------------------------------------------------
