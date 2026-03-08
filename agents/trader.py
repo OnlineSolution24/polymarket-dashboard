@@ -219,6 +219,16 @@ class TraderAgent(BaseAgent):
         amount = payload.get("amount_usd", 0)
         question = payload.get("market_question", "")
 
+        # DEDUPLIZIERUNG: Prüfe ob bereits offene Position besteht
+        existing = engine.query_one(
+            "SELECT id FROM trades WHERE market_id = ? AND side = ? "
+            "AND status = 'executed'",
+            (market_id, side),
+        )
+        if existing:
+            self.log("info", f"Trade uebersprungen: Bereits Position in {market_id} ({side}) vorhanden")
+            return False
+
         # Validate
         ok, reason = self._validate_trade(payload)
         if not ok:
