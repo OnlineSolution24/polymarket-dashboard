@@ -1,9 +1,9 @@
 """
-SQLite table definitions (12 tables).
+SQLite table definitions (13 tables).
 Each table has a CREATE TABLE statement and helper CRUD functions.
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TABLES = {
     "schema_version": """
@@ -195,6 +195,25 @@ TABLES = {
         )
     """,
 
+    "code_changes": """
+        CREATE TABLE IF NOT EXISTS code_changes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            file_path       TEXT NOT NULL,
+            old_code        TEXT,
+            new_code        TEXT NOT NULL,
+            reason          TEXT NOT NULL,
+            description     TEXT,
+            diff_preview    TEXT,
+            status          TEXT DEFAULT 'pending',
+            user_comment    TEXT,
+            backup_path     TEXT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at     TIMESTAMP,
+            applied_at      TIMESTAMP
+        )
+    """,
+
     "market_snapshots": """
         CREATE TABLE IF NOT EXISTS market_snapshots (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,4 +246,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_strategy_trades_trade ON strategy_trades(trade_id)",
     # Market snapshot indexes
     "CREATE INDEX IF NOT EXISTS idx_snapshots_market_time ON market_snapshots(market_id, snapshot_at DESC)",
+    # Code changes indexes
+    "CREATE INDEX IF NOT EXISTS idx_code_changes_status ON code_changes(status)",
+    "CREATE INDEX IF NOT EXISTS idx_code_changes_created ON code_changes(created_at DESC)",
 ]

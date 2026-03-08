@@ -316,6 +316,28 @@ def create_app(config: AppConfig) -> FastAPI:
         logger.info(f"Suggestion {suggestion_id} {new_status}")
         return BotActionResponse(ok=True, message=f"Suggestion {new_status}")
 
+    @app.post("/api/suggestions/cleanup-pending", dependencies=[Depends(verify_api_key)])
+    def cleanup_pending_suggestions():
+        """Bulk-close all pending suggestions."""
+        before = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM suggestions WHERE status = 'pending'"
+        )
+        pending_before = before["cnt"] if before else 0
+
+        engine.execute(
+            "UPDATE suggestions SET status = 'rejected', user_response = ?, resolved_at = ? "
+            "WHERE status = 'pending'",
+            ("Bulk cleanup via API", datetime.utcnow().isoformat()),
+        )
+
+        after = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM suggestions WHERE status = 'pending'"
+        )
+        pending_after = after["cnt"] if after else 0
+        closed = pending_before - pending_after
+        logger.info(f"Pending suggestions cleanup: closed={closed}")
+        return {"ok": True, "closed": closed, "pending_after": pending_after}
+
     # ------------------------------------------------------------------
     # Circuit Breaker
     # ------------------------------------------------------------------
@@ -644,17 +666,46 @@ def create_app(config: AppConfig) -> FastAPI:
         if mode == "paper":
             return _simulate_trade_internal(body, trading_cfg)
 
+        # Real trading requires authenticated credentials.
+        if not config.polymarket_private_key:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": "POLYMARKET_PRIVATE_KEY is missing; real trade execution disabled.",
+            }
+
         # Validate via risk checks
         risk_result = _check_risk_internal(body, trading_cfg)
         if not risk_result["ok"]:
             return risk_result
+
+        # Resolve requested market_id + side to concrete CLOB token id.
+        # Backward-compatible: if market row not found, treat market_id as token_id.
+        market_row = engine.query_one(
+            "SELECT id, question, yes_token_id, no_token_id FROM markets WHERE id = ?",
+            (body.market_id,),
+        )
+        token_id = body.market_id
+        market_id = body.market_id
+        market_question = None
+        if market_row:
+            market_id = market_row["id"]
+            market_question = market_row.get("question")
+            side_upper = (body.side or "").upper()
+            token_id = market_row.get("yes_token_id") if side_upper == "YES" else market_row.get("no_token_id")
+            if not token_id:
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "error": f"No token_id for side={side_upper} on market={market_id}",
+                }
 
         # Execute
         try:
             from services.polymarket_client import PolymarketService
             service = PolymarketService(config)
             result = service.place_market_order(
-                token_id=body.market_id, amount=body.amount, side=body.side,
+                token_id=token_id, amount=body.amount, side=body.side,
             )
             status = "executed" if result.get("ok") else "failed"
         except Exception as e:
@@ -663,9 +714,9 @@ def create_app(config: AppConfig) -> FastAPI:
 
         # Log trade
         engine.execute(
-            """INSERT INTO trades (market_id, side, amount_usd, status, agent_id, created_at, executed_at)
-               VALUES (?, ?, ?, ?, 'openclaw_trader', ?, ?)""",
-            (body.market_id, body.side, body.amount, status,
+            """INSERT INTO trades (market_id, market_question, side, amount_usd, status, agent_id, created_at, executed_at)
+               VALUES (?, ?, ?, ?, ?, 'openclaw_trader', ?, ?)""",
+            (market_id, market_question, body.side, body.amount, status,
              datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
         )
         return {"ok": status == "executed", "status": status}
@@ -778,5 +829,12 @@ def create_app(config: AppConfig) -> FastAPI:
             (body.agent_id, body.level, body.message, datetime.utcnow().isoformat()),
         )
         return BotActionResponse(ok=True, message="Log event created")
+
+    # ------------------------------------------------------------------
+    # Self-Modification (code change proposals by AI agents)
+    # ------------------------------------------------------------------
+
+    from api.self_modify import register_self_modify_endpoints
+    register_self_modify_endpoints(app)
 
     return app
