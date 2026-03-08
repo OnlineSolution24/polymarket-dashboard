@@ -50,10 +50,13 @@ class BotAPIClient:
             return resp.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"API error {e.response.status_code}: {path}")
-            return None
+            try:
+                return e.response.json()
+            except Exception:
+                return {"detail": f"HTTP {e.response.status_code}"}
         except Exception as e:
             logger.error(f"API request failed: {path} → {e}")
-            return None
+            return {"detail": str(e)}
 
     def _put(self, path: str, json_body: dict = None) -> dict | None:
         try:
