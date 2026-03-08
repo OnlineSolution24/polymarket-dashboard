@@ -19,11 +19,7 @@ def render():
     # Show code changes count if any pending
     pending_code = client.get_pending_code_changes()
     if pending_code:
-        col_warn, col_link = st.columns([4, 1])
-        with col_warn:
-            st.warning(f"🔧 {len(pending_code)} wartende Code-Anderung(en)")
-        with col_link:
-            st.page_link("views/code_changes.py", label="Anzeigen", icon="🔧")
+        st.warning(f"🔧 {len(pending_code)} wartende Code-Anderung(en) — siehe 'Code-Anderungen' in der Seitenleiste.")
 
     st.divider()
 
