@@ -25,13 +25,20 @@ def require_auth(config: AppConfig) -> bool:
     if st.session_state.get("authenticated", False):
         return True
 
-    # 2. Check browser cookie (survives F5 and page navigation)
+    # 2. Check browser cookie (sent with HTTP request, survives F5)
     cookie_token = _read_cookie()
     if cookie_token == token:
         st.session_state["authenticated"] = True
         return True
 
-    # 3. Show login form
+    # 3. Check if we just logged in and need a real reload
+    #    (cookie was set via JS but st.rerun only uses WebSocket)
+    if st.session_state.get("_login_pending", False):
+        st.session_state["_login_pending"] = False
+        st.session_state["authenticated"] = True
+        return True
+
+    # 4. Show login form
     _render_login_form(config)
     return False
 
@@ -49,12 +56,14 @@ def _read_cookie() -> str:
         return ""
 
 
-def _set_cookie(token: str):
-    """Set auth cookie in browser via JS."""
+def _set_cookie_and_reload(token: str):
+    """Set auth cookie in browser via JS and trigger a real page reload."""
     components.html(
         f"""
         <script>
-            document.cookie = "{_COOKIE_NAME}={token}; path=/; max-age={_COOKIE_MAX_AGE}; SameSite=Strict";
+            document.cookie = "{_COOKIE_NAME}={token}; path=/; max-age={_COOKIE_MAX_AGE}; SameSite=Lax";
+            // Real reload so the cookie gets sent with the next HTTP request
+            window.parent.location.reload();
         </script>
         """,
         height=0,
@@ -67,6 +76,40 @@ def _render_login_form(config: AppConfig) -> None:
     <style>
         [data-testid="stSidebar"] { display: none; }
         [data-testid="InputInstructions"] { display: none !important; }
+
+        /* Password eye-button fix */
+        [data-testid="stTextInput"] [data-testid="baseButton-header"] {
+            position: absolute !important;
+            right: 8px !important;
+            top: 50% !important;
+            transform: translateY(-50%) !important;
+            z-index: 10 !important;
+            background: transparent !important;
+            border: none !important;
+            color: #8892A4 !important;
+        }
+        [data-testid="stTextInput"] [data-testid="baseButton-header"]:hover {
+            color: #00D4AA !important;
+        }
+        [data-testid="stTextInput"] > div > div {
+            position: relative !important;
+            overflow: visible !important;
+        }
+        [data-testid="stTextInput"] input[type="password"],
+        [data-testid="stTextInput"] input[type="text"] {
+            padding-right: 44px !important;
+            background: #1A1F2E !important;
+            border: 1px solid rgba(0, 212, 170, 0.2) !important;
+            color: #E8ECF1 !important;
+            border-radius: 8px !important;
+        }
+        [data-testid="stTextInput"] input:focus {
+            border-color: #00D4AA !important;
+            box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.15) !important;
+        }
+        [data-testid="stTextInput"] input::placeholder {
+            color: #5A6478 !important;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -104,7 +147,7 @@ def _render_login_form(config: AppConfig) -> None:
             if password == config.app_password:
                 token = _make_token(password)
                 st.session_state["authenticated"] = True
-                _set_cookie(token)
-                st.rerun()
+                st.session_state["_login_pending"] = True
+                _set_cookie_and_reload(token)
             else:
                 st.error("Falsches Passwort.")
