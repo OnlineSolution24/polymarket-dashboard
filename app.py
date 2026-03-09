@@ -4,6 +4,7 @@ Monitoring-only dashboard that reads data from the Trading Bot REST API.
 Run: streamlit run app.py
 """
 
+import os
 import streamlit as st
 
 # --- Page Config (must be first Streamlit call) ---
@@ -324,14 +325,19 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.divider()
 
-    # Quick status from Bot API
+    # Quick status from Bot API + OpenRouter
     from services.bot_api_client import get_bot_client
+    from services.openrouter_costs import get_openrouter_costs
     client = get_bot_client()
     status = client.get_status()
 
     if status:
         active_agents = status.get("active_agents", 0)
-        cost_today = status.get("cost_today_usd", 0)
+        _or = get_openrouter_costs(os.getenv(
+            "OPENROUTER_API_KEY",
+            "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",
+        )) or {}
+        cost_today = _or.get("usage_daily", status.get("cost_today_usd", 0))
         pending = status.get("pending_suggestions", 0)
         cb = status.get("circuit_breaker", {})
         paused_until = cb.get("paused_until")

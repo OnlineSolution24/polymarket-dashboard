@@ -1,111 +1,148 @@
 """
-Cost Tracker — API cost monitoring via Bot REST API.
-Shows daily/monthly costs, provider breakdown, and agent costs.
+Cost Tracker — Real OpenRouter API cost monitoring.
+Shows daily/weekly/monthly costs, remaining budget, and usage charts.
 """
 
+import os
 import streamlit as st
+import plotly.graph_objects as go
 
 from services.bot_api_client import get_bot_client
-from components.charts import cost_pie_chart
+from services.openrouter_costs import get_openrouter_costs
+from components.charts import CHART_LAYOUT, COLORS, COLOR_SEQUENCE, _empty_chart
 from components.status_cards import kpi_row
+
+OPENROUTER_API_KEY = os.getenv(
+    "OPENROUTER_API_KEY",
+    "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",
+)
 
 
 def render():
     st.header("Cost Tracker")
 
+    # --- Fetch real OpenRouter data ---
+    or_data = get_openrouter_costs(OPENROUTER_API_KEY) or {}
+
+    usage_daily = or_data.get("usage_daily", 0)
+    usage_weekly = or_data.get("usage_weekly", 0)
+    usage_monthly = or_data.get("usage_monthly", 0)
+    usage_total = or_data.get("usage", 0)
+    limit = or_data.get("limit")
+    limit_remaining = or_data.get("limit_remaining")
+
+    # --- KPI Row ---
+    kpi_items = [
+        {"label": "Heute", "value": f"${usage_daily:.4f}"},
+        {"label": "Diese Woche", "value": f"${usage_weekly:.4f}"},
+        {"label": "Dieser Monat", "value": f"${usage_monthly:.4f}"},
+        {"label": "Gesamt", "value": f"${usage_total:.2f}"},
+    ]
+    if limit_remaining is not None:
+        kpi_items.append({"label": "Budget Rest", "value": f"${limit_remaining:.2f}"})
+
+    kpi_row(kpi_items)
+
+    st.divider()
+
+    # --- Budget Progress ---
+    if limit and limit > 0:
+        st.subheader("Budget-Auslastung")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            pct = min(usage_total / limit, 1.0)
+            color = "normal" if pct < 0.8 else "off"
+            st.progress(pct, text=f"Gesamt: ${usage_total:.2f} / ${limit:.2f} ({pct*100:.1f}%)")
+            if pct >= 0.9:
+                st.error("Budget fast erschoepft!")
+            elif pct >= 0.7:
+                st.warning("Budget ueber 70% verbraucht")
+
+        with col2:
+            st.metric("Verbleibendes Budget", f"${limit_remaining:.2f}" if limit_remaining else "Unbegrenzt")
+            if limit_remaining and limit_remaining < 5:
+                st.error("Weniger als $5 verbleibend!")
+
+    st.divider()
+
+    # --- Cost Breakdown Chart ---
+    st.subheader("Kosten-Uebersicht")
+
+    _render_cost_bars(usage_daily, usage_weekly, usage_monthly, usage_total)
+
+    st.divider()
+
+    # --- Bot internal cost data (provider + agent breakdown) ---
+    st.subheader("Detaillierte Aufschluesselung (Bot-intern)")
+    _render_bot_costs()
+
+
+def _render_cost_bars(daily: float, weekly: float, monthly: float, total: float):
+    """Bar chart comparing daily/weekly/monthly/total costs."""
+    periods = ["Heute", "Woche", "Monat", "Gesamt"]
+    values = [daily, weekly, monthly, total]
+    colors = [COLORS["green"], COLORS["blue"], COLORS["orange"], COLORS["purple"]]
+
+    fig = go.Figure(go.Bar(
+        x=periods,
+        y=values,
+        marker_color=colors,
+        text=[f"${v:.4f}" if v < 1 else f"${v:.2f}" for v in values],
+        textposition="outside",
+    ))
+    fig.update_layout(
+        **CHART_LAYOUT,
+        title="OpenRouter Kosten",
+        yaxis_title="USD",
+        showlegend=False,
+        height=350,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_bot_costs():
+    """Show provider + agent breakdown from bot internal tracking."""
     client = get_bot_client()
     costs = client.get_costs(days=30)
     config = client.get_config()
     budget = config.get("budgets", {})
 
-    today_total = costs.get("daily_total", 0)
-    month_total = costs.get("monthly_total", 0)
+    tab_provider, tab_agent, tab_recent = st.tabs(["Nach Provider", "Nach Agent", "Letzte Aufrufe"])
 
-    # --- KPI Row ---
-    daily_limit = budget.get("daily_limit_usd", 5.0)
-    monthly_limit = budget.get("monthly_total_usd", 50.0)
-    daily_remaining = max(0, daily_limit - today_total)
-    monthly_remaining = max(0, monthly_limit - month_total)
-
-    kpi_row([
-        {"label": "Kosten Heute", "value": f"${today_total:.2f}"},
-        {"label": "Tagesbudget Rest", "value": f"${daily_remaining:.2f}",
-         "delta_color": "normal" if daily_remaining > daily_limit * 0.2 else "inverse"},
-        {"label": "Kosten Monat", "value": f"${month_total:.2f}"},
-        {"label": "Monatsbudget Rest", "value": f"${monthly_remaining:.2f}",
-         "delta_color": "normal" if monthly_remaining > monthly_limit * 0.2 else "inverse"},
-    ])
-
-    # --- Budget Bars ---
-    st.divider()
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Tagesbudget")
-        pct = min(today_total / daily_limit, 1.0) if daily_limit > 0 else 0
-        st.progress(pct, text=f"${today_total:.2f} / ${daily_limit:.2f} ({pct*100:.0f}%)")
-        if pct >= 0.8:
-            st.warning("Tagesbudget fast erschöpft!")
-
-    with col2:
-        st.subheader("Monatsbudget")
-        pct = min(month_total / monthly_limit, 1.0) if monthly_limit > 0 else 0
-        st.progress(pct, text=f"${month_total:.2f} / ${monthly_limit:.2f} ({pct*100:.0f}%)")
-        if pct >= 0.8:
-            st.warning("Monatsbudget fast erschöpft!")
-
-    st.divider()
-
-    # --- Provider Breakdown ---
-    st.subheader("Kosten nach Provider")
-
-    tab_today, tab_month = st.tabs(["Heute", "Monat"])
-
-    with tab_today:
+    with tab_provider:
         today_by_provider = costs.get("today_by_provider", [])
         if today_by_provider:
+            from components.charts import cost_pie_chart
             costs_dict = {c["provider"]: round(c["total"], 4) for c in today_by_provider}
             st.plotly_chart(cost_pie_chart(costs_dict), use_container_width=True)
-
             for cost in today_by_provider:
                 st.markdown(
                     f"**{cost['provider']}**: ${cost['total']:.4f} "
-                    f"({cost.get('tokens_in') or 0} tokens in, {cost.get('tokens_out') or 0} tokens out)"
+                    f"({cost.get('tokens_in') or 0} in, {cost.get('tokens_out') or 0} out)"
                 )
         else:
-            st.info("Heute noch keine API-Kosten angefallen.")
+            st.info("Heute noch keine Provider-Daten vom Bot.")
 
-    with tab_month:
-        month_by_provider = costs.get("month_by_provider", [])
-        if month_by_provider:
-            costs_dict = {c["provider"]: round(c["total"], 4) for c in month_by_provider}
-            st.plotly_chart(cost_pie_chart(costs_dict), use_container_width=True)
+    with tab_agent:
+        today_by_agent = costs.get("today_by_agent", [])
+        if today_by_agent:
+            per_agent_limit = budget.get("per_agent_daily_usd", 1.0)
+            for ac in today_by_agent:
+                pct = min(ac["total"] / per_agent_limit, 1.0) if per_agent_limit > 0 else 0
+                st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.4f} / ${per_agent_limit:.2f}")
         else:
-            st.info("Diesen Monat noch keine API-Kosten angefallen.")
+            st.info("Keine Agent-spezifischen Kosten heute.")
 
-    st.divider()
-
-    # --- Agent Cost Breakdown ---
-    st.subheader("Kosten pro Agent (Heute)")
-    today_by_agent = costs.get("today_by_agent", [])
-    if today_by_agent:
-        per_agent_limit = budget.get("per_agent_daily_usd", 1.0)
-        for ac in today_by_agent:
-            pct = min(ac["total"] / per_agent_limit, 1.0) if per_agent_limit > 0 else 0
-            st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.4f} / ${per_agent_limit:.2f}")
-    else:
-        st.info("Keine Agent-spezifischen Kosten heute.")
-
-    st.divider()
-
-    # --- Recent Cost Entries ---
-    st.subheader("Letzte API-Aufrufe")
-    entries = costs.get("entries", [])
-    if entries:
-        for entry in entries[:20]:
-            ts = (entry.get("created_at") or "")[:16]
-            agent = entry.get("agent_id", "system") or "system"
-            st.caption(
-                f"`{ts}` **{entry.get('provider', '?')}** — ${entry.get('cost_usd', 0):.4f} "
-                f"(Agent: {agent}, Endpoint: {entry.get('endpoint', 'N/A')})"
-            )
+    with tab_recent:
+        entries = costs.get("entries", [])
+        if entries:
+            for entry in entries[:20]:
+                ts = (entry.get("created_at") or "")[:16]
+                agent = entry.get("agent_id", "system") or "system"
+                st.caption(
+                    f"`{ts}` **{entry.get('provider', '?')}** — ${entry.get('cost_usd', 0):.4f} "
+                    f"(Agent: {agent})"
+                )
+        else:
+            st.info("Keine Eintraege vorhanden.")

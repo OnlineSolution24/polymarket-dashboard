@@ -1,14 +1,21 @@
 """
 Home Page - KPI Dashboard Overview.
 Shows the 5 most important metrics at a glance.
-All data loaded from Bot REST API.
+All data loaded from Bot REST API + OpenRouter API.
 """
 
+import os
 import streamlit as st
 from datetime import datetime
 
 from services.bot_api_client import get_bot_client
+from services.openrouter_costs import get_openrouter_costs
 from components.status_cards import kpi_row, status_badge
+
+OPENROUTER_API_KEY = os.getenv(
+    "OPENROUTER_API_KEY",
+    "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",
+)
 
 
 def render():
@@ -21,20 +28,28 @@ def render():
         st.error("Bot API nicht erreichbar. Prüfe die Verbindung.")
         return
 
+    # --- Fetch real OpenRouter costs ---
+    or_costs = get_openrouter_costs(OPENROUTER_API_KEY) or {}
+    today_cost = or_costs.get("usage_daily", status.get("cost_today_usd", 0))
+    limit_remaining = or_costs.get("limit_remaining")
+
     # --- KPI Row 1: Key Numbers ---
     active_agents = status.get("active_agents", 0)
     open_positions = status.get("open_positions", 0)
     today_pnl = status.get("pnl_today", 0)
-    today_cost = status.get("cost_today_usd", 0)
     pending_suggestions = status.get("pending_suggestions", 0)
 
-    kpi_row([
+    kpi_items = [
         {"label": "Aktive Agents", "value": active_agents},
         {"label": "Offene Positionen", "value": open_positions},
         {"label": "PnL Heute", "value": f"${today_pnl:+.2f}", "delta_color": "normal" if today_pnl >= 0 else "inverse"},
-        {"label": "AI-Kosten Heute", "value": f"${today_cost:.2f}"},
+        {"label": "AI-Kosten Heute (OR)", "value": f"${today_cost:.4f}"},
         {"label": "Pending Suggestions", "value": pending_suggestions},
-    ])
+    ]
+    if limit_remaining is not None:
+        kpi_items.append({"label": "Budget Rest", "value": f"${limit_remaining:.2f}"})
+
+    kpi_row(kpi_items)
 
     st.divider()
 
@@ -64,19 +79,19 @@ def render():
         st.caption(f"Verluste in Folge: {losses}/3")
 
     with col2:
-        st.subheader("Budget Status")
-        config = client.get_config()
-        budget = config.get("budgets", {})
-        daily_limit = budget.get("daily_limit_usd", 5.0)
-        monthly_limit = budget.get("monthly_total_usd", 50.0)
+        st.subheader("Budget Status (OpenRouter)")
+        monthly_cost = or_costs.get("usage_monthly", status.get("cost_month_usd", 0))
+        weekly_cost = or_costs.get("usage_weekly", 0)
+        total_usage = or_costs.get("usage", 0)
+        limit = or_costs.get("limit")
 
-        monthly_cost = status.get("cost_month_usd", 0)
+        if limit and limit > 0:
+            monthly_pct = min(total_usage / limit, 1.0)
+            st.progress(monthly_pct, text=f"Gesamt: ${total_usage:.2f} / ${limit:.2f}")
+        else:
+            st.caption(f"Gesamt-Verbrauch: ${total_usage:.2f} (kein Limit)")
 
-        daily_pct = (today_cost / daily_limit * 100) if daily_limit > 0 else 0
-        monthly_pct = (monthly_cost / monthly_limit * 100) if monthly_limit > 0 else 0
-
-        st.progress(min(daily_pct / 100, 1.0), text=f"Tagesbudget: ${today_cost:.2f} / ${daily_limit:.2f}")
-        st.progress(min(monthly_pct / 100, 1.0), text=f"Monatsbudget: ${monthly_cost:.2f} / ${monthly_limit:.2f}")
+        st.caption(f"Heute: ${today_cost:.4f} | Woche: ${weekly_cost:.4f} | Monat: ${monthly_cost:.4f}")
 
     st.divider()
 
