@@ -87,8 +87,17 @@ def _render_login_form(config: AppConfig) -> None:
             overflow: hidden !important;
         }
 
+        /* Force text input to full form width */
+        [data-testid="stTextInput"] {
+            width: 100% !important;
+        }
+        [data-testid="stTextInput"] > div {
+            width: 100% !important;
+        }
+
         /* Border on the CONTAINER (wraps input + eye button together) */
         [data-testid="stTextInput"] > div > div {
+            width: 100% !important;
             background: #131927 !important;
             border: 1px solid rgba(0, 212, 170, 0.15) !important;
             border-radius: 8px !important;
