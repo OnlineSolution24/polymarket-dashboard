@@ -4,6 +4,7 @@ Coordinates sub-agents, generates suggestions, and provides daily summaries.
 """
 
 import json
+import re
 from datetime import datetime
 
 from agents.base_agent import BaseAgent
@@ -30,7 +31,7 @@ class ChiefAgent(BaseAgent):
             agents = engine.query("SELECT * FROM agents WHERE role != 'chief' AND status = 'active'")
             agent_summary = self._summarize_agents(agents)
 
-            # 2. Check recent market data
+            # 2. Check recent market data (high-level only)
             markets = engine.query("SELECT * FROM markets ORDER BY volume DESC LIMIT 10")
             market_summary = self._summarize_markets(markets)
 
@@ -40,37 +41,36 @@ class ChiefAgent(BaseAgent):
             )
             trade_summary = self._summarize_trades(trades)
 
-            # 4. Check markets with calculated edge for trade opportunities
+            # 4. Check overall edge environment (high-level only)
             trading_cfg = load_platform_config().get("trading", {})
             trading_mode = trading_cfg.get("mode", "paper")
+            edge_cfg = trading_cfg.get("limits", {})
+            min_edge = edge_cfg.get("min_edge", 0.03)
 
-            edge_markets = engine.query(
-                "SELECT * FROM markets WHERE calculated_edge IS NOT NULL AND calculated_edge > 0.03 "
-                "ORDER BY calculated_edge DESC LIMIT 5"
+            edge_row = engine.query_one(
+                "SELECT COUNT(*) AS cnt FROM markets WHERE calculated_edge IS NOT NULL AND calculated_edge >= ?",
+                (min_edge,),
             )
-            edge_summary = self._summarize_edge_markets(edge_markets)
+            edge_count = int(edge_row["cnt"]) if edge_row else 0
 
             # 5. Ask OpenClaw for analysis and suggestions
             prompt = (
                 f"Analyse als Polymarket-Chief (Trading-Modus: {trading_mode}):\n\n"
                 f"AGENTS:\n{agent_summary}\n\n"
-                f"TOP MÄRKTE:\n{market_summary}\n\n"
-                f"MÄRKTE MIT EDGE:\n{edge_summary}\n\n"
+                f"MARKT-UEBERBLICK:\n{market_summary}\n\n"
+                f"EDGE-UMFELD: {edge_count} Maerkte >= {min_edge:.1%}\n\n"
                 f"LETZTE TRADES:\n{trade_summary}\n\n"
                 f"Aufgaben:\n"
-                f"1. Gibt es Verbesserungsvorschläge? (z.B. neue Agents, Config-Änderungen, Risk-Anpassungen)\n"
-                f"2. Welche Märkte verdienen tiefere Analyse?\n"
-                f"3. Gibt es Muster in den Trade-Ergebnissen?\n"
-                f"4. Für welche Märkte mit Edge sollten wir Trades platzieren? "
-                f"Antworte mit JSON-Array falls ja: "
-                f'[{{"market_id": "...", "side": "YES/NO", "amount_usd": X, "reason": "..."}}]\n'
+                f"1. Nenne allgemeine Verbesserungen (Config, Risiko, Prozesse, Monitoring).\n"
+                f"2. Keine markt- oder trade-spezifischen Einzelvorschlaege.\n"
+                f"3. Keine Budget-Breakdowns pro Agent.\n"
+                f"4. Formuliere klare Rahmenbedingungen, z.B. 'Erhoehe Edge-Threshold auf X%'.\n"
                 f"Antworte strukturiert mit klaren Empfehlungen."
             )
 
             response = self.think(prompt)
 
             if response:
-                # Parse response for actionable suggestions
                 self._process_suggestions(response)
                 self.log("info", f"Chief cycle abgeschlossen. Response: {response[:200]}...")
             else:
@@ -87,20 +87,22 @@ class ChiefAgent(BaseAgent):
             return "Keine Sub-Agents aktiv."
         lines = []
         for a in agents:
-            budget = a.get("budget_used_today", 0) or 0
-            lines.append(f"- {a['name']} ({a['role']}): Status={a['status']}, Budget heute=${budget:.2f}")
+            lines.append(f"- {a['name']} ({a['role']}): Status={a['status']}")
         return "\n".join(lines)
 
     def _summarize_markets(self, markets: list[dict]) -> str:
         if not markets:
             return "Keine Marktdaten."
-        lines = []
-        for m in markets:
-            lines.append(
-                f"- {m['question'][:60]}: YES={m['yes_price']:.2f} NO={m['no_price']:.2f} "
-                f"Vol=${m['volume']:,.0f}"
-            )
-        return "\n".join(lines)
+        count = len(markets)
+        avg_yes = sum((m.get("yes_price", 0) or 0) for m in markets) / count
+        avg_no = sum((m.get("no_price", 0) or 0) for m in markets) / count
+        total_vol = sum((m.get("volume", 0) or 0) for m in markets)
+        avg_edge = sum((m.get("calculated_edge", 0) or 0) for m in markets) / count
+        return (
+            f"Top-{count} Maerkte aggregiert: "
+            f"AVG YES={avg_yes:.2f}, AVG NO={avg_no:.2f}, "
+            f"Total Vol=${total_vol:,.0f}, AVG Edge={avg_edge:.1%}"
+        )
 
     def _summarize_trades(self, trades: list[dict]) -> str:
         if not trades:
@@ -110,21 +112,12 @@ class ChiefAgent(BaseAgent):
         total_pnl = sum(t.get("pnl", 0) or 0 for t in trades)
         return f"Wins: {wins}, Losses: {losses}, Total PnL: ${total_pnl:+.2f}"
 
-    def _summarize_edge_markets(self, markets: list[dict]) -> str:
-        if not markets:
-            return "Keine Märkte mit berechnetem Edge."
-        lines = []
-        for m in markets:
-            edge = m.get("calculated_edge", 0) or 0
-            lines.append(
-                f"- {m['question'][:60]}: Edge={edge:.1%} "
-                f"YES={m['yes_price']:.2f} NO={m['no_price']:.2f} Vol=${m['volume']:,.0f}"
-            )
-        return "\n".join(lines)
-
     def _process_suggestions(self, response: str) -> None:
         """Extract and create suggestions from Chief's response."""
-        # 1. Always create analysis suggestion
+        if self._is_duplicate_analysis(response):
+            self.log("info", "Chief suggestion uebersprungen: gleiche Punkte wie letzter Vorschlag")
+            return
+
         self.create_suggestion(
             type="analysis",
             title="Chief Agent Analyse",
@@ -132,65 +125,46 @@ class ChiefAgent(BaseAgent):
             payload={"full_response": response, "timestamp": datetime.utcnow().isoformat()},
         )
 
-        # 2. Try to extract trade recommendations from response
-        self._extract_trade_suggestions(response)
+    def _is_duplicate_analysis(self, response: str) -> bool:
+        """Return True if the new response repeats the same recommendation points as the last one."""
+        last = engine.query_one(
+            "SELECT payload, description FROM suggestions WHERE agent_id = ? AND type = 'analysis' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (self.id,),
+        )
+        if not last:
+            return False
 
-    def _extract_trade_suggestions(self, response: str) -> None:
-        """Parse OpenClaw response for trade recommendations and create trade suggestions."""
-        trading_cfg = load_platform_config().get("trading", {})
-        mode = trading_cfg.get("mode", "paper")
+        previous_text = ""
+        payload = last.get("payload")
+        if payload:
+            try:
+                data = json.loads(payload) if isinstance(payload, str) else payload
+                previous_text = data.get("full_response", "") if isinstance(data, dict) else ""
+            except (json.JSONDecodeError, TypeError, ValueError):
+                previous_text = ""
+        if not previous_text:
+            previous_text = last.get("description", "") or ""
 
-        # Try to find JSON array in response
-        import re
-        json_match = re.search(r'\[[\s\S]*?\{[\s\S]*?"market_id"[\s\S]*?\}[\s\S]*?\]', response)
-        if not json_match:
-            return
+        new_points = self._extract_points(response)
+        old_points = self._extract_points(previous_text)
+        if new_points and old_points and new_points == old_points:
+            return True
 
-        try:
-            trades = json.loads(json_match.group())
-        except (json.JSONDecodeError, ValueError):
-            return
+        return self._normalize_text(response) == self._normalize_text(previous_text)
 
-        for trade in trades:
-            if not isinstance(trade, dict):
+    def _extract_points(self, text: str) -> set[str]:
+        """Extract normalized bullet/numbered points."""
+        points = set()
+        for raw in (text or "").splitlines():
+            line = raw.strip()
+            if not line:
                 continue
-            market_id = trade.get("market_id", "")
-            if not market_id:
-                continue
+            if re.match(r"^([-*]\s+|\d+[.)]\s+)", line):
+                points.add(self._normalize_text(line))
+        return {p for p in points if p}
 
-            # Look up market data
-            market = engine.query_one("SELECT * FROM markets WHERE id = ?", (market_id,))
-            if not market:
-                continue
-
-            side = trade.get("side", "YES").upper()
-            amount = float(trade.get("amount_usd", 0))
-            if amount <= 0:
-                continue
-
-            # In full-auto mode, auto-approve. Otherwise, leave as pending for user.
-            status = "auto_approved" if mode == "full-auto" else "pending"
-
-            engine.execute(
-                """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    self.id,
-                    "trade",
-                    f"Trade: {side} auf '{market['question'][:50]}...'",
-                    trade.get("reason", "")[:500],
-                    json.dumps({
-                        "market_id": market_id,
-                        "market_question": market["question"],
-                        "side": side,
-                        "amount_usd": amount,
-                        "edge": market.get("calculated_edge", 0),
-                        "yes_price": market.get("yes_price", 0),
-                        "no_price": market.get("no_price", 0),
-                        "chief_reason": trade.get("reason", ""),
-                    }),
-                    status,
-                    datetime.utcnow().isoformat(),
-                ),
-            )
-            self.log("info", f"Trade suggestion erstellt ({status}): {side} ${amount:.2f} auf {market_id}")
+    def _normalize_text(self, text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "").strip().lower())
+        cleaned = re.sub(r"[^\w\s%]", "", cleaned)
+        return cleaned

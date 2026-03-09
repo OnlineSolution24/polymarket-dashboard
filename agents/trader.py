@@ -120,13 +120,10 @@ class TraderAgent(BaseAgent):
             "ORDER BY calculated_edge DESC LIMIT 5"
         )
         for m in markets:
-            # Check if we already have a pending suggestion for this market
-            existing = engine.query_one(
-                "SELECT id FROM suggestions WHERE type = 'trade' AND status = 'pending' "
-                "AND payload LIKE ?",
-                (f'%"market_id": "{m["id"]}"%',),
-            )
-            if existing:
+            # Global deduplication check (covers pending suggestions, open positions, cooldown)
+            allowed, reason = self._check_deduplication(m["id"])
+            if not allowed:
+                self.log("debug", f"Suggestion skip: {reason}")
                 continue
 
             side = "YES" if m["yes_price"] < 0.5 else "NO"
@@ -152,6 +149,63 @@ class TraderAgent(BaseAgent):
                     "no_price": m["no_price"],
                 },
             )
+
+    # ------------------------------------------------------------------
+    # Deduplication
+    # ------------------------------------------------------------------
+
+    def _check_deduplication(self, market_id: str, side: str = None) -> tuple[bool, str]:
+        """
+        Global deduplication check for a market.
+        Returns (allowed, reason). If allowed=False, skip the trade.
+        """
+        trading_cfg = self._get_trading_config()
+        dedup_cfg = trading_cfg.get("deduplication", {})
+        if not dedup_cfg.get("enabled", True):
+            return True, "OK"
+
+        cooldown_hours = dedup_cfg.get("cooldown_hours", 24)
+        max_attempts = dedup_cfg.get("max_attempts_per_market", 3)
+        check_pending = dedup_cfg.get("check_pending_suggestions", True)
+
+        # 1. Existing open position (any side)
+        open_position = engine.query_one(
+            "SELECT id, side FROM trades WHERE market_id = ? AND status = 'executed'",
+            (market_id,),
+        )
+        if open_position:
+            return False, f"Skipping market {market_id[:30]} - position exists ({open_position['side']})"
+
+        # 2. Recent attempts within cooldown window (any status except 'paper')
+        cutoff = (datetime.utcnow() - timedelta(hours=cooldown_hours)).isoformat()
+        recent = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades "
+            "WHERE market_id = ? AND status != 'paper' AND created_at > ?",
+            (market_id, cutoff),
+        )
+        if recent and recent["cnt"] > 0:
+            return False, f"Skipping market {market_id[:30]} - already attempted within {cooldown_hours}h"
+
+        # 3. Max attempts per market (all time)
+        total = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades "
+            "WHERE market_id = ? AND status != 'paper'",
+            (market_id,),
+        )
+        if total and total["cnt"] >= max_attempts:
+            return False, f"Skipping market {market_id[:30]} - max attempts reached ({total['cnt']}/{max_attempts})"
+
+        # 4. Pending or auto_approved suggestion for same market
+        if check_pending:
+            pending = engine.query_one(
+                "SELECT id FROM suggestions WHERE type = 'trade' "
+                "AND status IN ('pending', 'auto_approved') AND payload LIKE ?",
+                (f'%"market_id": "{market_id}"%',),
+            )
+            if pending:
+                return False, f"Skipping market {market_id[:30]} - pending suggestion exists"
+
+        return True, "OK"
 
     # ------------------------------------------------------------------
     # Safety checks
@@ -220,14 +274,10 @@ class TraderAgent(BaseAgent):
         amount = payload.get("amount_usd", 0)
         question = payload.get("market_question", "")
 
-        # DEDUPLIZIERUNG: Prüfe ob bereits offene Position besteht
-        existing = engine.query_one(
-            "SELECT id FROM trades WHERE market_id = ? AND side = ? "
-            "AND status = 'executed'",
-            (market_id, side),
-        )
-        if existing:
-            self.log("info", f"Trade uebersprungen: Bereits Position in {market_id} ({side}) vorhanden")
+        # Global deduplication check
+        allowed, reason = self._check_deduplication(market_id, side)
+        if not allowed:
+            self.log("info", reason)
             return False
 
         # Validate
