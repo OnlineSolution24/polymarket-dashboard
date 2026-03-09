@@ -273,12 +273,21 @@ def create_app(config: AppConfig) -> FastAPI:
             "WHERE date(created_at) = ? AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY total DESC",
             (today,),
         )
+        # Hourly breakdown (last 24h)
+        hourly = engine.query(
+            "SELECT strftime('%Y-%m-%d %H:00', created_at) as hour, "
+            "provider, COUNT(*) as calls, SUM(cost_usd) as total, "
+            "SUM(tokens_in) as tokens_in, SUM(tokens_out) as tokens_out "
+            "FROM api_costs WHERE created_at >= datetime('now', '-24 hours') "
+            "GROUP BY hour, provider ORDER BY hour DESC"
+        )
         return {
             "daily_total": round(daily_row["total"], 4) if daily_row else 0,
             "monthly_total": round(monthly_row["total"], 4) if monthly_row else 0,
             "today_by_provider": today_by_provider or [],
             "month_by_provider": month_by_provider or [],
             "today_by_agent": today_by_agent or [],
+            "hourly": hourly or [],
             "entries": rows,
         }
 

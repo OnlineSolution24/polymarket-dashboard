@@ -163,13 +163,22 @@ def _render_cost_bars(daily: float, weekly: float, monthly: float, total: float)
 
 
 def _render_bot_costs():
-    """Show provider + agent breakdown from bot internal tracking."""
+    """Show provider + agent + hourly breakdown from bot internal tracking."""
     client = get_bot_client()
     costs = client.get_costs(days=30)
     config = client.get_config()
     budget = config.get("budgets", {})
 
-    tab_provider, tab_agent, tab_recent = st.tabs(["Nach Provider", "Nach Agent", "Letzte Aufrufe"])
+    tab_hourly, tab_provider, tab_agent, tab_recent = st.tabs(
+        ["Stuendlich", "Nach Modell", "Nach Agent", "Letzte Aufrufe"]
+    )
+
+    with tab_hourly:
+        hourly = costs.get("hourly", [])
+        if hourly:
+            _render_hourly_chart(hourly)
+        else:
+            st.info("Keine stuendlichen Daten in den letzten 24h.")
 
     with tab_provider:
         today_by_provider = costs.get("today_by_provider", [])
@@ -178,12 +187,14 @@ def _render_bot_costs():
             costs_dict = {c["provider"]: round(c["total"], 4) for c in today_by_provider}
             st.plotly_chart(cost_pie_chart(costs_dict), use_container_width=True)
             for cost in today_by_provider:
+                tokens_total = (cost.get("tokens_in") or 0) + (cost.get("tokens_out") or 0)
                 st.markdown(
-                    f"**{cost['provider']}**: ${cost['total']:.2f} "
-                    f"({cost.get('tokens_in') or 0} in, {cost.get('tokens_out') or 0} out)"
+                    f"**{cost['provider']}**: ${cost['total']:.4f} "
+                    f"({cost.get('tokens_in') or 0} in, {cost.get('tokens_out') or 0} out, "
+                    f"{tokens_total} total)"
                 )
         else:
-            st.info("Heute noch keine Provider-Daten vom Bot.")
+            st.info("Heute noch keine Modell-Daten vom Bot.")
 
     with tab_agent:
         today_by_agent = costs.get("today_by_agent", [])
@@ -191,19 +202,79 @@ def _render_bot_costs():
             per_agent_limit = budget.get("per_agent_daily_usd", 1.0)
             for ac in today_by_agent:
                 pct = min(ac["total"] / per_agent_limit, 1.0) if per_agent_limit > 0 else 0
-                st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.2f} / ${per_agent_limit:.2f}")
+                st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.4f} / ${per_agent_limit:.2f}")
         else:
             st.info("Keine Agent-spezifischen Kosten heute.")
 
     with tab_recent:
         entries = costs.get("entries", [])
         if entries:
-            for entry in entries[:20]:
+            for entry in entries[:30]:
                 ts = (entry.get("created_at") or "")[:16]
                 agent = entry.get("agent_id", "system") or "system"
+                model = entry.get("provider", "?")
+                cost = entry.get("cost_usd", 0)
+                tokens_in = entry.get("tokens_in", 0)
+                tokens_out = entry.get("tokens_out", 0)
                 st.caption(
-                    f"`{ts}` **{entry.get('provider', '?')}** — ${entry.get('cost_usd', 0):.2f} "
-                    f"(Agent: {agent})"
+                    f"`{ts}` **{model}** — ${cost:.4f} "
+                    f"({tokens_in}+{tokens_out} tok) — {agent}"
                 )
         else:
             st.info("Keine Eintraege vorhanden.")
+
+
+def _render_hourly_chart(hourly: list):
+    """Stacked bar chart of costs per hour, colored by model."""
+    from collections import defaultdict
+
+    # Group by hour
+    hours_data = defaultdict(lambda: defaultdict(float))
+    all_models = set()
+    for row in hourly:
+        hour = row.get("hour", "?")
+        model = row.get("provider", "?")
+        hours_data[hour][model] += row.get("total", 0)
+        all_models.add(model)
+
+    if not hours_data:
+        st.info("Keine Daten.")
+        return
+
+    hours_sorted = sorted(hours_data.keys())
+    model_colors = {
+        "claude-sonnet": COLORS.get("blue", "#448AFF"),
+        "gemini-flash": COLORS.get("green", "#00D4AA"),
+        "haiku": COLORS.get("orange", "#FFB74D"),
+    }
+
+    fig = go.Figure()
+    for model in sorted(all_models):
+        values = [hours_data[h].get(model, 0) for h in hours_sorted]
+        color = model_colors.get(model, COLORS.get("purple", "#AB47BC"))
+        fig.add_trace(go.Bar(
+            x=[h[-5:] for h in hours_sorted],  # Show only HH:00
+            y=values,
+            name=model,
+            marker_color=color,
+            text=[f"${v:.4f}" if v > 0 else "" for v in values],
+            textposition="outside",
+        ))
+
+    layout = {**CHART_LAYOUT, "height": 400}
+    fig.update_layout(
+        **layout,
+        title="Kosten pro Stunde (letzte 24h)",
+        yaxis_title="USD",
+        barmode="stack",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Summary table
+    total_24h = sum(row.get("total", 0) for row in hourly)
+    total_calls = sum(row.get("calls", 0) for row in hourly)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Kosten 24h", f"${total_24h:.4f}")
+    col2.metric("API-Aufrufe 24h", total_calls)
+    col3.metric("Durchschnitt/Aufruf", f"${total_24h / max(total_calls, 1):.4f}")
