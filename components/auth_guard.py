@@ -77,38 +77,70 @@ def _render_login_form(config: AppConfig) -> None:
         [data-testid="stSidebar"] { display: none; }
         [data-testid="InputInstructions"] { display: none !important; }
 
-        /* Password eye-button fix */
+        /* Hide any component iframes (cookie setter etc.) */
+        iframe[height="0"], iframe[style*="height: 0"] {
+            display: none !important;
+            position: absolute !important;
+            width: 0 !important;
+            height: 0 !important;
+            border: none !important;
+            overflow: hidden !important;
+        }
+
+        /* Password eye-button: keep inside input */
+        [data-testid="stTextInput"] > div > div {
+            position: relative !important;
+            overflow: hidden !important;
+        }
         [data-testid="stTextInput"] [data-testid="baseButton-header"] {
             position: absolute !important;
-            right: 8px !important;
+            right: 6px !important;
             top: 50% !important;
             transform: translateY(-50%) !important;
             z-index: 10 !important;
             background: transparent !important;
             border: none !important;
-            color: #8892A4 !important;
+            color: #5A6478 !important;
+            padding: 4px !important;
+            margin: 0 !important;
+            width: 28px !important;
+            height: 28px !important;
         }
         [data-testid="stTextInput"] [data-testid="baseButton-header"]:hover {
             color: #00D4AA !important;
         }
-        [data-testid="stTextInput"] > div > div {
-            position: relative !important;
-            overflow: visible !important;
-        }
+
+        /* Input field styling */
         [data-testid="stTextInput"] input[type="password"],
         [data-testid="stTextInput"] input[type="text"] {
-            padding-right: 44px !important;
-            background: #1A1F2E !important;
-            border: 1px solid rgba(0, 212, 170, 0.2) !important;
-            color: #E8ECF1 !important;
+            padding-right: 40px !important;
+            background: #131927 !important;
+            border: 1px solid rgba(0, 212, 170, 0.15) !important;
+            color: #C8D0DC !important;
             border-radius: 8px !important;
         }
         [data-testid="stTextInput"] input:focus {
             border-color: #00D4AA !important;
-            box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.15) !important;
+            box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.1) !important;
         }
         [data-testid="stTextInput"] input::placeholder {
-            color: #5A6478 !important;
+            color: #3A4258 !important;
+        }
+
+        /* Override browser autofill yellow/olive background */
+        [data-testid="stTextInput"] input:-webkit-autofill,
+        [data-testid="stTextInput"] input:-webkit-autofill:hover,
+        [data-testid="stTextInput"] input:-webkit-autofill:focus {
+            -webkit-box-shadow: 0 0 0 30px #131927 inset !important;
+            -webkit-text-fill-color: #C8D0DC !important;
+            border: 1px solid rgba(0, 212, 170, 0.15) !important;
+            transition: background-color 5000s ease-in-out 0s;
+        }
+
+        /* Form border subtler */
+        [data-testid="stForm"] {
+            border-color: rgba(0, 212, 170, 0.08) !important;
+            background: rgba(19, 25, 39, 0.5) !important;
         }
     </style>
     """, unsafe_allow_html=True)
