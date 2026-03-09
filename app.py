@@ -333,10 +333,7 @@ with st.sidebar:
 
     if status:
         active_agents = status.get("active_agents", 0)
-        _or = get_openrouter_costs(os.getenv(
-            "OPENROUTER_API_KEY",
-            "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",
-        )) or {}
+        _or = get_openrouter_costs(os.getenv("OPENROUTER_API_KEY", "")) or {}
         cost_today = _or.get("usage_daily", status.get("cost_today_usd", 0))
         pending = status.get("pending_suggestions", 0)
         cb = status.get("circuit_breaker", {})

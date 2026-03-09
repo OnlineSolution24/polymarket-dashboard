@@ -12,10 +12,7 @@ from services.bot_api_client import get_bot_client
 from services.openrouter_costs import get_openrouter_costs
 from components.status_cards import kpi_row, status_badge
 
-OPENROUTER_API_KEY = os.getenv(
-    "OPENROUTER_API_KEY",
-    "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",
-)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 
 def render():
