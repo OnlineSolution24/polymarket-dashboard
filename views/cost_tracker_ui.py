@@ -261,13 +261,14 @@ def _render_hourly_chart(hourly: list):
             textposition="outside",
         ))
 
-    layout = {**CHART_LAYOUT, "height": 400}
+    layout = {**CHART_LAYOUT, "height": 400,
+        "legend": dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    }
     fig.update_layout(
         **layout,
         title="Kosten pro Stunde (letzte 24h)",
         yaxis_title="USD",
         barmode="stack",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
     st.plotly_chart(fig, use_container_width=True)
 
