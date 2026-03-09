@@ -21,7 +21,7 @@ RUN mkdir -p data/models data/memories data/cache
 EXPOSE 8501
 
 # Health check
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
 
 # Run Streamlit
 CMD ["streamlit", "run", "app.py", \
