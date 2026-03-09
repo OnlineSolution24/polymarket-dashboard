@@ -1,12 +1,16 @@
 """
 Password gate for the Streamlit app.
-Uses query_params for URL-based persistence + auto-submit on Enter.
+Uses session_state for in-session auth + JavaScript localStorage for
+persistence across F5/page refreshes.
 """
 
 import hashlib
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import AppConfig
+
+_TOKEN_KEY = "pm_auth_token"
 
 
 def require_auth(config: AppConfig) -> bool:
@@ -18,13 +22,13 @@ def require_auth(config: AppConfig) -> bool:
 
     # Already authenticated in this session
     if st.session_state.get("authenticated", False):
-        # Keep token in URL so F5 works
-        if st.query_params.get("token") != token:
-            st.query_params["token"] = token
         return True
 
-    # Check for token in URL (survives F5)
-    if st.query_params.get("token") == token:
+    # Check if localStorage has valid token (set by JS on previous login)
+    _read_token_from_localstorage()
+
+    # Token was read from localStorage on a previous render cycle
+    if st.session_state.get("_ls_token") == token:
         st.session_state["authenticated"] = True
         return True
 
@@ -34,17 +38,60 @@ def require_auth(config: AppConfig) -> bool:
 
 
 def _make_token(password: str) -> str:
-    """Simple hash token for URL persistence."""
+    """Simple hash token for persistence."""
     return hashlib.sha256(f"pm-session-{password}".encode()).hexdigest()[:16]
+
+
+def _read_token_from_localstorage():
+    """Inject JS to read token from localStorage and write to hidden input."""
+    # Use a small HTML component that reads localStorage and sends value back
+    if "_ls_token" not in st.session_state:
+        st.session_state["_ls_token"] = ""
+
+    result = components.html(
+        f"""
+        <script>
+            const token = localStorage.getItem("{_TOKEN_KEY}") || "";
+            // Send token to Streamlit via query params trick
+            const url = new URL(window.parent.location);
+            const currentToken = url.searchParams.get("token") || "";
+            if (token && token !== currentToken) {{
+                url.searchParams.set("token", token);
+                window.parent.history.replaceState({{}}, "", url);
+                // Trigger reload to let Streamlit pick up the param
+                window.parent.location.reload();
+            }}
+        </script>
+        """,
+        height=0,
+    )
+
+    # Also check query params (set by JS above)
+    params = st.query_params
+    if params.get("token"):
+        st.session_state["_ls_token"] = params.get("token")
+
+
+def _set_token_in_localstorage(token: str):
+    """Inject JS to save token to localStorage."""
+    components.html(
+        f"""
+        <script>
+            localStorage.setItem("{_TOKEN_KEY}", "{token}");
+            const url = new URL(window.parent.location);
+            url.searchParams.set("token", "{token}");
+            window.parent.history.replaceState({{}}, "", url);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _render_login_form(config: AppConfig) -> None:
     """Render a centered, styled login form."""
     st.markdown("""
     <style>
-        /* Hide sidebar on login page */
         [data-testid="stSidebar"] { display: none; }
-        /* Force password eye-button inside the input field */
         [data-testid="stTextInput"] [data-testid="baseButton-header"] {
             position: absolute !important;
             right: 4px !important;
@@ -60,7 +107,6 @@ def _render_login_form(config: AppConfig) -> None:
         [data-testid="stTextInput"] input {
             padding-right: 40px !important;
         }
-        /* Hide "Press Enter to apply" hint */
         [data-testid="InputInstructions"] { display: none !important; }
     </style>
     """, unsafe_allow_html=True)
@@ -72,7 +118,6 @@ def _render_login_form(config: AppConfig) -> None:
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        # Logo & Title
         st.markdown("""
         <div style="text-align: center; padding: 0 0 20px 0;">
             <div style="font-size: 4rem; margin-bottom: 8px;">📊</div>
@@ -85,7 +130,6 @@ def _render_login_form(config: AppConfig) -> None:
         </div>
         """, unsafe_allow_html=True)
 
-        # Use a form so Enter key submits (no separate button click needed)
         with st.form("login_form"):
             password = st.text_input(
                 "Passwort",
@@ -98,8 +142,11 @@ def _render_login_form(config: AppConfig) -> None:
 
         if submitted:
             if password == config.app_password:
+                token = _make_token(password)
                 st.session_state["authenticated"] = True
-                st.query_params["token"] = _make_token(password)
+                st.session_state["_ls_token"] = token
+                _set_token_in_localstorage(token)
+                st.query_params["token"] = token
                 st.rerun()
             else:
                 st.error("Falsches Passwort.")
