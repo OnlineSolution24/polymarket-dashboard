@@ -63,6 +63,11 @@ def render():
 
     st.divider()
 
+    # --- Budget Limits Editor ---
+    _render_budget_editor(usage_daily)
+
+    st.divider()
+
     # --- Cost Breakdown Chart ---
     st.subheader("Kosten-Uebersicht")
 
@@ -73,6 +78,65 @@ def render():
     # --- Bot internal cost data (provider + agent breakdown) ---
     st.subheader("Detaillierte Aufschluesselung (Bot-intern)")
     _render_bot_costs()
+
+
+def _render_budget_editor(usage_daily: float):
+    """Allow user to view and edit daily/monthly budget limits."""
+    st.subheader("Budget-Limits anpassen")
+
+    client = get_bot_client()
+    config = client.get_config()
+    budget = config.get("budgets", {})
+
+    current_daily = budget.get("daily_limit_usd", 5.0)
+    current_monthly = budget.get("monthly_total_usd", 50.0)
+    current_per_agent = budget.get("per_agent_daily_usd", 1.0)
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        daily_pct = min(usage_daily / current_daily, 1.0) if current_daily > 0 else 0
+        st.progress(daily_pct, text=f"Heute: ${usage_daily:.2f} / ${current_daily:.2f}")
+
+    with col2:
+        st.metric("Tages-Limit", f"${current_daily:.2f}")
+
+    with col3:
+        st.metric("Monats-Limit", f"${current_monthly:.2f}")
+
+    with st.expander("Limits bearbeiten"):
+        new_daily = st.number_input(
+            "Tages-Limit ($)", min_value=0.5, max_value=100.0,
+            value=float(current_daily), step=0.5,
+        )
+        new_monthly = st.number_input(
+            "Monats-Limit ($)", min_value=5.0, max_value=1000.0,
+            value=float(current_monthly), step=5.0,
+        )
+        new_per_agent = st.number_input(
+            "Pro-Agent Tages-Limit ($)", min_value=0.1, max_value=20.0,
+            value=float(current_per_agent), step=0.1,
+        )
+
+        changed = (
+            new_daily != current_daily
+            or new_monthly != current_monthly
+            or new_per_agent != current_per_agent
+        )
+
+        if changed and st.button("Limits speichern", type="primary"):
+            config["budgets"] = {
+                **budget,
+                "daily_limit_usd": new_daily,
+                "monthly_total_usd": new_monthly,
+                "per_agent_daily_usd": new_per_agent,
+            }
+            result = client.save_config(config)
+            if result and result.get("ok"):
+                st.success(f"Gespeichert: Tages ${new_daily:.2f} / Monat ${new_monthly:.2f} / Agent ${new_per_agent:.2f}")
+                st.rerun()
+            else:
+                st.error("Fehler beim Speichern.")
 
 
 def _render_cost_bars(daily: float, weekly: float, monthly: float, total: float):

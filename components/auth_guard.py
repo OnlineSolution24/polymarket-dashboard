@@ -1,7 +1,6 @@
 """
 Password gate for the Streamlit app.
-Uses session_state + browser cookie (via st.query_params) for persistence.
-Login survives page refreshes and navigation.
+Uses query_params for URL-based persistence + auto-submit on Enter.
 """
 
 import hashlib
@@ -19,12 +18,12 @@ def require_auth(config: AppConfig) -> bool:
 
     # Already authenticated in this session
     if st.session_state.get("authenticated", False):
-        # Ensure token stays in URL
+        # Keep token in URL so F5 works
         if st.query_params.get("token") != token:
             st.query_params["token"] = token
         return True
 
-    # Check for token in query params (survives refresh)
+    # Check for token in URL (survives F5)
     if st.query_params.get("token") == token:
         st.session_state["authenticated"] = True
         return True
@@ -45,10 +44,24 @@ def _render_login_form(config: AppConfig) -> None:
     <style>
         /* Hide sidebar on login page */
         [data-testid="stSidebar"] { display: none; }
-        /* Fix password toggle button alignment */
-        [data-testid="stTextInput"] > div > div { overflow: visible !important; }
+        /* Force password eye-button inside the input field */
+        [data-testid="stTextInput"] [data-testid="baseButton-header"] {
+            position: absolute !important;
+            right: 4px !important;
+            top: 50% !important;
+            transform: translateY(-50%) !important;
+            z-index: 10 !important;
+            background: transparent !important;
+            border: none !important;
+        }
+        [data-testid="stTextInput"] > div {
+            position: relative !important;
+        }
+        [data-testid="stTextInput"] input {
+            padding-right: 40px !important;
+        }
         /* Hide "Press Enter to apply" hint */
-        [data-testid="InputInstructions"] { display: none; }
+        [data-testid="InputInstructions"] { display: none !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -72,14 +85,18 @@ def _render_login_form(config: AppConfig) -> None:
         </div>
         """, unsafe_allow_html=True)
 
-        password = st.text_input(
-            "Passwort",
-            type="password",
-            key="login_password",
-            placeholder="Passwort eingeben...",
-        )
+        # Use a form so Enter key submits (no separate button click needed)
+        with st.form("login_form"):
+            password = st.text_input(
+                "Passwort",
+                type="password",
+                placeholder="Passwort eingeben...",
+            )
+            submitted = st.form_submit_button(
+                "Anmelden", type="primary", use_container_width=True
+            )
 
-        if st.button("Anmelden", type="primary", use_container_width=True):
+        if submitted:
             if password == config.app_password:
                 st.session_state["authenticated"] = True
                 st.query_params["token"] = _make_token(password)
