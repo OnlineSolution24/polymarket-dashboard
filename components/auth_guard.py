@@ -110,9 +110,19 @@ def _render_login_form(config: AppConfig) -> None:
             color: #00D4AA !important;
         }
 
-        /* Input field styling */
+        /* Input field full width + styling */
+        [data-testid="stTextInput"] {
+            width: 100% !important;
+        }
+        [data-testid="stTextInput"] > div {
+            width: 100% !important;
+        }
+        [data-testid="stTextInput"] > div > div {
+            width: 100% !important;
+        }
         [data-testid="stTextInput"] input[type="password"],
         [data-testid="stTextInput"] input[type="text"] {
+            width: 100% !important;
             padding-right: 40px !important;
             background: #131927 !important;
             border: 1px solid rgba(0, 212, 170, 0.15) !important;
@@ -150,7 +160,7 @@ def _render_login_form(config: AppConfig) -> None:
     st.markdown("")
     st.markdown("")
 
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2, col3 = st.columns([1.5, 1, 1.5])
     with col2:
         st.markdown("""
         <div style="text-align: center; padding: 0 0 20px 0;">
