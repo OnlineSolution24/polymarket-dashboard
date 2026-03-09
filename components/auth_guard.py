@@ -87,7 +87,16 @@ def _render_login_form(config: AppConfig) -> None:
             overflow: hidden !important;
         }
 
-        /* Root element: the actual border container (input + eye button) */
+        /* Kill ALL borders/outlines on every element inside stTextInput */
+        [data-testid="stTextInput"] *,
+        [data-testid="stTextInput"] *::before,
+        [data-testid="stTextInput"] *::after {
+            border: none !important;
+            outline: none !important;
+            box-shadow: none !important;
+        }
+
+        /* Single border on the root element only */
         [data-testid="stTextInputRootElement"] {
             width: 100% !important;
             background: #131927 !important;
@@ -100,13 +109,10 @@ def _render_login_form(config: AppConfig) -> None:
             box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.1) !important;
         }
 
-        /* Input itself: no border (root handles it) */
+        /* Input text color */
         [data-testid="stTextInputRootElement"] input {
             background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
             color: #C8D0DC !important;
-            outline: none !important;
         }
         [data-testid="stTextInputRootElement"] input::placeholder {
             color: #3A4258 !important;
@@ -115,7 +121,6 @@ def _render_login_form(config: AppConfig) -> None:
         /* Eye button */
         [data-testid="stTextInputRootElement"] button {
             background: transparent !important;
-            border: none !important;
             color: #5A6478 !important;
         }
         [data-testid="stTextInputRootElement"] button:hover {
@@ -128,7 +133,6 @@ def _render_login_form(config: AppConfig) -> None:
         [data-testid="stTextInputRootElement"] input:-webkit-autofill:focus {
             -webkit-box-shadow: 0 0 0 30px #131927 inset !important;
             -webkit-text-fill-color: #C8D0DC !important;
-            border: none !important;
             transition: background-color 5000s ease-in-out 0s;
         }
 
