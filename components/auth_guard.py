@@ -87,53 +87,45 @@ def _render_login_form(config: AppConfig) -> None:
             overflow: hidden !important;
         }
 
-        /* Force text input to full form width */
-        [data-testid="stTextInput"] {
-            width: 100% !important;
-        }
-        [data-testid="stTextInput"] > div {
-            width: 100% !important;
-        }
-
-        /* Border on the CONTAINER (wraps input + eye button together) */
-        [data-testid="stTextInput"] > div > div {
+        /* Root element: the actual border container (input + eye button) */
+        [data-testid="stTextInputRootElement"] {
             width: 100% !important;
             background: #131927 !important;
             border: 1px solid rgba(0, 212, 170, 0.15) !important;
             border-radius: 8px !important;
+            box-sizing: border-box !important;
         }
-        [data-testid="stTextInput"] > div > div:focus-within {
+        [data-testid="stTextInputRootElement"]:focus-within {
             border-color: #00D4AA !important;
             box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.1) !important;
         }
 
-        /* Input itself: no border, transparent bg (container handles it) */
-        [data-testid="stTextInput"] input[type="password"],
-        [data-testid="stTextInput"] input[type="text"] {
+        /* Input itself: no border (root handles it) */
+        [data-testid="stTextInputRootElement"] input {
             background: transparent !important;
             border: none !important;
             box-shadow: none !important;
             color: #C8D0DC !important;
             outline: none !important;
         }
-        [data-testid="stTextInput"] input::placeholder {
+        [data-testid="stTextInputRootElement"] input::placeholder {
             color: #3A4258 !important;
         }
 
-        /* Eye button styling */
-        [data-testid="stTextInput"] [data-testid="baseButton-header"] {
+        /* Eye button */
+        [data-testid="stTextInputRootElement"] button {
             background: transparent !important;
             border: none !important;
             color: #5A6478 !important;
         }
-        [data-testid="stTextInput"] [data-testid="baseButton-header"]:hover {
+        [data-testid="stTextInputRootElement"] button:hover {
             color: #00D4AA !important;
         }
 
-        /* Override browser autofill yellow/olive background */
-        [data-testid="stTextInput"] input:-webkit-autofill,
-        [data-testid="stTextInput"] input:-webkit-autofill:hover,
-        [data-testid="stTextInput"] input:-webkit-autofill:focus {
+        /* Browser autofill override */
+        [data-testid="stTextInputRootElement"] input:-webkit-autofill,
+        [data-testid="stTextInputRootElement"] input:-webkit-autofill:hover,
+        [data-testid="stTextInputRootElement"] input:-webkit-autofill:focus {
             -webkit-box-shadow: 0 0 0 30px #131927 inset !important;
             -webkit-text-fill-color: #C8D0DC !important;
             border: none !important;
