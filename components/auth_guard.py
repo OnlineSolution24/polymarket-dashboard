@@ -1,8 +1,10 @@
 """
 Password gate for the Streamlit app.
-Uses session_state for in-session persistence and query params for cross-reload persistence.
+Uses session_state + browser cookie (via st.query_params) for persistence.
+Login survives page refreshes and navigation.
 """
 
+import hashlib
 import streamlit as st
 
 from config import AppConfig
@@ -13,13 +15,17 @@ def require_auth(config: AppConfig) -> bool:
     Show login form if not authenticated.
     Returns True if user is authenticated.
     """
+    token = _make_token(config.app_password)
+
     # Already authenticated in this session
     if st.session_state.get("authenticated", False):
+        # Ensure token stays in URL
+        if st.query_params.get("token") != token:
+            st.query_params["token"] = token
         return True
 
-    # Check for token in query params (persistent across reloads)
-    params = st.query_params
-    if params.get("token") == _make_token(config.app_password):
+    # Check for token in query params (survives refresh)
+    if st.query_params.get("token") == token:
         st.session_state["authenticated"] = True
         return True
 
@@ -30,16 +36,31 @@ def require_auth(config: AppConfig) -> bool:
 
 def _make_token(password: str) -> str:
     """Simple hash token for URL persistence."""
-    import hashlib
     return hashlib.sha256(f"pm-session-{password}".encode()).hexdigest()[:16]
 
 
 def _render_login_form(config: AppConfig) -> None:
     """Render a centered, styled login form."""
-    # Vertical spacer
-    st.markdown("")
-    st.markdown("")
-    st.markdown("")
+    # CSS fix: password visibility toggle button overflow
+    st.markdown("""
+    <style>
+        /* Fix password eye-button overflow */
+        [data-testid="stTextInput"] button {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        [data-testid="stTextInput"] {
+            position: relative;
+        }
+        /* Hide sidebar on login page */
+        [data-testid="stSidebar"] { display: none; }
+        /* Center the form vertically */
+        .login-spacer { height: 15vh; }
+    </style>
+    <div class="login-spacer"></div>
+    """, unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1.2, 1.6, 1.2])
     with col2:
@@ -66,7 +87,6 @@ def _render_login_form(config: AppConfig) -> None:
         if st.button("Anmelden", type="primary", use_container_width=True):
             if password == config.app_password:
                 st.session_state["authenticated"] = True
-                # Set token in URL for persistence across reloads
                 st.query_params["token"] = _make_token(password)
                 st.rerun()
             else:

@@ -10,12 +10,13 @@ services:
     env_file: .env
     environment:
       - BOT_API_URL=http://polymarket-bot:8000
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     ports:
       - "8501:8501"
     networks:
       - bot-net
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import httpx; httpx.get(\"http://localhost:8501/_stcore/health\")' || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')\""]
       interval: 30s
       timeout: 10s
       retries: 3
