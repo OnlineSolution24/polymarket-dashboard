@@ -103,6 +103,16 @@ def _render_login_form(config: AppConfig) -> None:
             border: 1px solid rgba(0, 212, 170, 0.15) !important;
             border-radius: 8px !important;
             box-sizing: border-box !important;
+            padding-right: 0 !important;
+        }
+        /* Input takes all available space */
+        [data-testid="stTextInputRootElement"] [data-baseweb="base-input"] {
+            flex: 1 !important;
+        }
+        /* Eye button flush to right edge */
+        [data-testid="stTextInputRootElement"] > div:last-child {
+            padding-right: 4px !important;
+            margin-right: 0 !important;
         }
         [data-testid="stTextInputRootElement"]:focus-within {
             border-color: #00D4AA !important;
