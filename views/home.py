@@ -40,7 +40,7 @@ def render():
         {"label": "Aktive Agents", "value": active_agents},
         {"label": "Offene Positionen", "value": open_positions},
         {"label": "PnL Heute", "value": f"${today_pnl:+.2f}", "delta_color": "normal" if today_pnl >= 0 else "inverse"},
-        {"label": "AI-Kosten Heute (OR)", "value": f"${today_cost:.4f}"},
+        {"label": "AI-Kosten Heute (OR)", "value": f"${today_cost:.2f}"},
         {"label": "Pending Suggestions", "value": pending_suggestions},
     ]
     if limit_remaining is not None:
@@ -88,7 +88,7 @@ def render():
         else:
             st.caption(f"Gesamt-Verbrauch: ${total_usage:.2f} (kein Limit)")
 
-        st.caption(f"Heute: ${today_cost:.4f} | Woche: ${weekly_cost:.4f} | Monat: ${monthly_cost:.4f}")
+        st.caption(f"Heute: ${today_cost:.2f} | Woche: ${weekly_cost:.2f} | Monat: ${monthly_cost:.2f}")
 
     st.divider()
 

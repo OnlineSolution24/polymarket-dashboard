@@ -41,28 +41,23 @@ def _make_token(password: str) -> str:
 
 def _render_login_form(config: AppConfig) -> None:
     """Render a centered, styled login form."""
-    # CSS fix: password visibility toggle button overflow
     st.markdown("""
     <style>
-        /* Fix password eye-button overflow */
-        [data-testid="stTextInput"] button {
-            position: absolute;
-            right: 8px;
-            top: 50%;
-            transform: translateY(-50%);
-        }
-        [data-testid="stTextInput"] {
-            position: relative;
-        }
         /* Hide sidebar on login page */
         [data-testid="stSidebar"] { display: none; }
-        /* Center the form vertically */
-        .login-spacer { height: 15vh; }
+        /* Fix password toggle button alignment */
+        [data-testid="stTextInput"] > div > div { overflow: visible !important; }
+        /* Hide "Press Enter to apply" hint */
+        [data-testid="InputInstructions"] { display: none; }
     </style>
-    <div class="login-spacer"></div>
     """, unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns([1.2, 1.6, 1.2])
+    st.markdown("")
+    st.markdown("")
+    st.markdown("")
+    st.markdown("")
+
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         # Logo & Title
         st.markdown("""

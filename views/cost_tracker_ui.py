@@ -30,9 +30,9 @@ def render():
 
     # --- KPI Row ---
     kpi_items = [
-        {"label": "Heute", "value": f"${usage_daily:.4f}"},
-        {"label": "Diese Woche", "value": f"${usage_weekly:.4f}"},
-        {"label": "Dieser Monat", "value": f"${usage_monthly:.4f}"},
+        {"label": "Heute", "value": f"${usage_daily:.2f}"},
+        {"label": "Diese Woche", "value": f"${usage_weekly:.2f}"},
+        {"label": "Dieser Monat", "value": f"${usage_monthly:.2f}"},
         {"label": "Gesamt", "value": f"${usage_total:.2f}"},
     ]
     if limit_remaining is not None:
@@ -85,15 +85,15 @@ def _render_cost_bars(daily: float, weekly: float, monthly: float, total: float)
         x=periods,
         y=values,
         marker_color=colors,
-        text=[f"${v:.4f}" if v < 1 else f"${v:.2f}" for v in values],
+        text=[f"${v:.2f}" if v < 1 else f"${v:.2f}" for v in values],
         textposition="outside",
     ))
+    layout = {**CHART_LAYOUT, "height": 350}
     fig.update_layout(
-        **CHART_LAYOUT,
+        **layout,
         title="OpenRouter Kosten",
         yaxis_title="USD",
         showlegend=False,
-        height=350,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -115,7 +115,7 @@ def _render_bot_costs():
             st.plotly_chart(cost_pie_chart(costs_dict), use_container_width=True)
             for cost in today_by_provider:
                 st.markdown(
-                    f"**{cost['provider']}**: ${cost['total']:.4f} "
+                    f"**{cost['provider']}**: ${cost['total']:.2f} "
                     f"({cost.get('tokens_in') or 0} in, {cost.get('tokens_out') or 0} out)"
                 )
         else:
@@ -127,7 +127,7 @@ def _render_bot_costs():
             per_agent_limit = budget.get("per_agent_daily_usd", 1.0)
             for ac in today_by_agent:
                 pct = min(ac["total"] / per_agent_limit, 1.0) if per_agent_limit > 0 else 0
-                st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.4f} / ${per_agent_limit:.2f}")
+                st.progress(pct, text=f"{ac['agent_id']}: ${ac['total']:.2f} / ${per_agent_limit:.2f}")
         else:
             st.info("Keine Agent-spezifischen Kosten heute.")
 
@@ -138,7 +138,7 @@ def _render_bot_costs():
                 ts = (entry.get("created_at") or "")[:16]
                 agent = entry.get("agent_id", "system") or "system"
                 st.caption(
-                    f"`{ts}` **{entry.get('provider', '?')}** — ${entry.get('cost_usd', 0):.4f} "
+                    f"`{ts}` **{entry.get('provider', '?')}** — ${entry.get('cost_usd', 0):.2f} "
                     f"(Agent: {agent})"
                 )
         else:
