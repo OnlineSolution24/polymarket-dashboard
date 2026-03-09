@@ -87,54 +87,38 @@ def _render_login_form(config: AppConfig) -> None:
             overflow: hidden !important;
         }
 
-        /* Password eye-button: keep inside input */
+        /* Border on the CONTAINER (wraps input + eye button together) */
         [data-testid="stTextInput"] > div > div {
-            position: relative !important;
-            overflow: hidden !important;
-        }
-        [data-testid="stTextInput"] [data-testid="baseButton-header"] {
-            position: absolute !important;
-            right: 6px !important;
-            top: 50% !important;
-            transform: translateY(-50%) !important;
-            z-index: 10 !important;
-            background: transparent !important;
-            border: none !important;
-            color: #5A6478 !important;
-            padding: 4px !important;
-            margin: 0 !important;
-            width: 28px !important;
-            height: 28px !important;
-        }
-        [data-testid="stTextInput"] [data-testid="baseButton-header"]:hover {
-            color: #00D4AA !important;
-        }
-
-        /* Input field full width + styling */
-        [data-testid="stTextInput"] {
-            width: 100% !important;
-        }
-        [data-testid="stTextInput"] > div {
-            width: 100% !important;
-        }
-        [data-testid="stTextInput"] > div > div {
-            width: 100% !important;
-        }
-        [data-testid="stTextInput"] input[type="password"],
-        [data-testid="stTextInput"] input[type="text"] {
-            width: 100% !important;
-            padding-right: 40px !important;
             background: #131927 !important;
             border: 1px solid rgba(0, 212, 170, 0.15) !important;
-            color: #C8D0DC !important;
             border-radius: 8px !important;
         }
-        [data-testid="stTextInput"] input:focus {
+        [data-testid="stTextInput"] > div > div:focus-within {
             border-color: #00D4AA !important;
             box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.1) !important;
         }
+
+        /* Input itself: no border, transparent bg (container handles it) */
+        [data-testid="stTextInput"] input[type="password"],
+        [data-testid="stTextInput"] input[type="text"] {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: #C8D0DC !important;
+            outline: none !important;
+        }
         [data-testid="stTextInput"] input::placeholder {
             color: #3A4258 !important;
+        }
+
+        /* Eye button styling */
+        [data-testid="stTextInput"] [data-testid="baseButton-header"] {
+            background: transparent !important;
+            border: none !important;
+            color: #5A6478 !important;
+        }
+        [data-testid="stTextInput"] [data-testid="baseButton-header"]:hover {
+            color: #00D4AA !important;
         }
 
         /* Override browser autofill yellow/olive background */
@@ -143,7 +127,7 @@ def _render_login_form(config: AppConfig) -> None:
         [data-testid="stTextInput"] input:-webkit-autofill:focus {
             -webkit-box-shadow: 0 0 0 30px #131927 inset !important;
             -webkit-text-fill-color: #C8D0DC !important;
-            border: 1px solid rgba(0, 212, 170, 0.15) !important;
+            border: none !important;
             transition: background-color 5000s ease-in-out 0s;
         }
 
