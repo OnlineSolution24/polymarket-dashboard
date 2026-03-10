@@ -66,23 +66,42 @@ class PolymarketService:
     def fetch_markets(self, limit: int = 100) -> list[dict]:
         """
         Fetch current active markets.
-        Primary: Gamma API (active, sorted by volume).
+        Primary: Gamma API (active, sorted by volume) + tag-based discovery.
         Fallback: CLOB API cursor pagination.
         """
+        # 1. Fetch top markets by volume (general discovery)
         markets = self._fetch_gamma_markets(limit)
+
+        # 2. Also fetch markets from configured tag_slugs (e.g. weather, climate)
+        platform_cfg = load_platform_config()
+        tag_slugs = platform_cfg.get("gamma_api", {}).get("tag_slugs", [])
+        if tag_slugs:
+            seen_ids = {m["id"] for m in markets}
+            for slug in tag_slugs:
+                tagged = self._fetch_gamma_markets(limit=50, tag_slug=slug)
+                for m in tagged:
+                    if m["id"] not in seen_ids:
+                        markets.append(m)
+                        seen_ids.add(m["id"])
+
         if markets:
             return markets
         if self._public_client:
             return self._fetch_live_markets(limit)
         return self._mock_markets()
 
-    def _fetch_gamma_markets(self, limit: int = 100) -> list[dict]:
-        """Fetch active, high-volume markets from Gamma Markets API."""
+    def _fetch_gamma_markets(self, limit: int = 100, tag_slug: str = None) -> list[dict]:
+        """Fetch active markets from Gamma Markets API, optionally filtered by tag_slug."""
         platform_cfg = load_platform_config()
         gamma_cfg = platform_cfg.get("gamma_api", {})
         poly_cfg = platform_cfg.get("polymarket", {})
         min_volume = gamma_cfg.get("min_volume_usd", poly_cfg.get("min_volume_usd", 1000))
         min_liquidity = gamma_cfg.get("min_liquidity_usd", poly_cfg.get("min_liquidity_usd", 500))
+
+        # Lower thresholds for tag-based discovery (niche markets have less volume)
+        if tag_slug:
+            min_volume = min(min_volume, 100)
+            min_liquidity = min(min_liquidity, 50)
 
         try:
             params = {
@@ -92,6 +111,9 @@ class PolymarketService:
                 "ascending": "false",
                 "limit": min(limit, 200),
             }
+            if tag_slug:
+                params["tag_slug"] = tag_slug
+
             response = self._gamma.get("/markets", params=params)
             response.raise_for_status()
             raw = response.json()
@@ -154,7 +176,8 @@ class PolymarketService:
                     "accepting_orders": 1 if item.get("acceptingOrders", True) else 0,
                 })
 
-            logger.info(f"Gamma API: fetched {len(markets)} active markets (limit={limit})")
+            tag_info = f" [tag:{tag_slug}]" if tag_slug else ""
+            logger.info(f"Gamma API{tag_info}: fetched {len(markets)} active markets (limit={limit})")
             return markets[:limit]
 
         except Exception as e:

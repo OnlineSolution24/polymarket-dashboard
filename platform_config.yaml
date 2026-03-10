@@ -144,6 +144,9 @@ gamma_api:
   min_volume_usd: 1000
   min_liquidity_usd: 500
   timeout_seconds: 30
+  tag_slugs:                             # Additional market discovery by tag
+    - "weather"                          # Daily temperature, climate markets
+    - "climate"                          # Global temperature records
 
 # --- MCP Server ---
 mcp:
