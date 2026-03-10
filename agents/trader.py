@@ -400,10 +400,13 @@ class TraderAgent(BaseAgent):
         min_profit_usd = hedge_cfg.get("min_profit_usd", 1.0)
         cooldown_min = hedge_cfg.get("cooldown_minutes", 60)
 
-        # Get all open positions (executed trades)
+        # Get all open positions (executed trades that haven't been settled/hedged yet)
         positions = engine.query(
             "SELECT id, market_id, side, amount_usd, price, executed_at "
-            "FROM trades WHERE status = 'executed' ORDER BY executed_at"
+            "FROM trades WHERE status = 'executed' "
+            "AND (result IS NULL OR result = 'open') "
+            "AND amount_usd > 0 "
+            "ORDER BY executed_at"
         )
         if not positions:
             return 0
