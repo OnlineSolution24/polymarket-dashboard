@@ -418,6 +418,24 @@ class TraderAgent(BaseAgent):
             if entry_price <= 0:
                 continue
 
+            # Skip if this market was already cashed out or settled
+            already_closed = engine.query_one(
+                "SELECT id FROM trades WHERE market_id = ? "
+                "AND (result IN ('cashout', 'win', 'loss', 'settled') "
+                "     OR user_cmd LIKE 'cashout:%')",
+                (market_id,),
+            )
+            if already_closed:
+                continue
+
+            # Max 1 hedge per original position
+            existing_hedge = engine.query_one(
+                "SELECT id FROM trades WHERE user_cmd = ?",
+                (f"hedge:{pos['id']}",),
+            )
+            if existing_hedge:
+                continue
+
             # Cooldown: check if we recently hedged this market
             recent_hedge = engine.query_one(
                 "SELECT id FROM trades WHERE market_id = ? AND user_cmd LIKE 'hedge:%' "
@@ -468,11 +486,11 @@ class TraderAgent(BaseAgent):
                 result = service.place_sell_order(token_id=token_id, amount=sell_amount)
 
                 if result.get("ok"):
-                    # Record hedge trade
+                    # Record hedge trade (result='hedge' so it's not treated as open position)
                     engine.execute(
                         """INSERT INTO trades
-                           (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at)
-                           VALUES (?, ?, ?, ?, ?, 'executed', ?, ?, ?, ?)""",
+                           (market_id, market_question, side, amount_usd, price, status, result, agent_id, user_cmd, created_at, executed_at)
+                           VALUES (?, ?, ?, ?, ?, 'executed', 'hedge', ?, ?, ?, ?)""",
                         (market_id, f"HEDGE: {pos.get('market_question', '')[:50]}",
                          pos["side"], -sell_amount, current_price,
                          self.id, f"hedge:{pos['id']}",
