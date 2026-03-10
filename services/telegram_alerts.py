@@ -88,6 +88,20 @@ class TelegramAlerts:
             f"Seite: {side} | Betrag: ${amount:.2f}"
         )
 
+    def alert_trade_settled(self, market: str, side: str, result: str,
+                            pnl: float, amount: float):
+        """Send trade settlement alert (win/loss)."""
+        if not self.alert_config.get("on_trade_settled", True):
+            return
+        emoji = "✅" if result == "win" else "❌"
+        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        self.send(
+            f"{emoji} <b>Trade {result.upper()}</b>\n"
+            f"Markt: {market}\n"
+            f"Seite: {side} | Einsatz: ${amount:.2f}\n"
+            f"Ergebnis: {pnl_str}"
+        )
+
     def alert_agent_error(self, agent_id: str, error: str):
         """Send agent error alert."""
         if not self.alert_config.get("on_agent_error", True):

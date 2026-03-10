@@ -123,6 +123,14 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info(f"Scheduled: trader_cycle every {trader_interval}min")
 
+            # Settlement: check if markets resolved, update trade results
+            settlement_interval = sched_cfg.get("settlement", {}).get("interval_minutes", 30)
+            _scheduler.add_job(
+                _job_settle_trades, "interval", minutes=settlement_interval,
+                id="settlement", replace_existing=True, args=[config],
+            )
+            logger.info(f"Scheduled: settlement every {settlement_interval}min")
+
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
                 _job_cleanup_cache, "interval", hours=6,
@@ -605,3 +613,156 @@ def _job_cleanup_snapshots():
         logger.debug("Snapshot cleanup completed")
     except Exception as e:
         logger.error(f"Snapshot cleanup failed: {e}")
+
+
+def _job_settle_trades(config: AppConfig):
+    """
+    Settlement: Check if any executed trades have been resolved.
+    For each open trade, query Gamma API to see if the market resolved.
+    If resolved, calculate PnL, update DB, notify via Telegram, update circuit breaker.
+    """
+    try:
+        from db import engine
+        from services.polymarket_client import PolymarketService
+        from services.telegram_alerts import get_alerts
+
+        # Find all executed trades that haven't been settled yet
+        open_trades = engine.query(
+            "SELECT id, market_id, market_question, side, amount_usd, price "
+            "FROM trades WHERE status = 'executed' AND result IS NULL"
+        )
+
+        if not open_trades:
+            return
+
+        service = PolymarketService(config)
+        alerts = get_alerts(config)
+        settled_count = 0
+        wins = 0
+        losses = 0
+        total_pnl = 0.0
+
+        # Cache resolution results per market (multiple trades may share a market)
+        resolution_cache = {}
+
+        for trade in open_trades:
+            market_id = trade["market_id"]
+
+            # Check cache first
+            if market_id not in resolution_cache:
+                resolution_cache[market_id] = service.get_market_resolution(market_id)
+
+            resolution = resolution_cache[market_id]
+            if not resolution or not resolution.get("resolved"):
+                continue
+
+            # Calculate PnL
+            winning_side = resolution["winning_side"]
+            trade_side = trade["side"]
+            entry_price = trade["price"] or 0
+            amount = trade["amount_usd"] or 0
+
+            if entry_price <= 0 or amount <= 0:
+                logger.warning(f"Trade {trade['id']}: invalid price/amount, skipping")
+                continue
+
+            # How many shares did we buy?
+            shares = amount / entry_price
+
+            if trade_side == winning_side:
+                # Won: each share pays out $1
+                payout = shares * 1.0
+                pnl = payout - amount
+                result = "win"
+                wins += 1
+            else:
+                # Lost: shares are worth $0
+                pnl = -amount
+                result = "loss"
+                losses += 1
+
+            pnl = round(pnl, 4)
+            total_pnl += pnl
+
+            # Update trade record
+            engine.execute(
+                "UPDATE trades SET result = ?, pnl = ? WHERE id = ?",
+                (result, pnl, trade["id"]),
+            )
+
+            # Also update strategy_trades if linked
+            engine.execute(
+                "UPDATE strategy_trades SET result = ?, pnl = ?, exit_price = ? "
+                "WHERE market_id = ? AND result IS NULL",
+                (result, pnl, 1.0 if result == "win" else 0.0, market_id),
+            )
+
+            settled_count += 1
+
+            # Send Telegram notification
+            market_name = (trade.get("market_question") or market_id)[:80]
+            alerts.alert_trade_settled(market_name, trade_side, result, pnl, amount)
+
+        if settled_count > 0:
+            # Update circuit breaker with consecutive losses
+            _update_circuit_breaker_from_settlements(config)
+
+            logger.info(
+                f"Settlement: {settled_count} trades settled "
+                f"({wins}W/{losses}L, PnL: ${total_pnl:+.2f})"
+            )
+
+    except Exception as e:
+        logger.error(f"Settlement job failed: {e}")
+
+
+def _update_circuit_breaker_from_settlements(config: AppConfig):
+    """Recalculate circuit breaker state based on recent trade results."""
+    try:
+        from db import engine
+
+        # Get last N trades with results, ordered by execution time
+        recent = engine.query(
+            "SELECT result FROM trades WHERE result IS NOT NULL "
+            "ORDER BY executed_at DESC LIMIT 10"
+        )
+
+        if not recent:
+            return
+
+        # Count consecutive losses from the most recent trade
+        consecutive_losses = 0
+        for trade in recent:
+            if trade["result"] == "loss":
+                consecutive_losses += 1
+            else:
+                break
+
+        platform_cfg = load_platform_config()
+        cb_cfg = platform_cfg.get("circuit_breaker", {})
+        max_losses = cb_cfg.get("max_consecutive_losses", 3)
+        pause_hours = cb_cfg.get("pause_hours", 24)
+
+        if consecutive_losses >= max_losses:
+            from datetime import timedelta
+            paused_until = (datetime.utcnow() + timedelta(hours=pause_hours)).isoformat()
+            engine.execute(
+                "INSERT OR REPLACE INTO circuit_breaker (id, consecutive_losses, paused_until) "
+                "VALUES (1, ?, ?)",
+                (consecutive_losses, paused_until),
+            )
+
+            from services.telegram_alerts import get_alerts
+            alerts = get_alerts(config)
+            alerts.alert_circuit_breaker(consecutive_losses, paused_until)
+            logger.warning(f"Circuit breaker ACTIVATED: {consecutive_losses} consecutive losses")
+        else:
+            # Reset circuit breaker if not triggered
+            engine.execute(
+                "INSERT OR REPLACE INTO circuit_breaker (id, consecutive_losses, paused_until) "
+                "VALUES (1, ?, NULL)",
+                (consecutive_losses,),
+            )
+
+    except Exception as e:
+        logger.error(f"Circuit breaker update failed: {e}")

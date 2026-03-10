@@ -27,6 +27,7 @@ alerts:
   on_circuit_breaker: true
   on_new_suggestion: false
   on_trade_executed: true
+  on_trade_settled: true
   on_agent_error: true
   on_daily_summary: true
   daily_summary_hour: 20               # 20:00 UTC
@@ -112,6 +113,9 @@ scheduler:
   daily_summary:
     enabled: true
     hour: 20                           # 20:00 UTC
+  settlement:
+    enabled: true
+    interval_minutes: 30               # Check for resolved markets every 30 min
   snapshot_cleanup:
     enabled: true
     interval_hours: 24

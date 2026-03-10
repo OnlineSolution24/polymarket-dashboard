@@ -179,6 +179,64 @@ class PolymarketService:
             return []
 
     # ------------------------------------------------------------------
+    # Market Resolution (Settlement)
+    # ------------------------------------------------------------------
+
+    def get_market_resolution(self, condition_id: str) -> dict | None:
+        """
+        Check if a market has been resolved via Gamma API.
+        Returns dict with 'resolved', 'winning_side', 'outcome_prices' or None on error.
+        """
+        try:
+            response = self._gamma.get("/markets", params={
+                "condition_id": condition_id,
+                "limit": 1,
+            })
+            response.raise_for_status()
+            results = response.json()
+            if not results:
+                return None
+
+            market = results[0] if isinstance(results, list) else results
+            closed = market.get("closed", False)
+            resolution_status = market.get("umaResolutionStatus", "")
+
+            if not closed or resolution_status != "resolved":
+                return {"resolved": False}
+
+            # Parse final outcome prices: ["1","0"] = YES won, ["0","1"] = NO won
+            outcome_prices = market.get("outcomePrices", "")
+            if isinstance(outcome_prices, str):
+                try:
+                    import json
+                    outcome_prices = json.loads(outcome_prices)
+                except Exception:
+                    outcome_prices = []
+
+            yes_final = float(outcome_prices[0]) if len(outcome_prices) >= 1 else 0
+            no_final = float(outcome_prices[1]) if len(outcome_prices) >= 2 else 0
+
+            if yes_final >= 0.99:
+                winning_side = "YES"
+            elif no_final >= 0.99:
+                winning_side = "NO"
+            else:
+                # Market closed but not cleanly resolved (partial / disputed)
+                return {"resolved": False}
+
+            return {
+                "resolved": True,
+                "winning_side": winning_side,
+                "yes_final": yes_final,
+                "no_final": no_final,
+                "closed_time": market.get("closedTime"),
+            }
+
+        except Exception as e:
+            logger.error(f"Resolution check failed for {condition_id[:20]}: {e}")
+            return None
+
+    # ------------------------------------------------------------------
     # Order Book
     # ------------------------------------------------------------------
 
