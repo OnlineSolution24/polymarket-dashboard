@@ -75,11 +75,13 @@ trading:
     min_profit_usd: 1.00                 # Minimum profit before hedging kicks in
     cooldown_minutes: 60                 # Wait 60 min before re-hedging same market
   cashout:
-    enabled: true                        # Auto-sell when ANY profit detected
+    enabled: true                        # Auto-sell when profit target reached
     sell_pct: 100                         # Sell 100% of position
-    min_profit_pct: 1                     # Minimum 1% profit before selling (covers fees)
-    min_profit_usd: 0.02                 # Minimum $0.02 profit
-    cooldown_minutes: 15                 # Wait 15 min before re-checking same market
+    min_profit_pct: 10                   # Minimum 10% profit before selling
+    min_profit_usd: 0.50                 # Minimum $0.50 profit
+    max_hold_hours: 168                  # Force-sell after 7 days at lower threshold
+    force_sell_profit_pct: 3             # Lower threshold for old positions (>7 days)
+    cooldown_minutes: 30                 # Check interval per market
 
 # --- Polymarket Settings ---
 polymarket:

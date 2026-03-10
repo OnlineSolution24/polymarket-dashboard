@@ -503,16 +503,23 @@ class TraderAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _check_and_execute_cashouts(self) -> int:
-        """Auto-sell positions as soon as they are in profit."""
+        """Auto-sell positions when profit target is reached.
+
+        Two modes:
+        - Normal: sell at min_profit_pct (default 10%) and min_profit_usd
+        - Aged positions: after max_hold_hours (default 7 days), sell at force_sell_profit_pct (default 3%)
+        """
         trading_cfg = self._get_trading_config()
         cashout_cfg = trading_cfg.get("cashout", {})
         if not cashout_cfg.get("enabled", False):
             return 0
 
         sell_pct = cashout_cfg.get("sell_pct", 100) / 100
-        min_profit_pct = cashout_cfg.get("min_profit_pct", 1)
-        min_profit_usd = cashout_cfg.get("min_profit_usd", 0.02)
-        cooldown_min = cashout_cfg.get("cooldown_minutes", 15)
+        min_profit_pct = cashout_cfg.get("min_profit_pct", 10)
+        min_profit_usd = cashout_cfg.get("min_profit_usd", 0.50)
+        max_hold_hours = cashout_cfg.get("max_hold_hours", 168)
+        force_sell_profit_pct = cashout_cfg.get("force_sell_profit_pct", 3)
+        cooldown_min = cashout_cfg.get("cooldown_minutes", 30)
 
         # Get open positions with a recorded entry price
         positions = engine.query(
@@ -555,7 +562,17 @@ class TraderAgent(BaseAgent):
             shares = pos["amount_usd"] / entry_price
             profit_usd = (current_price - entry_price) * shares
 
-            if profit_pct < min_profit_pct or profit_usd < min_profit_usd:
+            # Determine threshold: lower for aged positions
+            threshold_pct = min_profit_pct
+            if pos.get("executed_at"):
+                try:
+                    age_hours = (datetime.utcnow() - datetime.fromisoformat(pos["executed_at"])).total_seconds() / 3600
+                    if age_hours > max_hold_hours:
+                        threshold_pct = force_sell_profit_pct
+                except (ValueError, TypeError):
+                    pass
+
+            if profit_pct < threshold_pct or profit_usd < min_profit_usd:
                 continue
 
             # Execute cashout: sell position

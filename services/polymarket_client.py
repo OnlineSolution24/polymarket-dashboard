@@ -349,6 +349,107 @@ class PolymarketService:
             return {"error": str(e)}
 
     # ------------------------------------------------------------------
+    # Search & Discovery (Gamma API)
+    # ------------------------------------------------------------------
+
+    def search_markets(self, query: str, limit: int = 20) -> list[dict]:
+        """Search markets by text using Gamma public-search endpoint."""
+        try:
+            response = self._gamma.get("/public-search", params={"q": query})
+            response.raise_for_status()
+            data = response.json()
+
+            # public-search returns grouped results (markets, events, profiles)
+            markets_raw = data if isinstance(data, list) else data.get("markets", [])
+            results = []
+            for item in markets_raw[:limit]:
+                results.append({
+                    "id": item.get("conditionId", item.get("condition_id", item.get("id", ""))),
+                    "question": item.get("question", ""),
+                    "slug": item.get("slug", ""),
+                    "volume": float(item.get("volumeNum", 0) or 0),
+                    "liquidity": float(item.get("liquidityNum", 0) or 0),
+                    "active": item.get("active", True),
+                    "closed": item.get("closed", False),
+                })
+            logger.info(f"Search '{query}': found {len(results)} markets")
+            return results
+        except Exception as e:
+            logger.error(f"Market search failed: {e}")
+            return []
+
+    def get_all_tags(self) -> list[dict]:
+        """Fetch all available market tags/categories from Gamma API."""
+        try:
+            response = self._gamma.get("/tags")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Tags fetch failed: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Data API (positions, trades, price history)
+    # ------------------------------------------------------------------
+
+    def get_user_positions(self, wallet_address: str) -> list[dict]:
+        """Fetch real on-chain positions for a wallet via Data API."""
+        try:
+            resp = httpx.get(
+                "https://data-api.polymarket.com/positions",
+                params={"user": wallet_address},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Positions fetch failed: {e}")
+            return []
+
+    def get_user_trades(self, wallet_address: str, limit: int = 100) -> list[dict]:
+        """Fetch trade history for a wallet via Data API."""
+        try:
+            resp = httpx.get(
+                "https://data-api.polymarket.com/activity",
+                params={"user": wallet_address, "limit": limit},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"User trades fetch failed: {e}")
+            return []
+
+    def get_price_history(self, token_id: str) -> list[dict]:
+        """Fetch price history for a token via CLOB API."""
+        try:
+            resp = httpx.get(
+                f"https://clob.polymarket.com/prices-history",
+                params={"token_id": token_id},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Price history fetch failed: {e}")
+            return []
+
+    def get_midpoint_price(self, token_id: str) -> float | None:
+        """Get exact midpoint price (avg of best bid/ask) via CLOB API."""
+        try:
+            resp = httpx.get(
+                "https://clob.polymarket.com/midpoint",
+                params={"token_id": token_id},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return float(data.get("mid", 0))
+        except Exception as e:
+            logger.error(f"Midpoint fetch failed: {e}")
+            return None
+
+    # ------------------------------------------------------------------
     # CLOB API fallback
     # ------------------------------------------------------------------
 
