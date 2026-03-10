@@ -74,6 +74,12 @@ trading:
     hedge_amount_pct: 50                 # Sell 50% of position
     min_profit_usd: 1.00                 # Minimum profit before hedging kicks in
     cooldown_minutes: 60                 # Wait 60 min before re-hedging same market
+  cashout:
+    enabled: true                        # Auto-sell when ANY profit detected
+    sell_pct: 100                         # Sell 100% of position
+    min_profit_pct: 1                     # Minimum 1% profit before selling (covers fees)
+    min_profit_usd: 0.02                 # Minimum $0.02 profit
+    cooldown_minutes: 15                 # Wait 15 min before re-checking same market
 
 # --- Polymarket Settings ---
 polymarket:

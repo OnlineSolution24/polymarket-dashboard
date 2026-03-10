@@ -47,6 +47,7 @@ class TraderAgent(BaseAgent):
             if mode == "full-auto":
                 executed = self._process_auto_approved()
                 executed += self._process_user_approved()
+                self._check_and_execute_cashouts()
                 self._check_and_execute_hedges()
             elif mode == "semi-auto":
                 executed = self._process_user_approved()
@@ -496,6 +497,130 @@ class TraderAgent(BaseAgent):
                 self.log("error", f"Hedge Exception: {e}")
 
         return hedged
+
+    # ------------------------------------------------------------------
+    # Auto-Cashout (sell 100% when in profit)
+    # ------------------------------------------------------------------
+
+    def _check_and_execute_cashouts(self) -> int:
+        """Auto-sell positions as soon as they are in profit."""
+        trading_cfg = self._get_trading_config()
+        cashout_cfg = trading_cfg.get("cashout", {})
+        if not cashout_cfg.get("enabled", False):
+            return 0
+
+        sell_pct = cashout_cfg.get("sell_pct", 100) / 100
+        min_profit_pct = cashout_cfg.get("min_profit_pct", 1)
+        min_profit_usd = cashout_cfg.get("min_profit_usd", 0.02)
+        cooldown_min = cashout_cfg.get("cooldown_minutes", 15)
+
+        # Get open positions with a recorded entry price
+        positions = engine.query(
+            "SELECT id, market_id, market_question, side, amount_usd, price, executed_at "
+            "FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL) "
+            "AND price IS NOT NULL AND price > 0 ORDER BY executed_at"
+        )
+        if not positions:
+            return 0
+
+        cashed_out = 0
+        for pos in positions:
+            market_id = pos["market_id"]
+            entry_price = pos["price"]
+
+            # Cooldown: skip if we recently tried to cashout this market
+            recent = engine.query_one(
+                "SELECT id FROM trades WHERE market_id = ? AND user_cmd LIKE 'cashout:%' "
+                "AND executed_at > ?",
+                (market_id, (datetime.utcnow() - timedelta(minutes=cooldown_min)).isoformat()),
+            )
+            if recent:
+                continue
+
+            # Get current market price
+            market = engine.query_one(
+                "SELECT yes_price, no_price, yes_token_id, no_token_id "
+                "FROM markets WHERE id = ?",
+                (market_id,),
+            )
+            if not market:
+                continue
+
+            current_price = market.get("yes_price") if pos["side"] == "YES" else market.get("no_price")
+            if not current_price or current_price <= 0:
+                continue
+
+            # Calculate profit
+            profit_pct = ((current_price - entry_price) / entry_price) * 100
+            shares = pos["amount_usd"] / entry_price
+            profit_usd = (current_price - entry_price) * shares
+
+            if profit_pct < min_profit_pct or profit_usd < min_profit_usd:
+                continue
+
+            # Execute cashout: sell position
+            sell_amount = round(pos["amount_usd"] * sell_pct, 2)
+            token_id = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
+            if not token_id:
+                continue
+
+            self.log("info",
+                f"CASHOUT: {pos['side']} Position in {market_id[:30]}... "
+                f"Profit: {profit_pct:.1f}% (${profit_usd:.2f}), selling ${sell_amount:.2f}")
+
+            try:
+                config = AppConfig.from_env()
+                if not config.polymarket_private_key:
+                    self.log("info", f"[PAPER-CASHOUT] Would sell ${sell_amount:.2f}")
+                    continue
+
+                from services.polymarket_client import PolymarketService
+                service = PolymarketService(config)
+                result = service.place_sell_order(token_id=token_id, amount=sell_amount)
+
+                if result.get("ok"):
+                    # Record cashout trade
+                    engine.execute(
+                        """INSERT INTO trades
+                           (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
+                           VALUES (?, ?, ?, ?, ?, 'executed', ?, ?, ?, ?, 'cashout', ?)""",
+                        (market_id, f"CASHOUT: {pos.get('market_question', '')[:50]}",
+                         pos["side"], -sell_amount, current_price,
+                         self.id, f"cashout:{pos['id']}",
+                         datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
+                         round(profit_usd, 4)),
+                    )
+
+                    # Mark original trade as closed with profit
+                    if sell_pct >= 1.0:
+                        engine.execute(
+                            "UPDATE trades SET result = 'win', pnl = ? WHERE id = ?",
+                            (round(profit_usd, 4), pos["id"]),
+                        )
+
+                    self.log("info", f"Cashout done: SELL ${sell_amount:.2f} (Profit: +${profit_usd:.2f})")
+
+                    try:
+                        from services.telegram_alerts import get_alerts
+                        alerts = get_alerts(config)
+                        alerts.send(
+                            f"💰 <b>Auto-Cashout!</b>\n"
+                            f"Markt: {pos.get('market_question', market_id)[:60]}\n"
+                            f"Seite: {pos['side']} | Entry: {entry_price:.2f} → Now: {current_price:.2f}\n"
+                            f"Profit: +${profit_usd:.2f} ({profit_pct:.1f}%)\n"
+                            f"Verkauft: ${sell_amount:.2f}"
+                        )
+                    except Exception:
+                        pass
+
+                    cashed_out += 1
+                else:
+                    self.log("warn", f"Cashout failed: {result.get('error', '?')}")
+
+            except Exception as e:
+                self.log("error", f"Cashout Exception: {e}")
+
+        return cashed_out
 
     # ------------------------------------------------------------------
     # Helpers
