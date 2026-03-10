@@ -87,9 +87,10 @@ class DataAPIClient:
     # ------------------------------------------------------------------
 
     def get_top_holders(self, condition_id: str, limit: int = 20) -> list[dict]:
-        """Fetch top holders for a market.
+        """Fetch top holders for a market (YES side).
 
-        Returns list with: proxyWallet, amount, pseudonym, name.
+        API returns [{"token": "...", "holders": [...]}, ...] grouped by outcome.
+        We flatten and return the YES-side holders (outcomeIndex=0).
         """
         try:
             resp = self._client.get(
@@ -97,7 +98,18 @@ class DataAPIClient:
                 params={"market": condition_id, "limit": limit},
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+
+            # API returns list of {token, holders} grouped by outcome token
+            if isinstance(data, list) and data and isinstance(data[0], dict) and "holders" in data[0]:
+                all_holders = []
+                for group in data:
+                    for h in group.get("holders", []):
+                        all_holders.append(h)
+                return all_holders
+
+            # Fallback: already a flat list
+            return data if isinstance(data, list) else []
         except Exception as e:
             logger.error(f"Holders fetch failed for {condition_id[:20]}: {e}")
             return []
