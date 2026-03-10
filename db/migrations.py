@@ -21,6 +21,8 @@ def initialize_database() -> None:
     current = _get_schema_version_raw(conn)
     if current < 3:
         _upgrade_to_v3(conn)
+    if current < 5:
+        _upgrade_to_v5(conn)
 
     # Set schema version
     conn.execute(
@@ -62,6 +64,24 @@ def _upgrade_to_v3(conn) -> None:
         ("book_imbalance", "REAL"),
         ("bid_depth", "REAL"),
         ("ask_depth", "REAL"),
+    ]
+    for col_name, col_type in new_columns:
+        try:
+            conn.execute(f"ALTER TABLE markets ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass  # Column already exists
+
+
+def _upgrade_to_v5(conn) -> None:
+    """Add whale/smart-money signal columns to markets table."""
+    new_columns = [
+        ("whale_buy_count", "INTEGER DEFAULT 0"),
+        ("whale_sell_count", "INTEGER DEFAULT 0"),
+        ("whale_net_flow", "REAL DEFAULT 0"),
+        ("top_holder_concentration", "REAL"),
+        ("open_interest", "REAL"),
+        ("oi_change_24h", "REAL"),
+        ("smart_money_score", "REAL"),
     ]
     for col_name, col_type in new_columns:
         try:

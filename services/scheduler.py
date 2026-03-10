@@ -238,9 +238,54 @@ def _job_refresh_markets(config: AppConfig):
         except Exception as e:
             logger.error(f"Order book signal computation failed: {e}")
 
+        # Compute whale/smart-money signals for top 20 markets
+        whale_count = 0
+        try:
+            from services.data_api_client import DataAPIClient
+
+            data_client = DataAPIClient()
+            top_for_whale = engine.query(
+                "SELECT id FROM markets "
+                "WHERE accepting_orders = 1 "
+                "ORDER BY volume DESC LIMIT 20"
+            )
+            for m in top_for_whale:
+                mid = m["id"]
+                whale = data_client.compute_whale_signals(mid)
+                conc = data_client.compute_holder_concentration(mid)
+                oi = data_client.get_open_interest(mid)
+                sm_score = data_client.compute_smart_money_score(mid)
+
+                # Compute OI change vs last stored value
+                oi_change = None
+                if oi is not None:
+                    prev = engine.query_one(
+                        "SELECT open_interest FROM markets WHERE id = ?", (mid,)
+                    )
+                    if prev and prev.get("open_interest"):
+                        old_oi = float(prev["open_interest"])
+                        if old_oi > 0:
+                            oi_change = round((oi - old_oi) / old_oi, 4)
+
+                engine.execute(
+                    """UPDATE markets SET
+                       whale_buy_count = ?, whale_sell_count = ?, whale_net_flow = ?,
+                       top_holder_concentration = ?, open_interest = ?,
+                       oi_change_24h = COALESCE(?, oi_change_24h),
+                       smart_money_score = ?
+                       WHERE id = ?""",
+                    (whale["whale_buy_count"], whale["whale_sell_count"],
+                     whale["whale_net_flow"], conc, oi, oi_change, sm_score, mid),
+                )
+                whale_count += 1
+
+            data_client.close()
+        except Exception as e:
+            logger.error(f"Whale signal computation failed: {e}")
+
         logger.info(
             f"Market refresh: {len(markets)} markets updated + snapshots saved + "
-            f"{ob_count} order books analyzed"
+            f"{ob_count} order books + {whale_count} whale signals analyzed"
         )
     except Exception as e:
         logger.error(f"Market refresh failed: {e}")

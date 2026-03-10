@@ -3,7 +3,7 @@ SQLite table definitions (13 tables).
 Each table has a CREATE TABLE statement and helper CRUD functions.
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 TABLES = {
     "schema_version": """
@@ -55,6 +55,14 @@ TABLES = {
             book_imbalance  REAL,
             bid_depth       REAL,
             ask_depth       REAL,
+            -- Whale / Smart Money signals (Data API)
+            whale_buy_count     INTEGER DEFAULT 0,
+            whale_sell_count    INTEGER DEFAULT 0,
+            whale_net_flow      REAL DEFAULT 0,
+            top_holder_concentration REAL,
+            open_interest       REAL,
+            oi_change_24h       REAL,
+            smart_money_score   REAL,
             last_updated    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,

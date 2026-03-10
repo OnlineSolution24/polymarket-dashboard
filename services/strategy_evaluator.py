@@ -25,7 +25,11 @@ def evaluate_rules(market: dict, rules: list[dict]) -> bool:
 
     Each rule: {"field": "yes_price", "op": "lt", "value": 0.30}
     Supported fields: yes_price, no_price, volume, liquidity,
-                      sentiment_score, calculated_edge, days_to_expiry
+                      sentiment_score, calculated_edge, days_to_expiry,
+                      whale_buy_count, whale_sell_count, whale_net_flow,
+                      top_holder_concentration, open_interest, oi_change_24h,
+                      smart_money_score, book_imbalance, spread,
+                      volume_24h, volume_1w, bid_depth, ask_depth
     """
     for rule in rules:
         field = rule.get("field", "")
