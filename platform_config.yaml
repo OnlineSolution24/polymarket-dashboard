@@ -100,7 +100,8 @@ scheduler:
   agent_health_check:
     enabled: true
     interval_minutes: 15
-  chief_analysis_interval: 240
+  chief_analysis_hour: 19               # 1x/day at 19:00 UTC (before daily summary)
+  analyst_hour: 8                        # 1x/day at 08:00 UTC
   ml_retrain:
     enabled: true                      # Auto-skips if <20 completed trades
     interval_days: 1
@@ -113,6 +114,7 @@ scheduler:
   daily_summary:
     enabled: true
     hour: 20                           # 20:00 UTC
+  pattern_scanner_hour: 9               # Daily at 09:00 UTC (after analyst at 08:00)
   settlement:
     enabled: true
     interval_minutes: 30               # Check for resolved markets every 30 min

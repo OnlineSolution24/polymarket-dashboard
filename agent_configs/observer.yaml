@@ -17,6 +17,6 @@ agent:
   schedule: "*/30 * * * *"
   budget_daily_usd: 0.50
   model: "haiku"
-  enabled: true
+  enabled: false                        # Disabled: produces no actionable output, wastes AI budget
   priority: 2
   depends_on: []

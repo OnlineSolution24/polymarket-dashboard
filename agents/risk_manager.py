@@ -19,22 +19,34 @@ class RiskManagerAgent(BaseAgent):
             # 1. Check consecutive losses
             self._check_circuit_breaker()
 
-            # 2. Check portfolio exposure
+            # 2. Check portfolio exposure (pure math, no AI needed)
             exposure = self._check_exposure()
 
-            # 3. Generate risk report
-            if exposure["total_exposure_usd"] > 0:
-                prompt = (
-                    f"Risk Report:\n"
-                    f"Offene Positionen: {exposure['open_count']}\n"
-                    f"Total Exposure: ${exposure['total_exposure_usd']:.2f}\n"
-                    f"Max Einzelposition: ${exposure['max_position_usd']:.2f}\n"
-                    f"Verluste in Folge: {exposure['consecutive_losses']}\n\n"
-                    f"Bewerte das aktuelle Risiko und schlage Anpassungen vor falls nötig."
-                )
-                response = self.think(prompt)
-                if response:
-                    self.log("info", f"Risk assessment: {response[:200]}")
+            # 3. Log risk metrics (no LLM call — this is pure math)
+            platform_cfg = load_platform_config()
+            capital = platform_cfg.get("trading", {}).get("capital_usd", 100)
+            exposure_pct = (exposure["total_exposure_usd"] / capital * 100) if capital > 0 else 0
+
+            self.log("info",
+                f"Risk: {exposure['open_count']} Positionen, "
+                f"${exposure['total_exposure_usd']:.2f} Exposure ({exposure_pct:.0f}%), "
+                f"Max: ${exposure['max_position_usd']:.2f}, "
+                f"Verluste: {exposure['consecutive_losses']}"
+            )
+
+            # Alert if exposure > 50% of capital
+            if exposure_pct > 50:
+                try:
+                    from config import AppConfig
+                    from services.telegram_alerts import get_alerts
+                    alerts = get_alerts(AppConfig.from_env())
+                    alerts.send(
+                        f"⚠️ <b>Hohe Exposure</b>\n"
+                        f"Offene Positionen: {exposure['open_count']}\n"
+                        f"Exposure: ${exposure['total_exposure_usd']:.2f} ({exposure_pct:.0f}% vom Kapital)"
+                    )
+                except Exception:
+                    pass
 
             return {"ok": True, "summary": f"Risk check complete. Exposure: ${exposure['total_exposure_usd']:.2f}"}
 

@@ -4,9 +4,9 @@ agent:
   persona: |
     Du bist ein Tiefenanalyst für Polymarket-Märkte.
     Deine Aufgaben:
-    1. Detaillierte Analyse von Märkten die der Observer gemeldet hat.
+    1. Detaillierte Analyse der Top-Märkte mit den besten Signalen.
     2. Berechne den "Edge" - Differenz zwischen Marktpreis und deiner Einschätzung.
-    3. Recherchiere Hintergrundinformationen zu Events/Fragen.
+    3. Nutze Order Book Daten, Volumen-Trends und Preisbewegungen.
     4. Bewerte Quellen nach Zuverlässigkeit und Accuracy.
     Liefere klare Empfehlungen mit Konfidenz-Levels (niedrig/mittel/hoch).
   skills:
@@ -14,9 +14,9 @@ agent:
     - edge_calculation
     - source_evaluation
     - probability_estimation
-  schedule: "0 * * * *"
-  budget_daily_usd: 1.00
+  schedule: "0 8 * * *"                # 1x/day at 08:00 UTC (saves ~90% AI costs)
+  budget_daily_usd: 0.30               # Reduced from $1.00 (only 1 call/day)
   model: "claude-sonnet"
   enabled: true
   priority: 3
-  depends_on: ["observer"]
+  depends_on: []                        # No longer depends on observer (observer disabled)

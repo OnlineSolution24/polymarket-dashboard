@@ -67,13 +67,21 @@ def start_scheduler(config: AppConfig) -> None:
                 )
                 logger.info(f"Scheduled: agent_cycles every {interval}min")
 
-            # Chief analysis cycle
-            chief_interval = sched_cfg.get("chief_analysis_interval", 15)
+            # Chief analysis cycle (1x/day at 19:00 UTC — before daily summary at 20:00)
+            chief_hour = sched_cfg.get("chief_analysis_hour", 19)
             _scheduler.add_job(
-                _job_run_chief_cycle, "interval", minutes=chief_interval,
+                _job_run_chief_cycle, "cron", hour=chief_hour, minute=0,
                 id="chief_analysis", replace_existing=True, args=[config],
             )
-            logger.info(f"Scheduled: chief_analysis every {chief_interval}min")
+            logger.info(f"Scheduled: chief_analysis daily at {chief_hour}:00 UTC")
+
+            # Analyst cycle (1x/day at 08:00 UTC)
+            analyst_hour = sched_cfg.get("analyst_hour", 8)
+            _scheduler.add_job(
+                _job_run_analyst_cycle, "cron", hour=analyst_hour, minute=0,
+                id="analyst_cycle", replace_existing=True, args=[config],
+            )
+            logger.info(f"Scheduled: analyst_cycle daily at {analyst_hour}:00 UTC")
 
             # ML retraining
             if sched_cfg.get("ml_retrain", {}).get("enabled", False):
@@ -122,6 +130,14 @@ def start_scheduler(config: AppConfig) -> None:
                 id="trader_cycle", replace_existing=True, args=[config],
             )
             logger.info(f"Scheduled: trader_cycle every {trader_interval}min")
+
+            # Pattern Scanner (daily at 09:00 UTC — after analyst at 08:00)
+            pattern_hour = sched_cfg.get("pattern_scanner_hour", 9)
+            _scheduler.add_job(
+                _job_pattern_scanner, "cron", hour=pattern_hour, minute=0,
+                id="pattern_scanner", replace_existing=True, args=[config],
+            )
+            logger.info(f"Scheduled: pattern_scanner daily at {pattern_hour}:00 UTC")
 
             # Settlement: check if markets resolved, update trade results
             settlement_interval = sched_cfg.get("settlement", {}).get("interval_minutes", 30)
@@ -248,7 +264,7 @@ def _job_update_sentiment(config: AppConfig):
 
 
 def _job_run_agent_cycles(config: AppConfig):
-    """Run enabled agent cycles based on their schedules."""
+    """Run enabled agent cycles (skip analyst — it has its own daily schedule)."""
     try:
         from config import load_agent_configs
         from agents.agent_factory import create_agent
@@ -258,10 +274,13 @@ def _job_run_agent_cycles(config: AppConfig):
         bridge = get_bridge(config)
         configs = load_agent_configs()
 
+        # Agents that have their own dedicated schedule
+        _SEPARATE_SCHEDULE = {"chief", "analyst"}
+
         for agent_cfg in configs:
             if not agent_cfg.enabled:
                 continue
-            if agent_cfg.role == "chief":
+            if agent_cfg.role in _SEPARATE_SCHEDULE:
                 continue
 
             # Check budget before running
@@ -276,7 +295,6 @@ def _job_run_agent_cycles(config: AppConfig):
                 logger.debug(f"Agent {agent_cfg.id}: {result.get('summary', '')[:100]}")
             except Exception as e:
                 logger.error(f"Agent {agent_cfg.id} cycle failed: {e}")
-                # Alert on error
                 try:
                     from services.telegram_alerts import get_alerts
                     alerts = get_alerts(config)
@@ -312,6 +330,32 @@ def _job_run_chief_cycle(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Chief cycle failed: {e}")
+
+
+def _job_run_analyst_cycle(config: AppConfig):
+    """Run the Analyst agent cycle (1x/day for cost efficiency)."""
+    try:
+        from config import load_agent_configs
+        from agents.agent_factory import create_agent
+        from services.telegram_bridge import get_bridge
+        from services.cost_tracker import check_budget
+
+        bridge = get_bridge(config)
+
+        for cfg in load_agent_configs():
+            if cfg.role == "analyst" and cfg.enabled:
+                budget = check_budget(agent_id=cfg.id)
+                if not budget["allowed"]:
+                    logger.debug(f"Analyst {cfg.id} skipped: {budget['reason']}")
+                    return
+
+                agent = create_agent(cfg, bridge)
+                result = agent.run_cycle()
+                logger.info(f"Analyst daily cycle: {result.get('summary', '')[:100]}")
+                return
+
+    except Exception as e:
+        logger.error(f"Analyst cycle failed: {e}")
 
 
 def _job_evaluate_strategies(config: AppConfig):
@@ -613,6 +657,176 @@ def _job_cleanup_snapshots():
         logger.debug("Snapshot cleanup completed")
     except Exception as e:
         logger.error(f"Snapshot cleanup failed: {e}")
+
+
+def _job_pattern_scanner(config: AppConfig):
+    """
+    Pattern Scanner: Find statistically significant win patterns in settled trades.
+    Groups trades by category, price bucket, volume bucket, side, etc.
+    If a pattern has significantly higher win rate than average, propose it as strategy.
+    Runs daily — needs Settlement data to work.
+    """
+    try:
+        from db import engine
+        from services.telegram_alerts import get_alerts
+
+        # Need at least 15 settled trades to find meaningful patterns
+        count_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades WHERE result IS NOT NULL"
+        )
+        total_trades = count_row["cnt"] if count_row else 0
+        if total_trades < 15:
+            logger.debug(f"Pattern scanner: only {total_trades}/15 settled trades, skipping")
+            return
+
+        # Overall baseline win rate
+        stats = engine.query_one(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins, "
+            "COALESCE(SUM(pnl), 0) as total_pnl "
+            "FROM trades WHERE result IS NOT NULL"
+        )
+        baseline_wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
+
+        patterns_found = []
+
+        # --- Pattern dimensions to scan ---
+
+        # 1. By category
+        by_category = engine.query(
+            "SELECT m.category, COUNT(*) as cnt, "
+            "SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins, "
+            "COALESCE(SUM(t.pnl), 0) as pnl "
+            "FROM trades t JOIN markets m ON t.market_id = m.id "
+            "WHERE t.result IS NOT NULL AND m.category != '' "
+            "GROUP BY m.category HAVING cnt >= 5"
+        )
+        for row in by_category:
+            wr = row["wins"] / row["cnt"]
+            if wr > baseline_wr + 0.10 and row["cnt"] >= 5:
+                patterns_found.append({
+                    "name": f"Category: {row['category']}",
+                    "rule": f"category = '{row['category']}'",
+                    "trades": row["cnt"], "win_rate": wr, "pnl": row["pnl"],
+                })
+
+        # 2. By price bucket (entry price)
+        price_buckets = [
+            ("Under 20¢", 0, 0.20),
+            ("20-40¢", 0.20, 0.40),
+            ("40-60¢", 0.40, 0.60),
+            ("60-80¢", 0.60, 0.80),
+            ("Over 80¢", 0.80, 1.01),
+        ]
+        for label, low, high in price_buckets:
+            row = engine.query_one(
+                "SELECT COUNT(*) as cnt, "
+                "SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins, "
+                "COALESCE(SUM(pnl), 0) as pnl "
+                "FROM trades WHERE result IS NOT NULL AND price >= ? AND price < ?",
+                (low, high),
+            )
+            if row and row["cnt"] >= 5:
+                wr = row["wins"] / row["cnt"]
+                if wr > baseline_wr + 0.10:
+                    patterns_found.append({
+                        "name": f"Price: {label}",
+                        "rule": f"price >= {low} AND price < {high}",
+                        "trades": row["cnt"], "win_rate": wr, "pnl": row["pnl"],
+                    })
+
+        # 3. By side (YES vs NO)
+        by_side = engine.query(
+            "SELECT side, COUNT(*) as cnt, "
+            "SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins, "
+            "COALESCE(SUM(pnl), 0) as pnl "
+            "FROM trades WHERE result IS NOT NULL "
+            "GROUP BY side HAVING cnt >= 5"
+        )
+        for row in by_side:
+            wr = row["wins"] / row["cnt"]
+            if wr > baseline_wr + 0.10:
+                patterns_found.append({
+                    "name": f"Side: {row['side']}",
+                    "rule": f"side = '{row['side']}'",
+                    "trades": row["cnt"], "win_rate": wr, "pnl": row["pnl"],
+                })
+
+        # 4. By volume bucket
+        vol_buckets = [
+            ("Low Volume (<$50k)", 0, 50000),
+            ("Medium ($50k-$500k)", 50000, 500000),
+            ("High Volume (>$500k)", 500000, 999999999),
+        ]
+        for label, low, high in vol_buckets:
+            row = engine.query_one(
+                "SELECT COUNT(*) as cnt, "
+                "SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins, "
+                "COALESCE(SUM(t.pnl), 0) as pnl "
+                "FROM trades t JOIN markets m ON t.market_id = m.id "
+                "WHERE t.result IS NOT NULL AND m.volume >= ? AND m.volume < ?",
+                (low, high),
+            )
+            if row and row["cnt"] >= 5:
+                wr = row["wins"] / row["cnt"]
+                if wr > baseline_wr + 0.10:
+                    patterns_found.append({
+                        "name": f"Volume: {label}",
+                        "rule": f"volume >= {low} AND volume < {high}",
+                        "trades": row["cnt"], "win_rate": wr, "pnl": row["pnl"],
+                    })
+
+        # --- Report findings ---
+        if patterns_found:
+            # Sort by win rate
+            patterns_found.sort(key=lambda p: p["win_rate"], reverse=True)
+
+            msg_lines = ["🔍 <b>Pattern Scanner — Ergebnisse</b>\n"]
+            msg_lines.append(f"Basis Win-Rate: {baseline_wr:.0%} ({stats['total']} Trades)\n")
+
+            for p in patterns_found[:5]:
+                msg_lines.append(
+                    f"✅ <b>{p['name']}</b>\n"
+                    f"   Win-Rate: {p['win_rate']:.0%} ({p['trades']} Trades)\n"
+                    f"   PnL: ${p['pnl']:+.2f}\n"
+                )
+
+            alerts = get_alerts(config)
+            alerts.send("\n".join(msg_lines))
+
+            # Save patterns to DB as draft strategies (if not already existing)
+            import json as json_mod
+            for p in patterns_found[:3]:
+                existing = engine.query_one(
+                    "SELECT id FROM strategies WHERE name = ?",
+                    (f"Pattern: {p['name']}",),
+                )
+                if not existing:
+                    import uuid
+                    strat_id = f"pattern_{uuid.uuid4().hex[:8]}"
+                    engine.execute(
+                        "INSERT INTO strategies (id, name, description, status, definition, created_at) "
+                        "VALUES (?, ?, ?, 'draft', ?, datetime('now'))",
+                        (
+                            strat_id,
+                            f"Pattern: {p['name']}",
+                            f"Auto-discovered: {p['win_rate']:.0%} win rate over {p['trades']} trades",
+                            json_mod.dumps({
+                                "source": "pattern_scanner",
+                                "rule": p["rule"],
+                                "win_rate": p["win_rate"],
+                                "sample_size": p["trades"],
+                                "pnl": p["pnl"],
+                            }),
+                        ),
+                    )
+
+            logger.info(f"Pattern scanner: found {len(patterns_found)} patterns, top: {patterns_found[0]['name']}")
+        else:
+            logger.info(f"Pattern scanner: no significant patterns in {total_trades} trades (baseline WR: {baseline_wr:.0%})")
+
+    except Exception as e:
+        logger.error(f"Pattern scanner failed: {e}")
 
 
 def _job_settle_trades(config: AppConfig):
