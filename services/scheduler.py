@@ -147,6 +147,13 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info(f"Scheduled: settlement every {settlement_interval}min")
 
+            # Position sync (every 30min — sync real on-chain positions into DB)
+            _scheduler.add_job(
+                _job_sync_positions, "interval", minutes=30,
+                id="position_sync", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: position_sync every 30min")
+
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
                 _job_cleanup_cache, "interval", hours=6,
@@ -980,3 +987,97 @@ def _update_circuit_breaker_from_settlements(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Circuit breaker update failed: {e}")
+
+
+def _job_sync_positions(config: AppConfig):
+    """
+    Sync real on-chain positions from Polymarket Data API into the DB.
+    Creates trade records for positions that aren't tracked yet,
+    and updates entry prices from actual trade data.
+    """
+    try:
+        from db import engine
+        from services.polymarket_client import PolymarketService
+
+        funder = config.polymarket_funder
+        if not funder:
+            return
+
+        service = PolymarketService(config)
+        positions = service.get_user_positions(funder)
+
+        if not positions:
+            logger.debug("Position sync: no on-chain positions found")
+            return
+
+        synced = 0
+        for pos in positions:
+            # Data API returns: market, asset (token_id), size (shares),
+            # avgPrice, curPrice, value, pnl, etc.
+            market_slug = pos.get("market", {}).get("slug", "") if isinstance(pos.get("market"), dict) else ""
+            condition_id = pos.get("conditionId", pos.get("market", {}).get("conditionId", "")) if isinstance(pos.get("market"), dict) else pos.get("conditionId", "")
+            token_id = pos.get("asset", pos.get("tokenId", ""))
+            shares = float(pos.get("size", 0) or 0)
+            avg_price = float(pos.get("avgPrice", 0) or 0)
+            cur_price = float(pos.get("curPrice", 0) or 0)
+
+            if shares <= 0 or not condition_id:
+                continue
+
+            amount_usd = round(shares * avg_price, 4)
+
+            # Determine side (YES/NO) by matching token_id to market
+            market_row = engine.query_one(
+                "SELECT id, yes_token_id, no_token_id, question FROM markets WHERE id = ?",
+                (condition_id,),
+            )
+            if not market_row:
+                # Try to find by token ID
+                market_row = engine.query_one(
+                    "SELECT id, yes_token_id, no_token_id, question FROM markets "
+                    "WHERE yes_token_id = ? OR no_token_id = ?",
+                    (token_id, token_id),
+                )
+            if not market_row:
+                continue
+
+            side = "YES" if token_id == market_row.get("yes_token_id") else "NO"
+            market_id = market_row["id"]
+            question = market_row.get("question", "")
+
+            # Check if we already have an active trade for this market+side
+            existing = engine.query_one(
+                "SELECT id, price FROM trades WHERE market_id = ? AND side = ? "
+                "AND status = 'executed' AND (result IS NULL OR result = 'open')",
+                (market_id, side),
+            )
+
+            if existing:
+                # Update price if missing
+                if not existing.get("price") or existing["price"] <= 0:
+                    engine.execute(
+                        "UPDATE trades SET price = ?, amount_usd = ? WHERE id = ?",
+                        (avg_price, amount_usd, existing["id"]),
+                    )
+                    synced += 1
+                    logger.info(f"Position sync: updated price for trade {existing['id']} "
+                                f"({side} {question[:40]}): ${avg_price:.4f}")
+            else:
+                # Create new trade record from on-chain position
+                engine.execute(
+                    """INSERT INTO trades
+                       (market_id, market_question, side, amount_usd, price, status,
+                        agent_id, user_cmd, created_at, executed_at)
+                       VALUES (?, ?, ?, ?, ?, 'executed', 'sync', 'position_sync', ?, ?)""",
+                    (market_id, question, side, amount_usd, avg_price,
+                     datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+                )
+                synced += 1
+                logger.info(f"Position sync: imported {side} position in "
+                            f"'{question[:40]}' (${amount_usd:.2f} @ {avg_price:.4f})")
+
+        if synced > 0:
+            logger.info(f"Position sync: {synced} positions synced from Data API")
+
+    except Exception as e:
+        logger.error(f"Position sync failed: {e}")
