@@ -35,16 +35,16 @@ def render():
     open_positions = status.get("open_positions", 0)
     pending_suggestions = status.get("pending_suggestions", 0)
 
-    # Real profit from performance endpoint (not including cost basis)
+    # Unrealized PnL from open positions
     perf = client.get_performance()
-    today_pnl = perf.get("pnl_today", 0)
-    total_pnl = perf.get("pnl_all", 0)
+    unrealized = perf.get("unrealized_pnl", 0)
+    deposited = perf.get("total_deposited", 0)
 
     kpi_items = [
         {"label": "Aktive Agents", "value": active_agents},
         {"label": "Offene Positionen", "value": open_positions},
-        {"label": "Profit Heute", "value": f"${today_pnl:+.2f}", "delta_color": "normal" if today_pnl >= 0 else "inverse"},
-        {"label": "Gesamt Profit", "value": f"${total_pnl:+.2f}", "delta_color": "normal" if total_pnl >= 0 else "inverse"},
+        {"label": "Eingezahlt", "value": f"${deposited:,.2f}"},
+        {"label": "Unrealisierter PnL", "value": f"${unrealized:+.2f}", "delta_color": "normal" if unrealized >= 0 else "inverse"},
         {"label": "AI-Kosten Heute (OR)", "value": f"${today_cost:.2f}"},
         {"label": "Pending Suggestions", "value": pending_suggestions},
     ]

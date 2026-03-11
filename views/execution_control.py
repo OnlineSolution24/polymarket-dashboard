@@ -1,7 +1,7 @@
 """
-Portfolio & Performance — Live positions, closed trades, equity curve,
-and period PnL. Bot controls (pause/resume, circuit breaker, risk settings)
-are at the bottom.
+Portfolio & Performance — Live positions, closed trades, and real PnL
+based on deposits vs current portfolio value.
+Bot controls (pause/resume, circuit breaker, risk settings) at the bottom.
 """
 
 import streamlit as st
@@ -9,64 +9,59 @@ import pandas as pd
 from datetime import datetime
 
 from services.bot_api_client import get_bot_client
-from components.charts import equity_curve_chart
 
 
 def render():
     st.header("Portfolio & Performance")
 
     client = get_bot_client()
-
-    # ══════════════════════════════════════════════════════════════════
-    # 1. PNL OVERVIEW — Period KPIs
-    # ══════════════════════════════════════════════════════════════════
     perf = client.get_performance()
 
-    cols = st.columns(4)
-    _pnl_metric(cols[0], "Heute", perf.get("pnl_today", 0))
-    _pnl_metric(cols[1], "7 Tage", perf.get("pnl_7d", 0))
-    _pnl_metric(cols[2], "30 Tage", perf.get("pnl_30d", 0))
-    _pnl_metric(cols[3], "Gesamt", perf.get("pnl_all", 0))
+    total_deposited = perf.get("total_deposited", 0)
+    positions_value = perf.get("open_positions_value", 0)
+    positions_cost = perf.get("open_positions_cost", 0)
+    unrealized_pnl = perf.get("unrealized_pnl", 0)
 
     # ══════════════════════════════════════════════════════════════════
-    # 2. EQUITY CURVE
+    # 1. PORTFOLIO OVERVIEW
     # ══════════════════════════════════════════════════════════════════
-    equity = perf.get("equity_curve", [])
-    if equity:
-        st.plotly_chart(equity_curve_chart(equity), use_container_width=True)
-    else:
-        st.caption("Noch keine Performance-Daten für die Equity Curve.")
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Eingezahlt", f"${total_deposited:,.2f}")
+    with cols[1]:
+        st.metric("Positionen Wert", f"${positions_value:,.2f}")
+    with cols[2]:
+        st.metric("Investiert (Einsatz)", f"${positions_cost:,.2f}")
+    with cols[3]:
+        delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
+        st.metric("Unrealisierter PnL",
+                   f"${unrealized_pnl:+.2f}",
+                   delta=f"{unrealized_pnl:+.2f}",
+                   delta_color=delta_color)
+
+    # Hint about Polymarket PnL
+    if total_deposited > 0:
+        st.caption(
+            f"Dein realer Gesamt-PnL ergibt sich aus: "
+            f"**Portfolio-Wert (Polymarket)** − **Eingezahlt** (${total_deposited:,.2f}). "
+            f"Prüfe deinen aktuellen Portfolio-Wert auf Polymarket."
+        )
 
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 3. OFFENE POSITIONEN
+    # 2. OFFENE POSITIONEN
     # ══════════════════════════════════════════════════════════════════
     st.subheader("Offene Positionen")
     positions = client.get_open_positions()
 
     if positions:
-        total_value = sum(p.get("current_value", 0) for p in positions)
-        total_cost = sum(p.get("cost_basis", 0) for p in positions)
-        total_unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
-
-        mc = st.columns(3)
-        with mc[0]:
-            st.metric("Investiert", f"${total_cost:.2f}")
-        with mc[1]:
-            st.metric("Aktueller Wert", f"${total_value:.2f}")
-        with mc[2]:
-            color = "normal" if total_unrealized >= 0 else "inverse"
-            st.metric("Unrealisierter PnL", f"${total_unrealized:+.2f}",
-                       delta=f"{total_unrealized:+.2f}", delta_color=color)
-
         df = pd.DataFrame(positions)
         df_display = df[["market_question", "side", "entry_price", "current_price",
                          "shares", "cost_basis", "current_value", "unrealized_pnl", "pnl_pct"]].copy()
         df_display.columns = ["Markt", "Seite", "Einstieg", "Aktuell",
                               "Shares", "Einsatz", "Wert", "PnL $", "PnL %"]
 
-        # Format
         df_display["Einstieg"] = df_display["Einstieg"].apply(lambda x: f"{x:.3f}")
         df_display["Aktuell"] = df_display["Aktuell"].apply(lambda x: f"{x:.3f}")
         df_display["Einsatz"] = df_display["Einsatz"].apply(lambda x: f"${x:.2f}")
@@ -82,18 +77,17 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 4. ABGESCHLOSSENE TRADES
+    # 3. ABGESCHLOSSENE TRADES
     # ══════════════════════════════════════════════════════════════════
     st.subheader("Abgeschlossene Trades")
     closed = client.get_closed_trades()
 
     if closed:
-        stats = client.get_trade_stats()
-        total_trades = stats.get("total", 0)
-        wins = stats.get("wins", 0)
-        losses = stats.get("losses", 0)
+        total_trades = perf.get("total_trades", 0)
+        wins = perf.get("wins", 0)
+        losses = perf.get("losses", 0)
 
-        sc = st.columns(4)
+        sc = st.columns(3)
         with sc[0]:
             st.metric("Trades", total_trades)
         with sc[1]:
@@ -101,29 +95,54 @@ def render():
             st.metric("Win Rate", f"{wr:.0f}%")
         with sc[2]:
             st.metric("W / L", f"{wins} / {losses}")
-        with sc[3]:
-            realized = stats.get("total_pnl", 0)
-            st.metric("Realisierter PnL", f"${realized:+.2f}")
 
         df_closed = pd.DataFrame(closed)
-        df_show = df_closed[["market_question", "side", "entry_price",
-                              "result", "realized_pnl", "executed_at"]].copy()
-        df_show.columns = ["Markt", "Seite", "Einstieg", "Ergebnis", "PnL $", "Datum"]
+        cols_to_show = ["market_question", "side", "entry_price", "result", "executed_at"]
+        if "realized_pnl" in df_closed.columns:
+            cols_to_show.insert(4, "realized_pnl")
 
-        df_show["Einstieg"] = df_show["Einstieg"].apply(
-            lambda x: f"{x:.3f}" if x else "-")
-        df_show["PnL $"] = df_show["PnL $"].apply(
-            lambda x: f"${x:+.2f}" if x else "$0.00")
-        df_show["Datum"] = df_show["Datum"].apply(
-            lambda x: x[:16] if x else "-")
-        df_show["Markt"] = df_show["Markt"].str[:55]
-        df_show["Ergebnis"] = df_show["Ergebnis"].str.upper()
+        df_show = df_closed[[c for c in cols_to_show if c in df_closed.columns]].copy()
+        rename = {"market_question": "Markt", "side": "Seite", "entry_price": "Einstieg",
+                  "result": "Ergebnis", "realized_pnl": "PnL $", "executed_at": "Datum"}
+        df_show.columns = [rename.get(c, c) for c in df_show.columns]
+
+        if "Einstieg" in df_show.columns:
+            df_show["Einstieg"] = df_show["Einstieg"].apply(
+                lambda x: f"{x:.3f}" if x else "-")
+        if "PnL $" in df_show.columns:
+            df_show["PnL $"] = df_show["PnL $"].apply(
+                lambda x: f"${x:+.2f}" if x else "-")
+        if "Datum" in df_show.columns:
+            df_show["Datum"] = df_show["Datum"].apply(
+                lambda x: x[:16] if x else "-")
+        if "Markt" in df_show.columns:
+            df_show["Markt"] = df_show["Markt"].str[:55]
+        if "Ergebnis" in df_show.columns:
+            df_show["Ergebnis"] = df_show["Ergebnis"].str.upper()
 
         st.dataframe(df_show, use_container_width=True, hide_index=True)
     else:
         st.caption("Noch keine abgeschlossenen Trades.")
 
     st.divider()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 4. EINZAHLUNG BEARBEITEN
+    # ══════════════════════════════════════════════════════════════════
+    with st.expander("Einzahlung anpassen", expanded=False):
+        new_deposited = st.number_input(
+            "Gesamt eingezahlt ($)",
+            min_value=0.0, max_value=100000.0,
+            value=float(total_deposited), step=50.0,
+            key="total_deposited",
+        )
+        if new_deposited != total_deposited and st.button("Einzahlung speichern"):
+            config = client.get_config()
+            config.setdefault("trading", {})["total_deposited"] = new_deposited
+            result = client.save_config(config)
+            if result and result.get("ok"):
+                st.success(f"Einzahlung auf ${new_deposited:,.2f} aktualisiert!")
+                st.rerun()
 
     # ══════════════════════════════════════════════════════════════════
     # 5. BOT CONTROLS (collapsed)
@@ -133,17 +152,6 @@ def render():
 
         config = client.get_config()
         _render_risk_controls(client, config)
-
-
-# ======================================================================
-# Helper: PnL metric with color
-# ======================================================================
-
-def _pnl_metric(col, label: str, value: float):
-    """Render a PnL metric with green/red coloring."""
-    with col:
-        delta_color = "normal" if value >= 0 else "inverse"
-        st.metric(label, f"${value:+.2f}", delta=f"{value:+.2f}", delta_color=delta_color)
 
 
 # ======================================================================

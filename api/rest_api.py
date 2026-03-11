@@ -256,53 +256,67 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/trades/performance", dependencies=[Depends(verify_api_key)])
     def get_performance():
-        """Daily PnL aggregation for equity curve + period stats."""
-        daily = engine.query("""
-            SELECT date(executed_at) as day,
-                   SUM(pnl) as daily_pnl,
-                   COUNT(*) as trades
+        """Portfolio performance based on deposits vs current position values.
+
+        Net PnL = (cash + open positions value) - total deposited.
+        Since we can't query Polymarket cash balance directly, we compute
+        open position value from our data and show it alongside the deposit.
+        """
+        platform_cfg = load_platform_config()
+        trading_cfg = platform_cfg.get("trading", {})
+        total_deposited = trading_cfg.get("total_deposited", 0)
+
+        # Calculate total open position value and cost
+        positions = engine.query("""
+            SELECT t.amount_usd, t.price as entry_price, t.side,
+                   m.yes_price, m.no_price
+            FROM trades t
+            LEFT JOIN markets m ON t.market_id = m.id
+            WHERE t.status = 'executed'
+              AND (t.result IS NULL OR t.result = 'open')
+              AND t.amount_usd > 0
+        """)
+
+        total_invested = 0
+        total_current_value = 0
+        for p in positions:
+            entry = p.get("entry_price") or 0
+            current = p.get("yes_price") if p.get("side") == "YES" else p.get("no_price")
+            current = current or 0
+            shares = (p["amount_usd"] / entry) if entry > 0 else 0
+            total_invested += p["amount_usd"]
+            total_current_value += shares * current
+
+        unrealized_pnl = round(total_current_value - total_invested, 2)
+
+        # Count closed trade results
+        stats = engine.query_one("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN result='win' OR result='cashout' THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) as losses
             FROM trades
-            WHERE pnl IS NOT NULL AND executed_at IS NOT NULL
+            WHERE result IN ('win', 'loss', 'cashout', 'settled')
+              AND amount_usd > 0
+        """) or {"total": 0, "wins": 0, "losses": 0}
+
+        # Daily snapshot for equity curve (based on trade activity)
+        daily = engine.query("""
+            SELECT date(executed_at) as day, COUNT(*) as trades
+            FROM trades
+            WHERE executed_at IS NOT NULL AND amount_usd > 0
             GROUP BY date(executed_at)
             ORDER BY day
         """)
 
-        # Period aggregations
-        today = date.today().isoformat()
-        week_ago = (date.today() - timedelta(days=7)).isoformat()
-        month_ago = (date.today() - timedelta(days=30)).isoformat()
-
-        def _pnl_since(since: str) -> float:
-            row = engine.query_one(
-                "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
-                "WHERE pnl IS NOT NULL AND date(executed_at) >= ?",
-                (since,),
-            )
-            return round(row["total"], 2) if row else 0
-
-        pnl_today = _pnl_since(today)
-        pnl_7d = _pnl_since(week_ago)
-        pnl_30d = _pnl_since(month_ago)
-        pnl_all = round(sum(d["daily_pnl"] or 0 for d in daily), 2)
-
-        # Build cumulative equity curve
-        cumulative = 0
-        equity_curve = []
-        for d in daily:
-            cumulative += d["daily_pnl"] or 0
-            equity_curve.append({
-                "day": d["day"],
-                "daily_pnl": round(d["daily_pnl"] or 0, 2),
-                "cumulative_pnl": round(cumulative, 2),
-                "trades": d["trades"],
-            })
-
         return {
-            "pnl_today": pnl_today,
-            "pnl_7d": pnl_7d,
-            "pnl_30d": pnl_30d,
-            "pnl_all": pnl_all,
-            "equity_curve": equity_curve,
+            "total_deposited": total_deposited,
+            "open_positions_value": round(total_current_value, 2),
+            "open_positions_cost": round(total_invested, 2),
+            "unrealized_pnl": unrealized_pnl,
+            "total_trades": stats.get("total", 0),
+            "wins": stats.get("wins", 0),
+            "losses": stats.get("losses", 0),
+            "daily_activity": daily,
         }
 
     # ------------------------------------------------------------------
