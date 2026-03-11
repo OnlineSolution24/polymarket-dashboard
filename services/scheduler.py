@@ -169,6 +169,13 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info("Scheduled: expire_old_suggestions every 1h")
 
+            # Weather edge analysis (every 30 min)
+            _scheduler.add_job(
+                _job_weather_edge_analysis, "interval", minutes=30,
+                id="weather_edge", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: weather_edge_analysis every 30min")
+
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
                 _job_cleanup_cache, "interval", hours=6,
@@ -700,6 +707,133 @@ def _job_daily_reset():
         reset_daily_budgets()
     except Exception as e:
         logger.error(f"Daily reset failed: {e}")
+
+
+def _job_weather_edge_analysis(config: AppConfig):
+    """Analyze weather/temperature markets using forecast data to calculate edge.
+
+    Fetches real weather forecasts from Open-Meteo API, compares with Polymarket
+    prices, and creates trade suggestions for markets with significant edge.
+    """
+    try:
+        from db import engine
+        from services.weather_forecast import parse_weather_market, analyze_weather_markets
+        import json as _json
+
+        platform_cfg = load_platform_config()
+        trading_cfg = platform_cfg.get("trading", {})
+        mode = trading_cfg.get("mode", "paper")
+        min_edge = trading_cfg.get("weather_min_edge", 0.15)  # 15% default edge threshold
+
+        # Find weather/temperature markets in DB
+        weather_markets = engine.query(
+            "SELECT id, question, yes_price, no_price, volume, liquidity "
+            "FROM markets WHERE (question LIKE '%temperature%' OR question LIKE '%°F%' "
+            "OR question LIKE '%°C%') AND accepting_orders = 1 "
+            "AND yes_price > 0 AND yes_price < 1 "
+            "ORDER BY volume DESC LIMIT 200"
+        )
+
+        if not weather_markets:
+            logger.debug("Weather edge: no temperature markets found")
+            return
+
+        # Filter to only parseable markets
+        parseable = []
+        for m in weather_markets:
+            parsed = parse_weather_market(m["question"])
+            if parsed:
+                parseable.append({
+                    "id": m["id"],
+                    "question": m["question"],
+                    "yes_price": m["yes_price"],
+                    "no_price": m["no_price"],
+                })
+
+        if not parseable:
+            logger.debug(f"Weather edge: {len(weather_markets)} temperature markets found but none parseable")
+            return
+
+        # Analyze all parseable markets (batched with forecast caching)
+        results = analyze_weather_markets(parseable)
+
+        # Update calculated_edge in DB
+        updated = 0
+        for r in results:
+            engine.execute(
+                "UPDATE markets SET calculated_edge = ?, last_updated = datetime('now') WHERE id = ?",
+                (r["edge"], r["market_id"]),
+            )
+            updated += 1
+
+        # Create trade suggestions for markets with sufficient edge
+        suggestions_created = 0
+        for r in results:
+            abs_edge = r["abs_edge"]
+            if abs_edge < min_edge:
+                continue
+
+            market_id = r["market_id"]
+            side = r["side"]
+
+            # Skip if we already have a pending/auto_approved suggestion for this market
+            existing = engine.query_one(
+                "SELECT id FROM suggestions WHERE type = 'trade' "
+                "AND status IN ('pending', 'auto_approved') "
+                "AND payload LIKE ?",
+                (f'%"market_id": "{market_id}"%',),
+            )
+            if existing:
+                continue
+
+            # Calculate amount (Kelly-lite: edge * fraction of max position)
+            capital = trading_cfg.get("capital_usd", 100.0)
+            limits = trading_cfg.get("limits", {})
+            max_pct = limits.get("max_position_pct", 5) / 100
+            max_amount = capital * max_pct
+
+            # Scale amount by edge strength (higher edge = larger bet, capped)
+            amount = min(round(abs_edge * capital * 0.5, 2), max_amount)
+            amount = max(amount, 1.0)  # minimum $1
+
+            price = r["yes_price"] if side == "YES" else (1 - r["yes_price"])
+            status = "auto_approved" if mode == "full-auto" else "pending"
+
+            payload = {
+                "market_id": market_id,
+                "market_question": r["question"],
+                "side": side,
+                "amount_usd": amount,
+                "price": price,
+                "edge": r["edge"],
+                "fair_probability": r["fair_probability"],
+                "forecast_temp_c": r["forecast_temp_c"],
+                "days_ahead": r["days_ahead"],
+                "strategy_name": "Weather Forecast Edge",
+            }
+
+            engine.execute(
+                """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (
+                    "weather-forecast",
+                    "trade",
+                    f"Weather: {side} '{r['question'][:50]}...'",
+                    f"Edge: {r['edge']:+.1%} | Fair: {r['fair_probability']:.0%} vs Market: {r['yes_price']:.0%} | "
+                    f"Forecast: {r['forecast_temp_c']}°C | {r['days_ahead']}d ahead | {r['city'].title()}",
+                    _json.dumps(payload),
+                    status,
+                ),
+            )
+            suggestions_created += 1
+
+        logger.info(
+            f"Weather edge: {len(parseable)} parseable / {len(weather_markets)} total weather markets, "
+            f"{updated} edges updated, {suggestions_created} suggestions created (min_edge={min_edge:.0%})"
+        )
+
+    except Exception as e:
+        logger.error(f"Weather edge analysis failed: {e}")
 
 
 def _job_cleanup_cache():

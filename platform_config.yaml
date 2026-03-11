@@ -69,6 +69,7 @@ trading:
     max_attempts_per_market: 3           # Max trade attempts per market (all time)
     check_pending_suggestions: true      # Skip if pending suggestion exists for market
   rebuy_cooldown_days: 7                  # Wait 7 days before re-buying closed market
+  weather_min_edge: 0.15                   # 15% min edge for weather market trades
   hedging:
     enabled: false                         # Disabled — cashout handles profit-taking
     profit_threshold_pct: 15
@@ -127,6 +128,9 @@ scheduler:
   settlement:
     enabled: true
     interval_minutes: 30               # Check for resolved markets every 30 min
+  weather_edge:
+    enabled: true
+    interval_minutes: 30                 # Weather forecast edge analysis
   snapshot_cleanup:
     enabled: true
     interval_hours: 24
