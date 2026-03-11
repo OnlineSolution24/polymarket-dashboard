@@ -247,7 +247,12 @@ class TraderAgent(BaseAgent):
         if edge < min_edge:
             return False, f"Edge zu klein ({edge:.1%} < {min_edge:.1%})"
 
-        # 5. Category blacklist
+        # 5. Market blacklist (specific market IDs)
+        market_blacklist = trading_cfg.get("market_blacklist", [])
+        if payload.get("market_id") in market_blacklist:
+            return False, f"Markt ist gesperrt (blacklisted)"
+
+        # 5b. Category blacklist
         blacklist = trading_cfg.get("category_blacklist", [])
         market = engine.query_one(
             "SELECT category FROM markets WHERE id = ?",
@@ -255,6 +260,15 @@ class TraderAgent(BaseAgent):
         )
         if market and market.get("category") in blacklist:
             return False, f"Kategorie '{market['category']}' ist gesperrt"
+
+        # 5c. Re-buy prevention: don't buy a market we already traded and closed
+        existing_closed = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
+            "AND result IN ('cashout', 'win', 'loss', 'settled', 'hedge')",
+            (payload.get("market_id"),),
+        )
+        if existing_closed and existing_closed.get("cnt", 0) > 0:
+            return False, f"Markt bereits gehandelt und geschlossen — kein Re-Buy"
 
         # 6. Budget check
         from services.cost_tracker import check_budget

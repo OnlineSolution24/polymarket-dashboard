@@ -21,7 +21,6 @@ def render():
     positions_value = perf.get("open_positions_value", 0)
     positions_cost = perf.get("open_positions_cost", 0)
     unrealized_pnl = perf.get("unrealized_pnl", 0)
-    realized_pnl = perf.get("realized_pnl", 0)
 
     # ══════════════════════════════════════════════════════════════════
     # 1. PORTFOLIO OVERVIEW
@@ -30,19 +29,20 @@ def render():
     with cols[0]:
         st.metric("Eingezahlt", f"${total_deposited:,.2f}")
     with cols[1]:
-        st.metric("Positionen Wert", f"${positions_value:,.2f}")
+        st.metric("Offene Positionen", f"${positions_cost:,.2f}",
+                   delta=f"Wert: ${positions_value:,.2f}")
     with cols[2]:
-        delta_color = "normal" if realized_pnl >= 0 else "inverse"
-        st.metric("Realisierter PnL",
-                   f"${realized_pnl:+.2f}",
-                   delta=f"{realized_pnl:+.2f}",
-                   delta_color=delta_color)
-    with cols[3]:
-        delta_color2 = "normal" if unrealized_pnl >= 0 else "inverse"
+        delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
         st.metric("Unrealisierter PnL",
                    f"${unrealized_pnl:+.2f}",
                    delta=f"{unrealized_pnl:+.2f}",
-                   delta_color=delta_color2)
+                   delta_color=delta_color)
+    with cols[3]:
+        wins = perf.get("wins", 0)
+        losses = perf.get("losses", 0)
+        open_markets = perf.get("open_market_count", 0)
+        st.metric("Märkte", f"{wins}W / {losses}L",
+                   delta=f"{open_markets} offen")
 
     st.divider()
 
@@ -74,54 +74,33 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 3. ABGESCHLOSSENE TRADES
+    # 3. ABGESCHLOSSENE MÄRKTE
     # ══════════════════════════════════════════════════════════════════
-    st.subheader("Abgeschlossene Trades")
-    closed = client.get_closed_trades()
+    st.subheader("Abgeschlossene Märkte")
 
-    if closed:
-        total_markets = perf.get("total_markets", 0)
-        wins = perf.get("wins", 0)
-        losses = perf.get("losses", 0)
+    closed_markets = perf.get("closed_markets", [])
+    total_closed = len(closed_markets)
+    open_count = perf.get("open_market_count", 0)
 
-        sc = st.columns(4)
-        with sc[0]:
-            st.metric("Märkte (abgeschlossen)", total_markets)
-        with sc[1]:
-            wr = (wins / total_markets * 100) if total_markets > 0 else 0
-            st.metric("Win Rate", f"{wr:.0f}%")
-        with sc[2]:
-            st.metric("W / L", f"{wins} / {losses}")
-        with sc[3]:
-            st.metric("Realisierter PnL", f"${realized_pnl:+.2f}")
+    sc = st.columns(3)
+    with sc[0]:
+        st.metric("Abgeschlossen", total_closed)
+    with sc[1]:
+        wr = (wins / total_closed * 100) if total_closed > 0 else 0
+        st.metric("Win Rate", f"{wr:.0f}%")
+    with sc[2]:
+        st.metric("W / L", f"{wins} / {losses}")
 
-        df_closed = pd.DataFrame(closed)
-        cols_to_show = ["market_question", "side", "entry_price", "result", "executed_at"]
-        if "realized_pnl" in df_closed.columns:
-            cols_to_show.insert(4, "realized_pnl")
-
-        df_show = df_closed[[c for c in cols_to_show if c in df_closed.columns]].copy()
-        rename = {"market_question": "Markt", "side": "Seite", "entry_price": "Einstieg",
-                  "result": "Ergebnis", "realized_pnl": "PnL $", "executed_at": "Datum"}
-        df_show.columns = [rename.get(c, c) for c in df_show.columns]
-
-        if "Einstieg" in df_show.columns:
-            df_show["Einstieg"] = df_show["Einstieg"].apply(
-                lambda x: f"{x:.3f}" if x else "-")
-        if "PnL $" in df_show.columns:
-            df_show["PnL $"] = df_show["PnL $"].apply(
-                lambda x: f"${x:+.2f}" if x else "-")
-        if "Datum" in df_show.columns:
-            df_show["Datum"] = df_show["Datum"].apply(
-                lambda x: x[:16] if x else "-")
-        if "Markt" in df_show.columns:
-            df_show["Markt"] = df_show["Markt"].str[:55]
-        if "Ergebnis" in df_show.columns:
-            df_show["Ergebnis"] = df_show["Ergebnis"].str.upper()
-
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+    if closed_markets:
+        df_closed = pd.DataFrame(closed_markets)
+        df_closed.columns = ["Market ID", "Markt", "Ergebnis", "Trades"]
+        df_closed["Ergebnis"] = df_closed["Ergebnis"].str.upper()
+        df_closed = df_closed[["Markt", "Ergebnis", "Trades"]]
+        st.dataframe(df_closed, use_container_width=True, hide_index=True)
     else:
-        st.caption("Noch keine abgeschlossenen Trades.")
+        st.caption("Noch keine abgeschlossenen Märkte.")
+
+    st.caption(f"{open_count} Märkte noch offen")
 
     st.divider()
 
