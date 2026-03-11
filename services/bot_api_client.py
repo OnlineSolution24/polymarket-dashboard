@@ -113,6 +113,17 @@ class BotAPIClient:
     def get_trade_stats(self) -> dict:
         return self._get("/api/trades/stats") or {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0}
 
+    def get_open_positions(self) -> list:
+        return self._get("/api/trades/positions") or []
+
+    def get_closed_trades(self) -> list:
+        return self._get("/api/trades/closed") or []
+
+    def get_performance(self) -> dict:
+        return self._get("/api/trades/performance") or {
+            "pnl_today": 0, "pnl_7d": 0, "pnl_30d": 0, "pnl_all": 0, "equity_curve": []
+        }
+
     def get_agents(self) -> list:
         return self._get("/api/agents") or []
 

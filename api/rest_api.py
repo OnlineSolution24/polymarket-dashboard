@@ -6,7 +6,7 @@ write endpoints for emergency controls (pause/resume, suggestion responses).
 
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query
@@ -201,6 +201,109 @@ def create_app(config: AppConfig) -> FastAPI:
             FROM trades WHERE result IS NOT NULL
         """)
         return stats or {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0}
+
+    @app.get("/api/trades/positions", dependencies=[Depends(verify_api_key)])
+    def get_open_positions():
+        """Open positions with live market prices and unrealized PnL."""
+        positions = engine.query("""
+            SELECT t.id, t.market_id, t.market_question, t.side, t.amount_usd,
+                   t.price as entry_price, t.executed_at,
+                   m.yes_price, m.no_price
+            FROM trades t
+            LEFT JOIN markets m ON t.market_id = m.id
+            WHERE t.status = 'executed'
+              AND (t.result IS NULL OR t.result = 'open')
+              AND t.amount_usd > 0
+            ORDER BY t.executed_at DESC
+        """)
+        result = []
+        for p in positions:
+            entry = p.get("entry_price") or 0
+            current = p.get("yes_price") if p.get("side") == "YES" else p.get("no_price")
+            current = current or 0
+            shares = (p["amount_usd"] / entry) if entry > 0 else 0
+            current_value = shares * current
+            cost_basis = p["amount_usd"]
+            unrealized_pnl = current_value - cost_basis
+            pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+            result.append({
+                "id": p["id"],
+                "market_question": p.get("market_question", ""),
+                "side": p["side"],
+                "entry_price": round(entry, 4),
+                "current_price": round(current, 4),
+                "shares": round(shares, 1),
+                "cost_basis": round(cost_basis, 2),
+                "current_value": round(current_value, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "pnl_pct": round(pnl_pct, 1),
+                "executed_at": p.get("executed_at"),
+            })
+        return result
+
+    @app.get("/api/trades/closed", dependencies=[Depends(verify_api_key)])
+    def get_closed_trades():
+        """Closed trades with realized PnL (profit only, no cost basis)."""
+        return engine.query("""
+            SELECT id, market_question, side, amount_usd, price as entry_price,
+                   result, pnl as realized_pnl, user_cmd, executed_at
+            FROM trades
+            WHERE result IN ('win', 'loss', 'cashout', 'hedge', 'settled')
+              AND amount_usd > 0
+            ORDER BY executed_at DESC
+            LIMIT 100
+        """)
+
+    @app.get("/api/trades/performance", dependencies=[Depends(verify_api_key)])
+    def get_performance():
+        """Daily PnL aggregation for equity curve + period stats."""
+        daily = engine.query("""
+            SELECT date(executed_at) as day,
+                   SUM(pnl) as daily_pnl,
+                   COUNT(*) as trades
+            FROM trades
+            WHERE pnl IS NOT NULL AND executed_at IS NOT NULL
+            GROUP BY date(executed_at)
+            ORDER BY day
+        """)
+
+        # Period aggregations
+        today = date.today().isoformat()
+        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        month_ago = (date.today() - timedelta(days=30)).isoformat()
+
+        def _pnl_since(since: str) -> float:
+            row = engine.query_one(
+                "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+                "WHERE pnl IS NOT NULL AND date(executed_at) >= ?",
+                (since,),
+            )
+            return round(row["total"], 2) if row else 0
+
+        pnl_today = _pnl_since(today)
+        pnl_7d = _pnl_since(week_ago)
+        pnl_30d = _pnl_since(month_ago)
+        pnl_all = round(sum(d["daily_pnl"] or 0 for d in daily), 2)
+
+        # Build cumulative equity curve
+        cumulative = 0
+        equity_curve = []
+        for d in daily:
+            cumulative += d["daily_pnl"] or 0
+            equity_curve.append({
+                "day": d["day"],
+                "daily_pnl": round(d["daily_pnl"] or 0, 2),
+                "cumulative_pnl": round(cumulative, 2),
+                "trades": d["trades"],
+            })
+
+        return {
+            "pnl_today": pnl_today,
+            "pnl_7d": pnl_7d,
+            "pnl_30d": pnl_30d,
+            "pnl_all": pnl_all,
+            "equity_curve": equity_curve,
+        }
 
     # ------------------------------------------------------------------
     # Agents

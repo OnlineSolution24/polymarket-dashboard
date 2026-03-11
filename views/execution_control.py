@@ -1,24 +1,157 @@
 """
-Execution Control — Read-only trade monitoring + emergency controls.
-Trades are executed by the autonomous bot. Dashboard shows history
-and provides emergency pause/resume and circuit breaker reset.
-All data loaded from Bot REST API.
+Portfolio & Performance — Live positions, closed trades, equity curve,
+and period PnL. Bot controls (pause/resume, circuit breaker, risk settings)
+are at the bottom.
 """
 
 import streamlit as st
+import pandas as pd
 from datetime import datetime
 
 from services.bot_api_client import get_bot_client
-from components.tables import trades_table
-from components.charts import pnl_chart
+from components.charts import equity_curve_chart
 
 
 def render():
-    st.header("Execution Control")
+    st.header("Portfolio & Performance")
 
     client = get_bot_client()
 
-    # --- Circuit Breaker Status ---
+    # ══════════════════════════════════════════════════════════════════
+    # 1. PNL OVERVIEW — Period KPIs
+    # ══════════════════════════════════════════════════════════════════
+    perf = client.get_performance()
+
+    cols = st.columns(4)
+    _pnl_metric(cols[0], "Heute", perf.get("pnl_today", 0))
+    _pnl_metric(cols[1], "7 Tage", perf.get("pnl_7d", 0))
+    _pnl_metric(cols[2], "30 Tage", perf.get("pnl_30d", 0))
+    _pnl_metric(cols[3], "Gesamt", perf.get("pnl_all", 0))
+
+    # ══════════════════════════════════════════════════════════════════
+    # 2. EQUITY CURVE
+    # ══════════════════════════════════════════════════════════════════
+    equity = perf.get("equity_curve", [])
+    if equity:
+        st.plotly_chart(equity_curve_chart(equity), use_container_width=True)
+    else:
+        st.caption("Noch keine Performance-Daten für die Equity Curve.")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 3. OFFENE POSITIONEN
+    # ══════════════════════════════════════════════════════════════════
+    st.subheader("Offene Positionen")
+    positions = client.get_open_positions()
+
+    if positions:
+        total_value = sum(p.get("current_value", 0) for p in positions)
+        total_cost = sum(p.get("cost_basis", 0) for p in positions)
+        total_unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
+
+        mc = st.columns(3)
+        with mc[0]:
+            st.metric("Investiert", f"${total_cost:.2f}")
+        with mc[1]:
+            st.metric("Aktueller Wert", f"${total_value:.2f}")
+        with mc[2]:
+            color = "normal" if total_unrealized >= 0 else "inverse"
+            st.metric("Unrealisierter PnL", f"${total_unrealized:+.2f}",
+                       delta=f"{total_unrealized:+.2f}", delta_color=color)
+
+        df = pd.DataFrame(positions)
+        df_display = df[["market_question", "side", "entry_price", "current_price",
+                         "shares", "cost_basis", "current_value", "unrealized_pnl", "pnl_pct"]].copy()
+        df_display.columns = ["Markt", "Seite", "Einstieg", "Aktuell",
+                              "Shares", "Einsatz", "Wert", "PnL $", "PnL %"]
+
+        # Format
+        df_display["Einstieg"] = df_display["Einstieg"].apply(lambda x: f"{x:.3f}")
+        df_display["Aktuell"] = df_display["Aktuell"].apply(lambda x: f"{x:.3f}")
+        df_display["Einsatz"] = df_display["Einsatz"].apply(lambda x: f"${x:.2f}")
+        df_display["Wert"] = df_display["Wert"].apply(lambda x: f"${x:.2f}")
+        df_display["PnL $"] = df_display["PnL $"].apply(lambda x: f"${x:+.2f}")
+        df_display["PnL %"] = df_display["PnL %"].apply(lambda x: f"{x:+.1f}%")
+        df_display["Markt"] = df_display["Markt"].str[:55]
+
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Keine offenen Positionen.")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 4. ABGESCHLOSSENE TRADES
+    # ══════════════════════════════════════════════════════════════════
+    st.subheader("Abgeschlossene Trades")
+    closed = client.get_closed_trades()
+
+    if closed:
+        stats = client.get_trade_stats()
+        total_trades = stats.get("total", 0)
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+
+        sc = st.columns(4)
+        with sc[0]:
+            st.metric("Trades", total_trades)
+        with sc[1]:
+            wr = (wins / total_trades * 100) if total_trades > 0 else 0
+            st.metric("Win Rate", f"{wr:.0f}%")
+        with sc[2]:
+            st.metric("W / L", f"{wins} / {losses}")
+        with sc[3]:
+            realized = stats.get("total_pnl", 0)
+            st.metric("Realisierter PnL", f"${realized:+.2f}")
+
+        df_closed = pd.DataFrame(closed)
+        df_show = df_closed[["market_question", "side", "entry_price",
+                              "result", "realized_pnl", "executed_at"]].copy()
+        df_show.columns = ["Markt", "Seite", "Einstieg", "Ergebnis", "PnL $", "Datum"]
+
+        df_show["Einstieg"] = df_show["Einstieg"].apply(
+            lambda x: f"{x:.3f}" if x else "-")
+        df_show["PnL $"] = df_show["PnL $"].apply(
+            lambda x: f"${x:+.2f}" if x else "$0.00")
+        df_show["Datum"] = df_show["Datum"].apply(
+            lambda x: x[:16] if x else "-")
+        df_show["Markt"] = df_show["Markt"].str[:55]
+        df_show["Ergebnis"] = df_show["Ergebnis"].str.upper()
+
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Noch keine abgeschlossenen Trades.")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 5. BOT CONTROLS (collapsed)
+    # ══════════════════════════════════════════════════════════════════
+    with st.expander("Bot-Steuerung & Risk-Einstellungen", expanded=False):
+        _render_bot_controls(client)
+
+        config = client.get_config()
+        _render_risk_controls(client, config)
+
+
+# ======================================================================
+# Helper: PnL metric with color
+# ======================================================================
+
+def _pnl_metric(col, label: str, value: float):
+    """Render a PnL metric with green/red coloring."""
+    with col:
+        delta_color = "normal" if value >= 0 else "inverse"
+        st.metric(label, f"${value:+.2f}", delta=f"{value:+.2f}", delta_color=delta_color)
+
+
+# ======================================================================
+# Bot Controls
+# ======================================================================
+
+def _render_bot_controls(client):
+    """Circuit breaker + pause/resume."""
     cb = client.get_circuit_breaker()
     config = client.get_config()
     cb_config = config.get("circuit_breaker", {})
@@ -28,98 +161,51 @@ def render():
     with col1:
         consecutive_losses = cb.get("consecutive_losses", 0)
         paused_until = cb.get("paused_until")
-        is_paused = False
+        is_cb_paused = False
         if paused_until:
             try:
                 if datetime.fromisoformat(paused_until) > datetime.utcnow():
-                    is_paused = True
+                    is_cb_paused = True
             except Exception:
                 pass
 
-        if is_paused:
+        if is_cb_paused:
             st.error(f"CIRCUIT BREAKER AKTIV — Pausiert bis {paused_until[:16]}")
         else:
             st.success("Trading erlaubt")
         st.caption(f"Verluste in Folge: {consecutive_losses}/{max_losses}")
 
     with col2:
-        if is_paused and st.button("Circuit Breaker zurücksetzen"):
+        if is_cb_paused and st.button("Circuit Breaker zurücksetzen"):
             result = client.reset_circuit_breaker()
             if result and result.get("ok"):
                 st.success("Circuit Breaker zurückgesetzt!")
                 st.rerun()
-            else:
-                st.error("Fehler beim Zurücksetzen.")
 
-    st.divider()
-
-    # --- Emergency Bot Controls ---
-    st.subheader("Bot-Steuerung")
     status = client.get_status()
     bot_paused = status.get("bot_paused", False) if status else False
 
-    col_pause, col_resume = st.columns(2)
-    with col_pause:
+    col_p, col_r = st.columns(2)
+    with col_p:
         if st.button("Bot PAUSIEREN", type="primary", disabled=bot_paused):
             result = client.pause_bot()
             if result and result.get("ok"):
                 st.warning("Bot wurde pausiert!")
                 st.rerun()
-    with col_resume:
+    with col_r:
         if st.button("Bot FORTSETZEN", disabled=not bot_paused):
             result = client.resume_bot()
             if result and result.get("ok"):
                 st.success("Bot läuft wieder!")
                 st.rerun()
 
-    st.divider()
 
-    # --- Risk Controls ---
-    _render_risk_controls(client, config)
-
-    st.divider()
-
-    # --- Open Trades ---
-    st.subheader("Offene Trades")
-    open_trades = client.get_trades(limit=50, status="executed")
-    open_trades = [t for t in open_trades if t.get("result") in (None, "open")]
-
-    if open_trades:
-        for trade in open_trades:
-            with st.expander(f"{trade.get('side', '?')} ${trade.get('amount_usd', 0):.2f} — {trade.get('market_question') or trade.get('market_id', '?')}"):
-                st.caption(f"Erstellt: {(trade.get('created_at') or '')[:16]} | Status: {trade.get('status', '?')}")
-    else:
-        st.caption("Keine offenen Trades.")
-
-    st.divider()
-
-    # --- Trade Statistics ---
-    st.subheader("Trade Verlauf")
-    stats = client.get_trade_stats()
-    if stats and stats.get("total", 0) > 0:
-        sc = st.columns(4)
-        with sc[0]:
-            st.metric("Trades", stats["total"])
-        with sc[1]:
-            wr = stats.get("wins", 0) / stats["total"] * 100
-            st.metric("Win Rate", f"{wr:.0f}%")
-        with sc[2]:
-            st.metric("W / L", f"{stats.get('wins', 0)} / {stats.get('losses', 0)}")
-        with sc[3]:
-            st.metric("PnL", f"${stats.get('total_pnl', 0):+.2f}")
-
-    trades = client.get_trades(limit=50)
-    if trades:
-        done = [t for t in trades if t.get("pnl") is not None]
-        if done:
-            st.plotly_chart(pnl_chart(done), use_container_width=True)
-        trades_table(trades)
-    else:
-        st.info("Noch keine Trades.")
-
+# ======================================================================
+# Risk Controls
+# ======================================================================
 
 def _render_risk_controls(client, config: dict):
-    """Risk per trade controls — adjust position size in % and $."""
+    """Risk per trade controls."""
     st.subheader("Risk pro Trade")
 
     trading_cfg = config.get("trading", {})
@@ -130,7 +216,6 @@ def _render_risk_controls(client, config: dict):
     min_edge = limits.get("min_edge", 0.03)
     max_daily_loss = limits.get("max_daily_loss_usd", 50.0)
 
-    # Show current values
     col_cap, col_pct, col_usd, col_edge = st.columns(4)
     with col_cap:
         st.metric("Kapital", f"${capital:.0f}")
@@ -141,8 +226,7 @@ def _render_risk_controls(client, config: dict):
     with col_edge:
         st.metric("Min Edge", f"{min_edge:.0%}")
 
-    # Editable controls
-    with st.expander("Risk-Einstellungen anpassen", expanded=False):
+    with st.expander("Anpassen", expanded=False):
         col_left, col_right = st.columns(2)
 
         with col_left:
@@ -156,7 +240,6 @@ def _render_risk_controls(client, config: dict):
                 "Max Position (%)",
                 min_value=1, max_value=25, value=int(current_pct),
                 key="risk_pct",
-                help="Maximaler Anteil des Kapitals pro Trade",
             )
             new_max_usd = new_capital * new_pct / 100
             st.caption(f"= max **${new_max_usd:.2f}** pro Trade")
@@ -166,7 +249,6 @@ def _render_risk_controls(client, config: dict):
                 "Min Edge (%)",
                 min_value=1, max_value=20, value=int(min_edge * 100),
                 key="risk_edge",
-                help="Nur traden wenn Edge groesser als dieser Wert",
             )
             new_max_daily_loss = st.number_input(
                 "Max Tagesverlust ($)",
@@ -183,7 +265,6 @@ def _render_risk_controls(client, config: dict):
                 key="risk_mode",
             )
 
-        # Check for changes
         changed = (
             new_capital != capital
             or new_pct != current_pct
@@ -201,11 +282,7 @@ def _render_risk_controls(client, config: dict):
 
             result = client.save_config(config)
             if result and result.get("ok"):
-                st.success(
-                    f"Gespeichert! Max ${new_capital * new_pct / 100:.2f} pro Trade "
-                    f"({new_pct}% von ${new_capital:.0f}), "
-                    f"Min Edge {new_min_edge}%, Modus: {new_mode}"
-                )
+                st.success(f"Gespeichert! Modus: {new_mode}")
                 st.rerun()
             else:
                 st.error("Fehler beim Speichern.")

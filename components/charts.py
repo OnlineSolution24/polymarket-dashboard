@@ -116,6 +116,48 @@ def pnl_chart(trades: list[dict]) -> go.Figure:
     return fig
 
 
+def equity_curve_chart(equity_data: list[dict]) -> go.Figure:
+    """Daily equity curve with cumulative PnL and daily bars."""
+    if not equity_data:
+        return _empty_chart("Keine Performance-Daten verfügbar")
+
+    df = pd.DataFrame(equity_data)
+
+    fig = go.Figure()
+
+    # Daily PnL bars (background)
+    colors = [COLORS["green"] if v >= 0 else COLORS["red"] for v in df["daily_pnl"]]
+    fig.add_trace(go.Bar(
+        x=df["day"], y=df["daily_pnl"],
+        name="Tages-PnL",
+        marker_color=colors,
+        opacity=0.4,
+        yaxis="y",
+    ))
+
+    # Cumulative line (foreground)
+    line_color = COLORS["green"] if df["cumulative_pnl"].iloc[-1] >= 0 else COLORS["red"]
+    fig.add_trace(go.Scatter(
+        x=df["day"], y=df["cumulative_pnl"],
+        name="Gesamt-PnL",
+        mode="lines+markers",
+        line=dict(color=line_color, width=3),
+        marker=dict(size=6),
+        yaxis="y",
+    ))
+
+    # Zero line
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)")
+
+    layout = {**CHART_LAYOUT, "title": "Performance (Equity Curve)", "height": 350}
+    layout["legend"] = dict(
+        bgcolor="rgba(0,0,0,0)", font=dict(color="#8892A4"),
+        orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+    )
+    fig.update_layout(**layout)
+    return fig
+
+
 def _empty_chart(message: str) -> go.Figure:
     """Return an empty chart with a message."""
     fig = go.Figure()
