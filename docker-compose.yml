@@ -12,6 +12,8 @@ services:
       - ./platform_config.yaml:/app/platform_config.yaml  # Live config editing
       - ./agent_configs:/app/agent_configs                # Agent YAML configs
       - ./plugins:/app/plugins                            # Plugin hot-loading
+    env_file:
+      - .env
     environment:
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
