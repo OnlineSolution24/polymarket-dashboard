@@ -234,6 +234,19 @@ TABLES = {
             snapshot_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,
+
+    "portfolio_snapshots": """
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            total_deposited REAL DEFAULT 0,
+            positions_value REAL DEFAULT 0,
+            positions_cost  REAL DEFAULT 0,
+            unrealized_pnl  REAL DEFAULT 0,
+            realized_pnl    REAL DEFAULT 0,
+            position_count  INTEGER DEFAULT 0
+        )
+    """,
 }
 
 # Indexes for performance
@@ -257,4 +270,6 @@ INDEXES = [
     # Code changes indexes
     "CREATE INDEX IF NOT EXISTS idx_code_changes_status ON code_changes(status)",
     "CREATE INDEX IF NOT EXISTS idx_code_changes_created ON code_changes(created_at DESC)",
+    # Portfolio snapshot indexes
+    "CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_time ON portfolio_snapshots(snapshot_at DESC)",
 ]

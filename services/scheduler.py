@@ -154,6 +154,21 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info("Scheduled: position_sync every 30min")
 
+            # Portfolio snapshot (3x daily: 08:05, 14:00, 20:05 UTC)
+            for hour in [8, 14, 20]:
+                _scheduler.add_job(
+                    _job_portfolio_snapshot, "cron", hour=hour, minute=5,
+                    id=f"portfolio_snapshot_{hour}", replace_existing=True, args=[config],
+                )
+            logger.info("Scheduled: portfolio_snapshot 3x daily (08:05, 14:00, 20:05 UTC)")
+
+            # Auto-expire old suggestions (every hour)
+            _scheduler.add_job(
+                _job_expire_old_suggestions, "interval", hours=1,
+                id="expire_suggestions", replace_existing=True,
+            )
+            logger.info("Scheduled: expire_old_suggestions every 1h")
+
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
                 _job_cleanup_cache, "interval", hours=6,
@@ -1126,3 +1141,87 @@ def _job_sync_positions(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Position sync failed: {e}")
+
+
+def _job_portfolio_snapshot(config: AppConfig):
+    """Fetch real portfolio value from Polymarket Data API and store snapshot.
+
+    Uses the /positions endpoint with the funder (proxy wallet) address.
+    Each position includes: currentValue, cashPnl, realizedPnl from Polymarket.
+    """
+    try:
+        import httpx
+        from db import engine
+
+        funder = config.polymarket_funder
+        if not funder:
+            logger.warning("Portfolio snapshot: no POLYMARKET_FUNDER configured")
+            return
+
+        resp = httpx.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": funder},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        positions = resp.json()
+
+        total_value = 0.0
+        total_cost = 0.0
+        total_pnl = 0.0
+        total_realized = 0.0
+        position_count = len(positions)
+
+        for p in positions:
+            total_value += float(p.get("currentValue", 0) or 0)
+            total_cost += float(p.get("initialValue", 0) or 0)
+            total_pnl += float(p.get("cashPnl", 0) or 0)
+            total_realized += float(p.get("realizedPnl", 0) or 0)
+
+        # Get total_deposited from config
+        platform_cfg = load_platform_config()
+        total_deposited = platform_cfg.get("trading", {}).get("total_deposited", 0)
+
+        # Store snapshot
+        engine.execute(
+            """INSERT INTO portfolio_snapshots
+               (snapshot_at, total_deposited, positions_value, positions_cost,
+                unrealized_pnl, realized_pnl, position_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.utcnow().isoformat(),
+             total_deposited,
+             round(total_value, 2),
+             round(total_cost, 2),
+             round(total_pnl, 2),
+             round(total_realized, 2),
+             position_count),
+        )
+
+        logger.info(
+            f"Portfolio snapshot: {position_count} positions, "
+            f"value=${total_value:.2f}, cost=${total_cost:.2f}, "
+            f"pnl=${total_pnl:.2f}, realized=${total_realized:.2f}"
+        )
+
+    except Exception as e:
+        logger.error(f"Portfolio snapshot failed: {e}")
+
+
+def _job_expire_old_suggestions():
+    """Expire auto_approved and pending suggestions older than 24 hours.
+
+    Stuck suggestions block the deduplication check and prevent new trades.
+    """
+    try:
+        from db import engine
+
+        result = engine.execute(
+            "UPDATE suggestions SET status = 'expired' "
+            "WHERE status IN ('auto_approved', 'pending') "
+            "AND created_at < datetime('now', '-24 hours')"
+        )
+        expired = result.rowcount if hasattr(result, 'rowcount') else 0
+        if expired:
+            logger.info(f"Expired {expired} old stuck suggestions")
+    except Exception as e:
+        logger.error(f"Expire suggestions failed: {e}")

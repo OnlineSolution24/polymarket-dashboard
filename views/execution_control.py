@@ -1,6 +1,6 @@
 """
-Portfolio & Performance — Live positions, closed trades, and real PnL
-based on deposits vs current portfolio value.
+Portfolio & Performance — Live positions from Polymarket API,
+closed markets with per-market W/L, and portfolio snapshots.
 Bot controls (pause/resume, circuit breaker, risk settings) at the bottom.
 """
 
@@ -18,19 +18,23 @@ def render():
     perf = client.get_performance()
 
     total_deposited = perf.get("total_deposited", 0)
-    positions_value = perf.get("open_positions_value", 0)
-    positions_cost = perf.get("open_positions_cost", 0)
+    positions_value = perf.get("positions_value", 0)
+    positions_cost = perf.get("positions_cost", 0)
     unrealized_pnl = perf.get("unrealized_pnl", 0)
+    realized_pnl = perf.get("realized_pnl", 0)
+    wins = perf.get("wins", 0)
+    losses = perf.get("losses", 0)
+    open_markets = perf.get("open_market_count", 0)
 
     # ══════════════════════════════════════════════════════════════════
-    # 1. PORTFOLIO OVERVIEW
+    # 1. PORTFOLIO OVERVIEW (from Polymarket API)
     # ══════════════════════════════════════════════════════════════════
     cols = st.columns(4)
     with cols[0]:
         st.metric("Eingezahlt", f"${total_deposited:,.2f}")
     with cols[1]:
-        st.metric("Offene Positionen", f"${positions_cost:,.2f}",
-                   delta=f"Wert: ${positions_value:,.2f}")
+        st.metric("Positionen Wert", f"${positions_value:,.2f}",
+                   delta=f"Einsatz: ${positions_cost:,.2f}")
     with cols[2]:
         delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
         st.metric("Unrealisierter PnL",
@@ -38,29 +42,28 @@ def render():
                    delta=f"{unrealized_pnl:+.2f}",
                    delta_color=delta_color)
     with cols[3]:
-        wins = perf.get("wins", 0)
-        losses = perf.get("losses", 0)
-        open_markets = perf.get("open_market_count", 0)
-        st.metric("Märkte", f"{wins}W / {losses}L",
-                   delta=f"{open_markets} offen")
+        st.metric("Realisierter PnL",
+                   f"${realized_pnl:+.2f}",
+                   delta=f"{wins}W / {losses}L | {open_markets} offen")
 
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 2. OFFENE POSITIONEN
+    # 2. OFFENE POSITIONEN (Live from Polymarket API)
     # ══════════════════════════════════════════════════════════════════
-    st.subheader("Offene Positionen")
-    positions = client.get_open_positions()
+    st.subheader("Offene Positionen (Live)")
 
-    if positions:
-        df = pd.DataFrame(positions)
-        df_display = df[["market_question", "side", "entry_price", "current_price",
-                         "shares", "cost_basis", "current_value", "unrealized_pnl", "pnl_pct"]].copy()
+    live_positions = perf.get("live_positions", [])
+    if live_positions:
+        df = pd.DataFrame(live_positions)
+        df_display = df[["title", "outcome", "avg_price", "cur_price",
+                         "shares", "cost", "value", "pnl", "pnl_pct"]].copy()
         df_display.columns = ["Markt", "Seite", "Einstieg", "Aktuell",
                               "Shares", "Einsatz", "Wert", "PnL $", "PnL %"]
 
-        df_display["Einstieg"] = df_display["Einstieg"].apply(lambda x: f"{x:.3f}")
-        df_display["Aktuell"] = df_display["Aktuell"].apply(lambda x: f"{x:.3f}")
+        df_display["Einstieg"] = df_display["Einstieg"].apply(lambda x: f"${x:.4f}")
+        df_display["Aktuell"] = df_display["Aktuell"].apply(lambda x: f"${x:.4f}")
+        df_display["Shares"] = df_display["Shares"].apply(lambda x: f"{x:,.0f}")
         df_display["Einsatz"] = df_display["Einsatz"].apply(lambda x: f"${x:.2f}")
         df_display["Wert"] = df_display["Wert"].apply(lambda x: f"${x:.2f}")
         df_display["PnL $"] = df_display["PnL $"].apply(lambda x: f"${x:+.2f}")
@@ -68,6 +71,13 @@ def render():
         df_display["Markt"] = df_display["Markt"].str[:55]
 
         st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        total_display = (
+            f"**Gesamt:** Einsatz ${positions_cost:.2f} | "
+            f"Wert ${positions_value:.2f} | "
+            f"PnL ${unrealized_pnl:+.2f}"
+        )
+        st.caption(total_display)
     else:
         st.caption("Keine offenen Positionen.")
 
@@ -80,7 +90,6 @@ def render():
 
     closed_markets = perf.get("closed_markets", [])
     total_closed = len(closed_markets)
-    open_count = perf.get("open_market_count", 0)
 
     sc = st.columns(3)
     with sc[0]:
@@ -100,7 +109,7 @@ def render():
     else:
         st.caption("Noch keine abgeschlossenen Märkte.")
 
-    st.caption(f"{open_count} Märkte noch offen")
+    st.caption(f"{open_markets} Märkte noch offen")
 
     st.divider()
 

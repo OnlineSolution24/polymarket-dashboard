@@ -68,12 +68,13 @@ trading:
     cooldown_hours: 24                   # No retry for same market within this window
     max_attempts_per_market: 3           # Max trade attempts per market (all time)
     check_pending_suggestions: true      # Skip if pending suggestion exists for market
+  rebuy_cooldown_days: 7                  # Wait 7 days before re-buying closed market
   hedging:
-    enabled: true
-    profit_threshold_pct: 15             # Auto-hedge at >15% profit
-    hedge_amount_pct: 50                 # Sell 50% of position
-    min_profit_usd: 1.00                 # Minimum profit before hedging kicks in
-    cooldown_minutes: 60                 # Wait 60 min before re-hedging same market
+    enabled: false                         # Disabled — cashout handles profit-taking
+    profit_threshold_pct: 15
+    hedge_amount_pct: 50
+    min_profit_usd: 1.00
+    cooldown_minutes: 60
   cashout:
     enabled: true                        # Auto-sell when profit target reached
     sell_pct: 100                         # Sell 100% of position

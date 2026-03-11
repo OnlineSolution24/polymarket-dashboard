@@ -256,50 +256,77 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/trades/performance", dependencies=[Depends(verify_api_key)])
     def get_performance():
-        """Portfolio performance based on deposits vs current position values.
+        """Portfolio performance using real Polymarket Data API values.
 
-        Net PnL = (cash + open positions value) - total deposited.
-        Since we can't query Polymarket cash balance directly, we compute
-        open position value from our data and show it alongside the deposit.
+        Fetches live positions from Polymarket (cashPnl, realizedPnl per position).
+        Falls back to latest portfolio_snapshot if live fetch fails.
+        Win/Loss counted per market: only fully closed markets count.
         """
+        import httpx
+
         platform_cfg = load_platform_config()
         trading_cfg = platform_cfg.get("trading", {})
         total_deposited = trading_cfg.get("total_deposited", 0)
 
-        # Calculate total open position value and cost
-        positions = engine.query("""
-            SELECT t.amount_usd, t.price as entry_price, t.side,
-                   m.yes_price, m.no_price
-            FROM trades t
-            LEFT JOIN markets m ON t.market_id = m.id
-            WHERE t.status = 'executed'
-              AND (t.result IS NULL OR t.result = 'open')
-              AND t.amount_usd > 0
-        """)
+        # ---- Live data from Polymarket Data API ----
+        funder = config.polymarket_funder if hasattr(config, 'polymarket_funder') else ""
+        positions_data = []
+        if funder:
+            try:
+                resp = httpx.get(
+                    "https://data-api.polymarket.com/positions",
+                    params={"user": funder},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                positions_data = resp.json()
+            except Exception:
+                pass
 
-        total_invested = 0
-        total_current_value = 0
-        for p in positions:
-            entry = p.get("entry_price") or 0
-            current = p.get("yes_price") if p.get("side") == "YES" else p.get("no_price")
-            current = current or 0
-            shares = (p["amount_usd"] / entry) if entry > 0 else 0
-            total_invested += p["amount_usd"]
-            total_current_value += shares * current
+        if positions_data:
+            total_value = sum(float(p.get("currentValue", 0) or 0) for p in positions_data)
+            total_cost = sum(float(p.get("initialValue", 0) or 0) for p in positions_data)
+            unrealized_pnl = sum(float(p.get("cashPnl", 0) or 0) for p in positions_data)
+            total_realized = sum(float(p.get("realizedPnl", 0) or 0) for p in positions_data)
 
-        unrealized_pnl = round(total_current_value - total_invested, 2)
+            # Per-position details for dashboard
+            live_positions = []
+            for p in positions_data:
+                live_positions.append({
+                    "title": p.get("title", "?")[:60],
+                    "outcome": p.get("outcome", "?"),
+                    "shares": float(p.get("size", 0) or 0),
+                    "avg_price": float(p.get("avgPrice", 0) or 0),
+                    "cur_price": float(p.get("curPrice", 0) or 0),
+                    "cost": round(float(p.get("initialValue", 0) or 0), 2),
+                    "value": round(float(p.get("currentValue", 0) or 0), 2),
+                    "pnl": round(float(p.get("cashPnl", 0) or 0), 2),
+                    "pnl_pct": round(float(p.get("percentPnl", 0) or 0), 1),
+                    "realized_pnl": round(float(p.get("realizedPnl", 0) or 0), 2),
+                })
+        else:
+            # Fallback: latest portfolio snapshot
+            snap = engine.query_one(
+                "SELECT * FROM portfolio_snapshots ORDER BY snapshot_at DESC LIMIT 1"
+            )
+            if snap:
+                total_value = snap.get("positions_value", 0)
+                total_cost = snap.get("positions_cost", 0)
+                unrealized_pnl = snap.get("unrealized_pnl", 0)
+                total_realized = snap.get("realized_pnl", 0)
+            else:
+                total_value = total_cost = unrealized_pnl = total_realized = 0
+            live_positions = []
 
-        # ---- Realized PnL (deposit-based) ----
-        # Only reliable PnL: portfolio value - total deposited.
-        # DB trade amounts are unreliable due to earlier bugs.
-        # Portfolio value ≈ cash (deposited - invested + sold) + open position value.
-        # We approximate: realized_pnl = total_deposited - open_positions_cost - total_deposited
-        # Better: just show the deposit-based total.
-        # The user checks Polymarket for the authoritative number.
+        # ---- Equity curve from snapshots ----
+        equity_curve = engine.query("""
+            SELECT snapshot_at, positions_value, positions_cost,
+                   unrealized_pnl, realized_pnl
+            FROM portfolio_snapshots
+            ORDER BY snapshot_at
+        """) or []
 
-        # ---- Per-market Win/Loss (only fully closed markets) ----
-        # A market is "closed" when no open positions remain (result IS NULL).
-        # We count each closed market as 1 Win or 1 Loss based on net cash flow.
+        # ---- Per-market Win/Loss (DB-based, only fully closed) ----
         market_stats = engine.query("""
             SELECT market_id,
                    MIN(CASE WHEN amount_usd > 0 THEN market_question END) as name,
@@ -313,27 +340,19 @@ def create_app(config: AppConfig) -> FastAPI:
         wins = 0
         losses = 0
         closed_markets = []
-        open_markets = []
-        for m in market_stats:
+        open_market_count = 0
+        for m in (market_stats or []):
             market_name = m.get("name") or m.get("market_id", "?")
             has_open = (m.get("open_count") or 0) > 0
             if has_open:
-                open_markets.append({
-                    "market_id": m["market_id"],
-                    "name": market_name[:60],
-                    "trade_count": m.get("trade_count", 0),
-                })
+                open_market_count += 1
                 continue
-            # Closed market — mark as win/loss
-            # For now, we can't reliably calculate per-market PnL from DB.
-            # We mark win/loss based on whether the market had profitable cashouts.
             cashout_count = engine.query_one(
                 "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
                 "AND result IN ('cashout', 'win', 'settled')",
                 (m["market_id"],),
             )
             has_cashouts = (cashout_count.get("cnt", 0) if cashout_count else 0) > 0
-            # Without reliable PnL data, assume cashout = win
             if has_cashouts:
                 wins += 1
             else:
@@ -345,26 +364,19 @@ def create_app(config: AppConfig) -> FastAPI:
                 "trade_count": m.get("trade_count", 0),
             })
 
-        # Daily snapshot for equity curve (based on trade activity)
-        daily = engine.query("""
-            SELECT date(executed_at) as day, COUNT(*) as trades
-            FROM trades
-            WHERE executed_at IS NOT NULL AND amount_usd > 0
-            GROUP BY date(executed_at)
-            ORDER BY day
-        """)
-
         return {
             "total_deposited": total_deposited,
-            "open_positions_value": round(total_current_value, 2),
-            "open_positions_cost": round(total_invested, 2),
-            "unrealized_pnl": unrealized_pnl,
+            "positions_value": round(total_value, 2),
+            "positions_cost": round(total_cost, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "realized_pnl": round(total_realized, 2),
+            "live_positions": live_positions,
+            "equity_curve": equity_curve,
             "closed_markets": closed_markets,
-            "open_market_count": len(open_markets),
-            "total_markets": len(closed_markets) + len(open_markets),
+            "open_market_count": open_market_count,
+            "total_markets": len(closed_markets) + open_market_count,
             "wins": wins,
             "losses": losses,
-            "daily_activity": daily,
         }
 
     # ------------------------------------------------------------------
