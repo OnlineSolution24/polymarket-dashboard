@@ -289,15 +289,27 @@ def create_app(config: AppConfig) -> FastAPI:
 
         unrealized_pnl = round(total_current_value - total_invested, 2)
 
-        # Count closed trade results
-        stats = engine.query_one("""
-            SELECT COUNT(*) as total,
-                   SUM(CASE WHEN result='win' OR result='cashout' THEN 1 ELSE 0 END) as wins,
-                   SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) as losses
+        # Per-market Win/Loss: each market = 1 win or 1 loss based on net cash flow
+        # amount_usd is positive for buys, negative for sells/cashouts/hedges
+        # So SUM(amount_usd) < 0 means more money came back = profit = WIN
+        market_pnl = engine.query("""
+            SELECT market_id,
+                   SUM(amount_usd) as net_flow
             FROM trades
-            WHERE result IN ('win', 'loss', 'cashout', 'settled')
-              AND amount_usd > 0
-        """) or {"total": 0, "wins": 0, "losses": 0}
+            WHERE status = 'executed'
+              AND result IN ('win', 'loss', 'cashout', 'hedge', 'settled')
+            GROUP BY market_id
+        """)
+
+        wins = 0
+        losses = 0
+        for m in market_pnl:
+            net = m.get("net_flow") or 0
+            if net < 0:  # negative flow = more sold than bought = profit
+                wins += 1
+            elif net > 0:  # positive flow = more bought than sold = loss
+                losses += 1
+            # net == 0: break even, don't count
 
         # Daily snapshot for equity curve (based on trade activity)
         daily = engine.query("""
@@ -313,9 +325,9 @@ def create_app(config: AppConfig) -> FastAPI:
             "open_positions_value": round(total_current_value, 2),
             "open_positions_cost": round(total_invested, 2),
             "unrealized_pnl": unrealized_pnl,
-            "total_trades": stats.get("total", 0),
-            "wins": stats.get("wins", 0),
-            "losses": stats.get("losses", 0),
+            "total_markets": wins + losses,
+            "wins": wins,
+            "losses": losses,
             "daily_activity": daily,
         }
 

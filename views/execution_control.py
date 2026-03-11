@@ -83,15 +83,15 @@ def render():
     closed = client.get_closed_trades()
 
     if closed:
-        total_trades = perf.get("total_trades", 0)
+        total_markets = perf.get("total_markets", 0)
         wins = perf.get("wins", 0)
         losses = perf.get("losses", 0)
 
         sc = st.columns(3)
         with sc[0]:
-            st.metric("Trades", total_trades)
+            st.metric("Märkte", total_markets)
         with sc[1]:
-            wr = (wins / total_trades * 100) if total_trades > 0 else 0
+            wr = (wins / total_markets * 100) if total_markets > 0 else 0
             st.metric("Win Rate", f"{wr:.0f}%")
         with sc[2]:
             st.metric("W / L", f"{wins} / {losses}")
