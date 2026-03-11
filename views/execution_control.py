@@ -39,21 +39,17 @@ def render():
     today_pnl = _calc_today_pnl(equity_curve, unrealized_pnl, realized_pnl)
 
     # ══════════════════════════════════════════════════════════════════
-    # 1. PORTFOLIO OVERVIEW — 2 + 2 Cards (Polymarket Style)
+    # 1. PORTFOLIO OVERVIEW — 4 Cards in one row
     # ══════════════════════════════════════════════════════════════════
+    c1, c2, c3, c4 = st.columns(4)
 
-    # Row 1: Portfolio + Gewinn/Verlust (large, like Polymarket)
-    top_left, top_right = st.columns(2)
-
-    with top_left:
-        with st.container(border=True):
-            _h1, _h2 = st.columns(2)
-            with _h1:
-                st.caption("Portfolio")
-                st.markdown(f"## ${portfolio_total:,.2f}")
-            with _h2:
-                st.caption("Zum Handeln verfügbar")
-                st.markdown(f"## ${cash_available:,.2f}")
+    # --- Card 1: Portfolio ---
+    with c1:
+        with st.container(border=True, height=280):
+            st.caption("Portfolio")
+            st.markdown(f"### ${portfolio_total:,.2f}")
+            st.caption("Zum Handeln verfügbar")
+            st.markdown(f"**${cash_available:,.2f}**")
             _today_color = "green" if today_pnl >= 0 else "red"
             _sign = "+" if today_pnl >= 0 else ""
             _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0
@@ -62,67 +58,57 @@ def render():
             )
             st.caption(f"Eingezahlt: ${total_deposited:,.2f}")
 
-    with top_right:
-        with st.container(border=True):
+    # --- Card 2: Gewinn / Verlust + Equity Curve ---
+    with c2:
+        with st.container(border=True, height=280):
             _pnl_color = "green" if total_pnl >= 0 else "red"
-            _pnl_icon = "chart_with_upwards_trend" if total_pnl >= 0 else "chart_with_downwards_trend"
-            _hdr, _filter = st.columns([3, 2])
+            _hdr, _filter = st.columns([1, 2])
             with _hdr:
-                st.markdown(f":{_pnl_icon}: **Gewinn/Verlust**")
+                st.caption("Gewinn/Verlust")
             with _filter:
                 period = st.radio(
-                    "Zeitraum", ["1D", "1W", "1M", "All"],
+                    "z", ["1D", "1W", "1M", "All"],
                     index=3, horizontal=True, key="eq_period",
                     label_visibility="collapsed",
                 )
-            st.markdown(f"## :{_pnl_color}[${total_pnl:+,.2f}]")
-            st.caption("Gesamt")
-
-            # Equity Curve
+            st.markdown(f"### :{_pnl_color}[${total_pnl:+,.2f}]")
+            st.markdown(f":{_pnl_color}[{total_pnl_pct:+.1f}%] Gesamt")
             if equity_curve:
                 df_eq = _filter_equity_curve(equity_curve, period)
                 if not df_eq.empty:
-                    st.area_chart(df_eq, x="date", y="pnl", height=100,
-                                  color="#00c853" if total_pnl >= 0 else "#ff1744")
+                    _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
+                    _build_equity_chart(df_eq, _chart_color)
                 else:
-                    st.caption("Keine Daten für Zeitraum")
+                    st.caption("Keine Daten")
             else:
                 st.caption("Noch keine Snapshots")
 
-    # Row 2: Offene Positionen + Realisiert
-    bot_left, bot_right = st.columns(2)
-
-    with bot_left:
-        with st.container(border=True):
+    # --- Card 3: Offene Positionen ---
+    with c3:
+        with st.container(border=True, height=280):
             st.caption("Offene Positionen")
-            st.markdown(f"## ${positions_value:,.2f}")
-            c3a, c3b, c3c = st.columns(3)
-            with c3a:
-                st.caption("Einsatz")
-                st.markdown(f"**${positions_cost:,.2f}**")
-            with c3b:
-                _u_color = "green" if unrealized_pnl >= 0 else "red"
-                st.caption("Unrealisiert")
-                st.markdown(f"**:{_u_color}[${unrealized_pnl:+,.2f}]**")
-            with c3c:
-                st.caption("Märkte")
-                st.markdown(f"**{open_markets}**")
+            st.markdown(f"### ${positions_value:,.2f}")
+            st.caption("Einsatz")
+            st.markdown(f"**${positions_cost:,.2f}**")
+            _u_color = "green" if unrealized_pnl >= 0 else "red"
+            st.caption("Unrealisiert")
+            st.markdown(f"**:{_u_color}[${unrealized_pnl:+,.2f}]**")
+            st.caption(f"{open_markets} Märkte offen")
 
-    with bot_right:
-        with st.container(border=True):
+    # --- Card 4: Realisierter PnL ---
+    with c4:
+        with st.container(border=True, height=280):
             st.caption("Realisiert")
             _r_color = "green" if realized_pnl >= 0 else "red"
-            st.markdown(f"## :{_r_color}[${realized_pnl:+,.2f}]")
-            c4a, c4b, c4c = st.columns(3)
+            st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
+            c4a, c4b = st.columns(2)
             with c4a:
                 st.caption("W / L")
                 st.markdown(f"**{wins} / {losses}**")
             with c4b:
                 st.caption("Win Rate")
                 st.markdown(f"**{wr:.0f}%**")
-            with c4c:
-                st.caption("Offen")
-                st.markdown(f"**{open_markets}**")
+            st.caption(f"{open_markets} Märkte offen")
 
     st.divider()
 
@@ -424,3 +410,28 @@ def _filter_equity_curve(equity_curve: list, period: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     return pd.DataFrame(rows)
+
+
+def _build_equity_chart(df: pd.DataFrame, color: str):
+    """Render a clean area chart without axis backgrounds."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=df["pnl"],
+        fill="tozeroy",
+        line=dict(color=color, width=2),
+        fillcolor=color.replace(")", ", 0.15)").replace("rgb", "rgba") if "rgb" in color else color + "26",
+        hovertemplate="%{y:$.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=90,
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        showlegend=False,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
