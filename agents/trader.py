@@ -121,7 +121,7 @@ class TraderAgent(BaseAgent):
             "ORDER BY calculated_edge DESC LIMIT 5"
         )
         for m in markets:
-            # Global deduplication check (covers pending suggestions, open positions, cooldown)
+            # Global deduplication check (covers open positions, re-buy cooldown)
             allowed, reason = self._check_deduplication(m["id"])
             if not allowed:
                 self.log("debug", f"Suggestion skip: {reason}")
@@ -155,7 +155,7 @@ class TraderAgent(BaseAgent):
     # Deduplication
     # ------------------------------------------------------------------
 
-    def _check_deduplication(self, market_id: str, side: str = None) -> tuple[bool, str]:
+    def _check_deduplication(self, market_id: str, side: str = None, suggestion_id: int = None) -> tuple[bool, str]:
         """
         Global deduplication check for a market.
         Returns (allowed, reason). If allowed=False, skip the trade.
@@ -167,44 +167,31 @@ class TraderAgent(BaseAgent):
 
         cooldown_hours = dedup_cfg.get("cooldown_hours", 24)
         max_attempts = dedup_cfg.get("max_attempts_per_market", 3)
-        check_pending = dedup_cfg.get("check_pending_suggestions", True)
 
-        # 1. Existing open position (any side)
+        # 1. Existing OPEN position (exclude closed: cashout, win, loss, settled, hedge)
         open_position = engine.query_one(
-            "SELECT id, side FROM trades WHERE market_id = ? AND status = 'executed'",
+            "SELECT id, side FROM trades WHERE market_id = ? AND status = 'executed' "
+            "AND (result IS NULL OR result = 'open')",
             (market_id,),
         )
         if open_position:
-            return False, f"Skipping market {market_id[:30]} - position exists ({open_position['side']})"
+            return False, f"Skipping market {market_id[:30]} - open position exists ({open_position['side']})"
 
-        # 2. Recent attempts within cooldown window (any status except 'paper')
-        cutoff = (datetime.utcnow() - timedelta(hours=cooldown_hours)).isoformat()
-        recent = engine.query_one(
-            "SELECT COUNT(*) as cnt FROM trades "
-            "WHERE market_id = ? AND status != 'paper' AND created_at > ?",
-            (market_id, cutoff),
-        )
-        if recent and recent["cnt"] > 0:
-            return False, f"Skipping market {market_id[:30]} - already attempted within {cooldown_hours}h"
-
-        # 3. Max attempts per market (all time)
-        total = engine.query_one(
-            "SELECT COUNT(*) as cnt FROM trades "
-            "WHERE market_id = ? AND status != 'paper'",
+        # 2. Re-buy cooldown (from _validate_trade, checked here too for early exit)
+        rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
+        last_closed = engine.query_one(
+            "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
+            "AND result IN ('cashout', 'win', 'loss', 'settled')",
             (market_id,),
         )
-        if total and total["cnt"] >= max_attempts:
-            return False, f"Skipping market {market_id[:30]} - max attempts reached ({total['cnt']}/{max_attempts})"
-
-        # 4. Pending or auto_approved suggestion for same market
-        if check_pending:
-            pending = engine.query_one(
-                "SELECT id FROM suggestions WHERE type = 'trade' "
-                "AND status IN ('pending', 'auto_approved') AND payload LIKE ?",
-                (f'%"market_id": "{market_id}"%',),
-            )
-            if pending:
-                return False, f"Skipping market {market_id[:30]} - pending suggestion exists"
+        if last_closed and last_closed.get("last_close"):
+            try:
+                closed_at = datetime.fromisoformat(last_closed["last_close"])
+                if (datetime.utcnow() - closed_at).days < rebuy_cooldown_days:
+                    days_left = rebuy_cooldown_days - (datetime.utcnow() - closed_at).days
+                    return False, f"Skipping market {market_id[:30]} - re-buy cooldown ({days_left}d left)"
+            except (ValueError, TypeError):
+                pass
 
         return True, "OK"
 
@@ -292,7 +279,7 @@ class TraderAgent(BaseAgent):
         question = payload.get("market_question", "")
 
         # Global deduplication check
-        allowed, reason = self._check_deduplication(market_id, side)
+        allowed, reason = self._check_deduplication(market_id, side, suggestion_id=None)
         if not allowed:
             self.log("info", reason)
             return False
