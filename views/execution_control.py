@@ -21,6 +21,7 @@ def render():
     positions_value = perf.get("open_positions_value", 0)
     positions_cost = perf.get("open_positions_cost", 0)
     unrealized_pnl = perf.get("unrealized_pnl", 0)
+    realized_pnl = perf.get("realized_pnl", 0)
 
     # ══════════════════════════════════════════════════════════════════
     # 1. PORTFOLIO OVERVIEW
@@ -31,21 +32,17 @@ def render():
     with cols[1]:
         st.metric("Positionen Wert", f"${positions_value:,.2f}")
     with cols[2]:
-        st.metric("Investiert (Einsatz)", f"${positions_cost:,.2f}")
+        delta_color = "normal" if realized_pnl >= 0 else "inverse"
+        st.metric("Realisierter PnL",
+                   f"${realized_pnl:+.2f}",
+                   delta=f"{realized_pnl:+.2f}",
+                   delta_color=delta_color)
     with cols[3]:
-        delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
+        delta_color2 = "normal" if unrealized_pnl >= 0 else "inverse"
         st.metric("Unrealisierter PnL",
                    f"${unrealized_pnl:+.2f}",
                    delta=f"{unrealized_pnl:+.2f}",
-                   delta_color=delta_color)
-
-    # Hint about Polymarket PnL
-    if total_deposited > 0:
-        st.caption(
-            f"Dein realer Gesamt-PnL ergibt sich aus: "
-            f"**Portfolio-Wert (Polymarket)** − **Eingezahlt** (${total_deposited:,.2f}). "
-            f"Prüfe deinen aktuellen Portfolio-Wert auf Polymarket."
-        )
+                   delta_color=delta_color2)
 
     st.divider()
 
@@ -87,14 +84,16 @@ def render():
         wins = perf.get("wins", 0)
         losses = perf.get("losses", 0)
 
-        sc = st.columns(3)
+        sc = st.columns(4)
         with sc[0]:
-            st.metric("Märkte", total_markets)
+            st.metric("Märkte (abgeschlossen)", total_markets)
         with sc[1]:
             wr = (wins / total_markets * 100) if total_markets > 0 else 0
             st.metric("Win Rate", f"{wr:.0f}%")
         with sc[2]:
             st.metric("W / L", f"{wins} / {losses}")
+        with sc[3]:
+            st.metric("Realisierter PnL", f"${realized_pnl:+.2f}")
 
         df_closed = pd.DataFrame(closed)
         cols_to_show = ["market_question", "side", "entry_price", "result", "executed_at"]

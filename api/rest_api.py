@@ -289,27 +289,30 @@ def create_app(config: AppConfig) -> FastAPI:
 
         unrealized_pnl = round(total_current_value - total_invested, 2)
 
-        # Per-market Win/Loss: each market = 1 win or 1 loss based on net cash flow
-        # amount_usd is positive for buys, negative for sells/cashouts/hedges
-        # So SUM(amount_usd) < 0 means more money came back = profit = WIN
-        market_pnl = engine.query("""
+        # Per-market Win/Loss: only fully closed markets count
+        # A market is "closed" when it has no open positions (result IS NULL)
+        # Net cash flow across ALL trades for that market decides W/L
+        market_stats = engine.query("""
             SELECT market_id,
-                   SUM(amount_usd) as net_flow
+                   SUM(amount_usd) as net_flow,
+                   SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) as open_count
             FROM trades
             WHERE status = 'executed'
-              AND result IN ('win', 'loss', 'cashout', 'hedge', 'settled')
             GROUP BY market_id
         """)
 
         wins = 0
         losses = 0
-        for m in market_pnl:
+        realized_pnl = 0.0
+        for m in market_stats:
+            if (m.get("open_count") or 0) > 0:
+                continue  # still has open positions, skip
             net = m.get("net_flow") or 0
+            realized_pnl += -net  # flip sign: negative flow = positive profit
             if net < 0:  # negative flow = more sold than bought = profit
                 wins += 1
             elif net > 0:  # positive flow = more bought than sold = loss
                 losses += 1
-            # net == 0: break even, don't count
 
         # Daily snapshot for equity curve (based on trade activity)
         daily = engine.query("""
@@ -325,6 +328,7 @@ def create_app(config: AppConfig) -> FastAPI:
             "open_positions_value": round(total_current_value, 2),
             "open_positions_cost": round(total_invested, 2),
             "unrealized_pnl": unrealized_pnl,
+            "realized_pnl": round(realized_pnl, 2),
             "total_markets": wins + losses,
             "wins": wins,
             "losses": losses,
