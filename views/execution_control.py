@@ -6,7 +6,7 @@ Bot controls (pause/resume, circuit breaker, risk settings) at the bottom.
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from services.bot_api_client import get_bot_client
 
@@ -25,26 +25,90 @@ def render():
     wins = perf.get("wins", 0)
     losses = perf.get("losses", 0)
     open_markets = perf.get("open_market_count", 0)
+    equity_curve = perf.get("equity_curve", [])
+    total_closed = len(perf.get("closed_markets", []))
+
+    # Calculated values
+    cash_available = max(total_deposited - positions_cost + realized_pnl, 0)
+    portfolio_total = positions_value + cash_available
+    total_pnl = unrealized_pnl + realized_pnl
+    total_pnl_pct = (total_pnl / total_deposited * 100) if total_deposited > 0 else 0
+    wr = (wins / total_closed * 100) if total_closed > 0 else 0
+
+    # Today's PNL from equity curve
+    today_pnl = _calc_today_pnl(equity_curve, unrealized_pnl, realized_pnl)
 
     # ══════════════════════════════════════════════════════════════════
-    # 1. PORTFOLIO OVERVIEW (from Polymarket API)
+    # 1. PORTFOLIO OVERVIEW — 4 Cards (Polymarket Style)
     # ══════════════════════════════════════════════════════════════════
     cols = st.columns(4)
+
+    # --- Card 1: Portfolio ---
     with cols[0]:
-        st.metric("Eingezahlt", f"${total_deposited:,.2f}")
+        with st.container(border=True):
+            st.caption("Portfolio")
+            st.markdown(f"### ${portfolio_total:,.2f}")
+            c1a, c1b = st.columns(2)
+            with c1a:
+                st.caption("Verfügbar")
+                st.markdown(f"**${cash_available:,.2f}**")
+            with c1b:
+                _color = "green" if today_pnl >= 0 else "red"
+                st.caption("Heute")
+                st.markdown(f"**:{_color}[{'+' if today_pnl >= 0 else ''}{today_pnl:.2f}$]**")
+            st.caption(f"Eingezahlt: ${total_deposited:,.2f}")
+
+    # --- Card 2: Gewinn / Verlust mit Equity Curve ---
     with cols[1]:
-        st.metric("Positionen Wert", f"${positions_value:,.2f}",
-                   delta=f"Einsatz: ${positions_cost:,.2f}")
+        with st.container(border=True):
+            st.caption("Gewinn / Verlust")
+            _pnl_color = "green" if total_pnl >= 0 else "red"
+            st.markdown(f"### :{_pnl_color}[${total_pnl:+,.2f}]")
+            st.markdown(f":{_pnl_color}[{total_pnl_pct:+.1f}%]")
+
+            # Equity Curve
+            if equity_curve:
+                period = st.radio(
+                    "Zeitraum", ["1D", "1W", "1M", "All"],
+                    index=3, horizontal=True, key="eq_period",
+                    label_visibility="collapsed",
+                )
+                df_eq = _filter_equity_curve(equity_curve, period)
+                if not df_eq.empty:
+                    st.area_chart(df_eq, x="date", y="pnl", height=120,
+                                  color="#00c853" if total_pnl >= 0 else "#ff1744")
+            else:
+                st.caption("Noch keine Snapshots")
+
+    # --- Card 3: Offene Positionen ---
     with cols[2]:
-        delta_color = "normal" if unrealized_pnl >= 0 else "inverse"
-        st.metric("Unrealisierter PnL",
-                   f"${unrealized_pnl:+.2f}",
-                   delta=f"{unrealized_pnl:+.2f}",
-                   delta_color=delta_color)
+        with st.container(border=True):
+            st.caption("Offene Positionen")
+            st.markdown(f"### ${positions_value:,.2f}")
+            c3a, c3b = st.columns(2)
+            with c3a:
+                st.caption("Einsatz")
+                st.markdown(f"**${positions_cost:,.2f}**")
+            with c3b:
+                _u_color = "green" if unrealized_pnl >= 0 else "red"
+                st.caption("Unrealisiert")
+                st.markdown(f"**:{_u_color}[${unrealized_pnl:+,.2f}]**")
+            st.caption(f"{open_markets} Märkte offen")
+
+    # --- Card 4: Realisierter PnL ---
     with cols[3]:
-        st.metric("Realisierter PnL",
-                   f"${realized_pnl:+.2f}",
-                   delta=f"{wins}W / {losses}L | {open_markets} offen")
+        with st.container(border=True):
+            st.caption("Realisiert")
+            _r_color = "green" if realized_pnl >= 0 else "red"
+            st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
+            c4a, c4b = st.columns(2)
+            with c4a:
+                st.caption("W / L")
+                st.markdown(f"**{wins} / {losses}**")
+            with c4b:
+                st.caption("Win Rate")
+                st.markdown(f"**{wr:.0f}%**")
+            st.caption(f"{open_markets} Märkte noch offen")
 
     st.divider()
 
@@ -89,16 +153,6 @@ def render():
     st.subheader("Abgeschlossene Märkte")
 
     closed_markets = perf.get("closed_markets", [])
-    total_closed = len(closed_markets)
-
-    sc = st.columns(3)
-    with sc[0]:
-        st.metric("Abgeschlossen", total_closed)
-    with sc[1]:
-        wr = (wins / total_closed * 100) if total_closed > 0 else 0
-        st.metric("Win Rate", f"{wr:.0f}%")
-    with sc[2]:
-        st.metric("W / L", f"{wins} / {losses}")
 
     if closed_markets:
         df_closed = pd.DataFrame(closed_markets)
@@ -281,3 +335,58 @@ def _render_risk_controls(client, config: dict):
                 st.rerun()
             else:
                 st.error("Fehler beim Speichern.")
+
+
+# ======================================================================
+# Helper functions
+# ======================================================================
+
+def _calc_today_pnl(equity_curve: list, current_unrealized: float, current_realized: float) -> float:
+    """Calculate today's PNL change from equity curve snapshots."""
+    if not equity_curve:
+        return 0.0
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    current_total = current_unrealized + current_realized
+    # Find the earliest snapshot from today (or most recent before today)
+    prev_total = 0.0
+    for snap in equity_curve:
+        snap_date = str(snap.get("snapshot_at", ""))[:10]
+        snap_pnl = (snap.get("unrealized_pnl", 0) or 0) + (snap.get("realized_pnl", 0) or 0)
+        if snap_date < today_str:
+            prev_total = snap_pnl
+        else:
+            break
+    return current_total - prev_total
+
+
+def _filter_equity_curve(equity_curve: list, period: str) -> pd.DataFrame:
+    """Filter equity curve data by time period and return DataFrame for charting."""
+    if not equity_curve:
+        return pd.DataFrame()
+
+    now = datetime.utcnow()
+    if period == "1D":
+        cutoff = now - timedelta(days=1)
+    elif period == "1W":
+        cutoff = now - timedelta(weeks=1)
+    elif period == "1M":
+        cutoff = now - timedelta(days=30)
+    else:
+        cutoff = None
+
+    rows = []
+    for snap in equity_curve:
+        snap_at = snap.get("snapshot_at", "")
+        try:
+            dt = datetime.fromisoformat(str(snap_at))
+        except (ValueError, TypeError):
+            continue
+        if cutoff and dt < cutoff:
+            continue
+        total_pnl = (snap.get("unrealized_pnl", 0) or 0) + (snap.get("realized_pnl", 0) or 0)
+        rows.append({"date": dt, "pnl": total_pnl})
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
