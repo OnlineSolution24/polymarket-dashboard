@@ -1105,11 +1105,17 @@ def _job_sync_positions(config: AppConfig):
             market_id = market_row["id"]
             question = market_row.get("question", "")
 
-            # Check if we already have an active trade for this market+side
+            # Check if we already have ANY trade for this market+side (active or closed)
             existing = engine.query_one(
-                "SELECT id, price FROM trades WHERE market_id = ? AND side = ? "
+                "SELECT id, price, result FROM trades WHERE market_id = ? AND side = ? "
                 "AND status = 'executed' AND (result IS NULL OR result = 'open')",
                 (market_id, side),
+            )
+
+            # Also check if market was recently traded (avoid re-creating after cashout)
+            any_trade = engine.query_one(
+                "SELECT id FROM trades WHERE market_id = ? AND status = 'executed'",
+                (market_id,),
             )
 
             if existing:
@@ -1122,8 +1128,11 @@ def _job_sync_positions(config: AppConfig):
                     synced += 1
                     logger.info(f"Position sync: updated price for trade {existing['id']} "
                                 f"({side} {question[:40]}): ${avg_price:.4f}")
+            elif any_trade:
+                # Market was already traded — don't re-import (avoids cashout loop)
+                logger.debug(f"Position sync: skipping {question[:40]} — already traded")
             else:
-                # Create new trade record from on-chain position
+                # Truly new position — import it
                 engine.execute(
                     """INSERT INTO trades
                        (market_id, market_question, side, amount_usd, price, status,
