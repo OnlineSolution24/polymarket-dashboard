@@ -62,15 +62,12 @@ def render():
     with c2:
         with st.container(border=True, height=280):
             _pnl_color = "green" if total_pnl >= 0 else "red"
-            _hdr, _filter = st.columns([1, 2])
-            with _hdr:
-                st.caption("Gewinn/Verlust")
-            with _filter:
-                period = st.radio(
-                    "z", ["1D", "1W", "1M", "All"],
-                    index=3, horizontal=True, key="eq_period",
-                    label_visibility="collapsed",
-                )
+            st.caption("Gewinn/Verlust")
+            period = st.segmented_control(
+                "eq", ["1D", "1W", "1M", "All"],
+                default="All", key="eq_period",
+                label_visibility="collapsed",
+            ) or "All"
             st.markdown(f"### :{_pnl_color}[${total_pnl:+,.2f}]")
             st.markdown(f":{_pnl_color}[{total_pnl_pct:+.1f}%] Gesamt")
             if equity_curve:
