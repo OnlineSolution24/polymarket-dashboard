@@ -421,7 +421,7 @@ def _build_equity_chart(df: pd.DataFrame, color: str):
         x=df["date"], y=df["pnl"],
         fill="tozeroy",
         line=dict(color=color, width=2),
-        fillcolor=color.replace(")", ", 0.15)").replace("rgb", "rgba") if "rgb" in color else color + "26",
+        fillcolor=f"rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.15)",
         hovertemplate="%{y:$.2f}<extra></extra>",
     ))
     fig.update_layout(
