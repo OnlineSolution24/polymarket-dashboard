@@ -70,6 +70,10 @@ trading:
     check_pending_suggestions: true      # Skip if pending suggestion exists for market
   rebuy_cooldown_days: 7                  # Wait 7 days before re-buying closed market
   weather_min_edge: 0.15                   # 15% min edge for weather market trades
+  analyst_suggestions:
+    min_edge: 0.20                           # 20% min edge for AI analyst suggestions (conservative)
+    min_liquidity: 50000                     # Only suggest markets with >$50k liquidity
+    max_amount_usd: 3.00                     # Max $3 per AI-suggested trade
   hedging:
     enabled: false                         # Disabled — cashout handles profit-taking
     profit_threshold_pct: 15
