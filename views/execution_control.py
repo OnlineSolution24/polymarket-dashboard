@@ -12,7 +12,7 @@ from services.bot_api_client import get_bot_client
 
 
 def render():
-    st.header("Portfolio & Performance")
+    st.header("Dashboard")
 
     client = get_bot_client()
     perf = client.get_performance()
@@ -187,7 +187,22 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 4. EINZAHLUNG BEARBEITEN
+    # 4. LETZTE AKTIVITÄTEN
+    # ══════════════════════════════════════════════════════════════════
+    st.subheader("Letzte Aktivität")
+    recent_logs = client.get_logs(limit=10)
+    if recent_logs:
+        for log in recent_logs:
+            level_icon = {"info": "ℹ️", "warn": "⚠️", "error": "❌", "debug": "🔍"}.get(log.get("level", ""), "📝")
+            ts = (log.get("created_at") or "")[:16]
+            st.caption(f"{level_icon} `{ts}` **{log.get('agent_id', 'system')}**: {log.get('message', '')}")
+    else:
+        st.caption("Noch keine Agent-Aktivitäten.")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 5. EINZAHLUNG BEARBEITEN
     # ══════════════════════════════════════════════════════════════════
     with st.expander("Einzahlung anpassen", expanded=False):
         new_deposited = st.number_input(
@@ -197,9 +212,7 @@ def render():
             key="total_deposited",
         )
         if new_deposited != total_deposited and st.button("Einzahlung speichern"):
-            config = client.get_config()
-            config.setdefault("trading", {})["total_deposited"] = new_deposited
-            result = client.save_config(config)
+            result = client.save_setting("total_deposited", new_deposited)
             if result and result.get("ok"):
                 st.success(f"Einzahlung auf ${new_deposited:,.2f} aktualisiert!")
                 st.rerun()

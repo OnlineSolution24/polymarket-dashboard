@@ -279,7 +279,10 @@ def create_app(config: AppConfig) -> FastAPI:
 
         platform_cfg = load_platform_config()
         trading_cfg = platform_cfg.get("trading", {})
-        total_deposited = trading_cfg.get("total_deposited", 0)
+
+        # Read total_deposited from DB (persistent), fallback to config
+        dep_row = engine.query_one("SELECT value FROM settings WHERE key = 'total_deposited'")
+        total_deposited = float(dep_row["value"]) if dep_row else trading_cfg.get("total_deposited", 0)
 
         # ---- Live data from Polymarket Data API ----
         funder = config.polymarket_funder if hasattr(config, 'polymarket_funder') else ""
@@ -655,6 +658,16 @@ def create_app(config: AppConfig) -> FastAPI:
         save_platform_config(body)
         logger.info("Platform config updated via API")
         return BotActionResponse(ok=True, message="Config saved")
+
+    @app.post("/api/settings/{key}", dependencies=[Depends(verify_api_key)])
+    def save_setting(key: str, body: dict):
+        """Save a persistent setting to DB (survives restarts)."""
+        value = str(body.get("value", ""))
+        engine.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))",
+            (key, value),
+        )
+        return BotActionResponse(ok=True, message=f"Setting '{key}' saved")
 
     @app.post("/api/scheduler/reload", dependencies=[Depends(verify_api_key)])
     def reload_scheduler():

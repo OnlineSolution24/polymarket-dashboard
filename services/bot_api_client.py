@@ -153,6 +153,9 @@ class BotAPIClient:
     def save_config(self, config: dict) -> dict | None:
         return self._post("/api/config", config)
 
+    def save_setting(self, key: str, value) -> dict | None:
+        return self._post(f"/api/settings/{key}", {"value": value})
+
     # ------------------------------------------------------------------
     # Write endpoints
     # ------------------------------------------------------------------

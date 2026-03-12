@@ -248,6 +248,14 @@ TABLES = {
             position_count  INTEGER DEFAULT 0
         )
     """,
+
+    "settings": """
+        CREATE TABLE IF NOT EXISTS settings (
+            key         TEXT PRIMARY KEY,
+            value       TEXT,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
 }
 
 # Indexes for performance
