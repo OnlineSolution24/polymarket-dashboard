@@ -581,10 +581,11 @@ class TraderAgent(BaseAgent):
             if not current_price or current_price <= 0:
                 continue
 
-            # Calculate profit
+            # Calculate profit for the portion being sold
             profit_pct = ((current_price - entry_price) / entry_price) * 100
             shares = pos["amount_usd"] / entry_price
-            profit_usd = (current_price - entry_price) * shares
+            sold_shares = shares * sell_pct
+            profit_usd = (current_price - entry_price) * sold_shares
 
             # Determine threshold: lower for aged positions
             threshold_pct = min_profit_pct
@@ -632,10 +633,10 @@ class TraderAgent(BaseAgent):
                          round(profit_usd, 4)),
                     )
 
-                    # Mark original trade as closed with profit
+                    # Mark original trade as cashed out (NOT 'win' — only Settlement sets win/loss)
                     if sell_pct >= 1.0:
                         engine.execute(
-                            "UPDATE trades SET result = 'win', pnl = ? WHERE id = ?",
+                            "UPDATE trades SET result = 'cashout', pnl = ? WHERE id = ?",
                             (round(profit_usd, 4), pos["id"]),
                         )
 
