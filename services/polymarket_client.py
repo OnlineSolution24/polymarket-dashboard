@@ -364,8 +364,19 @@ class PolymarketService:
             )
             order = self._auth_client.create_market_order(order_args)
             result = self._auth_client.post_order(order)
-            logger.info(f"Order placed: SELL ${amount} on token {token_id[:20]}...")
-            return {"ok": True, "result": result}
+            logger.info(f"Sell order response: {result}")
+
+            # Check if order was actually matched/filled
+            if isinstance(result, dict):
+                status = result.get("status", "").lower()
+                if status in ("matched", "filled", "delayed"):
+                    return {"ok": True, "result": result, "filled": True}
+                elif status in ("unmatched", "live"):
+                    logger.warn(f"Sell order placed but NOT filled (status={status}). No buyer available.")
+                    return {"ok": False, "error": f"Order not filled: {status}", "result": result}
+
+            # Fallback: assume ok if we got a non-error response
+            return {"ok": True, "result": result, "filled": True}
 
         except Exception as e:
             logger.error(f"Sell order failed: {e}")
