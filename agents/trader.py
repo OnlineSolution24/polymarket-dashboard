@@ -585,7 +585,7 @@ class TraderAgent(BaseAgent):
             if recent:
                 continue
 
-            # Get current market price
+            # Get current market price (prefer live CLOB bid over possibly stale DB)
             market = engine.query_one(
                 "SELECT yes_price, no_price, yes_token_id, no_token_id "
                 "FROM markets WHERE id = ?",
@@ -595,6 +595,23 @@ class TraderAgent(BaseAgent):
                 continue
 
             current_price = market.get("yes_price") if pos["side"] == "YES" else market.get("no_price")
+
+            # Fetch live best-bid from CLOB order book for accurate cashout decisions
+            token_id_for_price = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
+            if token_id_for_price:
+                try:
+                    from config import AppConfig as _AC
+                    from services.polymarket_client import PolymarketService
+                    _svc = PolymarketService(_AC.from_env())
+                    _book = _svc.get_order_book(token_id_for_price)
+                    if _book and _book.get("bids"):
+                        best_bid = float(_book["bids"][0].get("price", 0))
+                        if best_bid > 0:
+                            self.log("debug", f"Live bid for {market_id[:20]}: {best_bid} (DB: {current_price})")
+                            current_price = best_bid
+                except Exception:
+                    pass  # fallback to DB price
+
             if not current_price or current_price <= 0:
                 continue
 
