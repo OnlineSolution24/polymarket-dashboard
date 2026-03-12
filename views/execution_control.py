@@ -43,53 +43,53 @@ def render():
     # ══════════════════════════════════════════════════════════════════
     c1, c2, c3, c4 = st.columns(4)
 
-    # --- Card 1: Portfolio ---
+    _dep_str = f" (${total_deposited:,.0f} eingezahlt)" if total_deposited else ""
+    _today_color = "green" if today_pnl >= 0 else "red"
+    _sign = "+" if today_pnl >= 0 else ""
+    _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0
+    _pnl_color = "green" if total_pnl >= 0 else "red"
+    _u_color = "green" if unrealized_pnl >= 0 else "red"
+    _r_color = "green" if realized_pnl >= 0 else "red"
+
     with c1:
         with st.container(border=True):
-            st.caption("Portfolio")
+            st.caption(f"Portfolio{_dep_str}")
             st.markdown(f"### ${portfolio_total:,.2f}")
-            st.markdown(f"Verfuegbar: **${cash_available:,.2f}**")
-            _today_color = "green" if today_pnl >= 0 else "red"
-            _sign = "+" if today_pnl >= 0 else ""
-            _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0
-            st.markdown(f":{_today_color}[{_sign}${today_pnl:.2f} ({_sign}{_today_pct:.2f}%) letzter Tag]")
+            st.markdown(f"Verfügbar: **${cash_available:,.2f}**")
+            st.markdown(f":{_today_color}[{_sign}${today_pnl:.2f} ({_sign}{_today_pct:.1f}%) heute]")
 
-    # --- Card 2: Gewinn / Verlust + Equity Curve ---
     with c2:
         with st.container(border=True):
-            _pnl_color = "green" if total_pnl >= 0 else "red"
             st.caption("Gewinn/Verlust")
-            period = st.segmented_control(
-                "eq", ["1D", "1W", "1M", "All"],
-                default="All", key="eq_period",
-                label_visibility="collapsed",
-            ) or "All"
             st.markdown(f"### :{_pnl_color}[${total_pnl:+,.2f}]")
             st.markdown(f":{_pnl_color}[{total_pnl_pct:+.1f}%] Gesamt")
-            if equity_curve:
-                df_eq = _filter_equity_curve(equity_curve, period)
-                if not df_eq.empty:
-                    _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
-                    _build_equity_chart(df_eq, _chart_color)
+            st.markdown(f"W/L: **{wins}/{losses}** | WR: **{wr:.0f}%**")
 
-    # --- Card 3: Offene Positionen ---
     with c3:
         with st.container(border=True):
-            st.caption("Offene Positionen")
+            st.caption(f"Offene Positionen ({open_markets})")
             st.markdown(f"### ${positions_value:,.2f}")
             st.markdown(f"Einsatz: **${positions_cost:,.2f}**")
-            _u_color = "green" if unrealized_pnl >= 0 else "red"
-            st.markdown(f"Unrealisiert: **:{_u_color}[${unrealized_pnl:+,.2f}]**")
-            st.caption(f"{open_markets} Maerkte offen")
+            st.markdown(f"Unrealisiert: :{_u_color}[${unrealized_pnl:+,.2f}]")
 
-    # --- Card 4: Realisierter PnL ---
     with c4:
         with st.container(border=True):
             st.caption("Realisiert")
-            _r_color = "green" if realized_pnl >= 0 else "red"
             st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
-            st.markdown(f"W/L: **{wins}/{losses}** | WR: **{wr:.0f}%**")
-            st.caption(f"{open_markets} Maerkte offen")
+            st.markdown(f"{total_closed} Märkte abgeschlossen")
+            st.caption(" ")
+
+    # Equity curve (compact, below cards)
+    if equity_curve:
+        period = st.segmented_control(
+            "eq", ["1D", "1W", "1M", "All"],
+            default="All", key="eq_period",
+            label_visibility="collapsed",
+        ) or "All"
+        df_eq = _filter_equity_curve(equity_curve, period)
+        if not df_eq.empty:
+            _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
+            _build_equity_chart(df_eq, _chart_color)
 
     st.divider()
 
