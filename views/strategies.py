@@ -64,15 +64,32 @@ _FIELD_LABELS = {
 _SIZING_LABELS = {"kelly": "Kelly-Formel", "fixed_pct": "Fester Prozentsatz", "fixed": "Fester Betrag"}
 
 
-def _render_strategy_details(client, sid: str, name: str, definition: dict):
-    """Render readable, editable strategy parameters."""
+def _render_strategy_details(client, sid: str, name: str, definition: dict, strat: dict):
+    """Render readable, editable strategy parameters inline per strategy."""
     entry_rules = definition.get("entry_rules", [])
     exit_rules = definition.get("exit_rules", [])
     trade_params = definition.get("trade_params", {})
     source = definition.get("source", "")
+    name_lower = name.lower()
+
+    # Detect strategy type for showing relevant global config
+    is_weather = "weather" in name_lower or "wetter" in name_lower
+
+    # Load global config for global params
+    config = client.get_config()
+    trading_cfg = config.get("trading", {})
+    sched_cfg = config.get("scheduler", {})
 
     with st.expander("Parameter bearbeiten", expanded=False):
         changed = False
+        config_changed = False
+
+        # --- Strategy info header ---
+        if is_weather:
+            st.caption("Datenquelle: Open-Meteo API (kostenlos, kein API-Key) | 16-Tage Vorhersage | Unsicherheit: Tag 1 +-1C, Tag 7 +-3C, Tag 14 +-4C")
+
+        if source == "pattern_scanner":
+            st.caption(f"Quelle: Pattern Scanner | Regel: `{definition.get('rule', '?')}`")
 
         # --- Entry Rules ---
         st.markdown("**Einstiegsregeln**")
@@ -164,17 +181,19 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict):
             )
         with tp2:
             max_pos = st.number_input(
-                "Max Position %",
+                "Max Position % (vom Kapital pro Trade)",
                 value=float(trade_params.get("max_position_pct", 5)),
                 min_value=0.5, max_value=50.0, step=0.5,
                 key=f"tp_maxpos_{sid}",
+                help=f"Bei ${trading_cfg.get('capital_usd', 100):.0f} Kapital = max ${trading_cfg.get('capital_usd', 100) * float(trade_params.get('max_position_pct', 5)) / 100:.2f} pro Trade",
             )
         with tp3:
             min_edge = st.number_input(
-                "Min Edge %",
+                "Min Edge % (Einstieg)",
                 value=float(trade_params.get("min_edge", 0.03)) * 100,
                 min_value=0.0, max_value=50.0, step=0.5,
                 key=f"tp_minedge_{sid}",
+                help="Minimaler Edge um einen Trade zu eroeffnen",
             )
 
         new_trade_params = {
@@ -186,90 +205,109 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict):
         if new_trade_params != trade_params:
             changed = True
 
-        # --- Extra info for special strategies ---
-        if source == "pattern_scanner":
+        st.markdown("---")
+
+        # --- Global Execution Config (per strategy context) ---
+        st.markdown("**Ausfuehrung & Cashout**")
+        gc1, gc2, gc3 = st.columns(3)
+
+        # Analyse-Intervall (from scheduler config)
+        if is_weather:
+            sched_key = "weather_edge"
+            default_interval = 30
+        else:
+            sched_key = "strategy_evaluation"
+            default_interval = 15
+
+        with gc1:
+            analyse_interval = st.number_input(
+                "Analyse-Intervall (Min)",
+                value=int(sched_cfg.get(sched_key, {}).get("interval_minutes", default_interval)),
+                min_value=5, max_value=120, step=5,
+                key=f"gc_interval_{sid}",
+                help="Wie oft wird nach passenden Maerkten gesucht (API-Anfragen, kostenlos)",
+            )
+
+        with gc2:
+            cashout_min_profit = st.number_input(
+                "Cashout ab Profit % (Minimum)",
+                value=float(trading_cfg.get("cashout", {}).get("min_profit_pct", 10)),
+                min_value=1.0, max_value=200.0, step=1.0,
+                key=f"gc_cashout_{sid}",
+                help="Position wird verkauft wenn Profit >= diesem Wert. Hoehere Profite werden auch gecashoutet.",
+            )
+
+        with gc3:
+            cashout_min_usd = st.number_input(
+                "Cashout ab Profit $ (Minimum)",
+                value=float(trading_cfg.get("cashout", {}).get("min_profit_usd", 0.50)),
+                min_value=0.10, max_value=50.0, step=0.10,
+                key=f"gc_cashout_usd_{sid}",
+                help="Zusaetzliche Bedingung: Mindestprofit in Dollar",
+            )
+
+        # Weather-specific: min edge for weather strategy
+        if is_weather:
             st.markdown("---")
-            st.caption(f"Quelle: Pattern Scanner | Regel: `{definition.get('rule', '?')}`")
+            st.markdown("**Wetter-spezifisch**")
+            wc1, wc2 = st.columns(2)
+            with wc1:
+                weather_min_edge = st.number_input(
+                    "Weather Min Edge % (Einstieg)",
+                    value=float(trading_cfg.get("weather_min_edge", 0.15)) * 100,
+                    min_value=1.0, max_value=50.0, step=1.0,
+                    key=f"wc_minedge_{sid}",
+                    help="Minimaler Edge zwischen Wettervorhersage und Polymarket-Preis fuer einen Trade",
+                )
+            with wc2:
+                st.metric("Forecast-Reichweite", "16 Tage")
+
+        # Detect global config changes
+        orig_interval = int(sched_cfg.get(sched_key, {}).get("interval_minutes", default_interval))
+        orig_cashout_pct = float(trading_cfg.get("cashout", {}).get("min_profit_pct", 10))
+        orig_cashout_usd = float(trading_cfg.get("cashout", {}).get("min_profit_usd", 0.50))
+        if (analyse_interval != orig_interval or cashout_min_profit != orig_cashout_pct
+                or cashout_min_usd != orig_cashout_usd):
+            config_changed = True
+
+        if is_weather:
+            orig_weather_edge = float(trading_cfg.get("weather_min_edge", 0.15)) * 100
+            if weather_min_edge != orig_weather_edge:
+                config_changed = True
 
         # --- Save button ---
-        if changed:
+        if changed or config_changed:
             if st.button("Aenderungen speichern", key=f"save_{sid}", type="primary", use_container_width=True):
-                update_data = {
-                    "entry_rules": new_entry_rules,
-                    "trade_params": new_trade_params,
-                }
-                if new_exit_rules != exit_rules:
-                    update_data["exit_rules"] = new_exit_rules
+                saved_ok = True
 
-                result = client.update_strategy(sid, update_data)
-                if result:
-                    st.success("Strategie aktualisiert! Wirkt ab naechstem Zyklus.")
+                # Save strategy definition changes
+                if changed:
+                    update_data = {
+                        "entry_rules": new_entry_rules,
+                        "trade_params": new_trade_params,
+                    }
+                    if new_exit_rules != exit_rules:
+                        update_data["exit_rules"] = new_exit_rules
+                    result = client.update_strategy(sid, update_data)
+                    if not result:
+                        saved_ok = False
+
+                # Save global config changes
+                if config_changed:
+                    config.setdefault("scheduler", {}).setdefault(sched_key, {})["interval_minutes"] = analyse_interval
+                    config.setdefault("trading", {}).setdefault("cashout", {})["min_profit_pct"] = cashout_min_profit
+                    config["trading"]["cashout"]["min_profit_usd"] = cashout_min_usd
+                    if is_weather:
+                        config["trading"]["weather_min_edge"] = round(weather_min_edge / 100, 4)
+                    result = client.save_config(config)
+                    if not result:
+                        saved_ok = False
+
+                if saved_ok:
+                    st.success("Gespeichert! Wirkt ab naechstem Zyklus.")
                     st.rerun()
                 else:
                     st.error("Fehler beim Speichern")
-
-
-def _render_weather_config(client):
-    """Render weather strategy config section (editable)."""
-    config = client.get_config()
-    trading = config.get("trading", {})
-    scheduler = config.get("scheduler", {})
-
-    st.markdown("---")
-    st.subheader("Wetter-Strategie Konfiguration")
-    st.caption("Open-Meteo API (kostenlos, kein API-Key) | Analyse alle 30 Min")
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        weather_edge = st.number_input(
-            "Min Edge %", value=float(trading.get("weather_min_edge", 0.15)) * 100,
-            min_value=1.0, max_value=50.0, step=1.0, key="weather_min_edge",
-        )
-    with c2:
-        weather_interval = st.number_input(
-            "Check-Intervall (Min)",
-            value=int(scheduler.get("weather_edge", {}).get("interval_minutes", 30)),
-            min_value=5, max_value=120, step=5, key="weather_interval",
-        )
-    with c3:
-        cashout_pct = st.number_input(
-            "Cashout Profit %",
-            value=float(trading.get("cashout", {}).get("min_profit_pct", 10)),
-            min_value=1.0, max_value=100.0, step=1.0, key="weather_cashout",
-        )
-    with c4:
-        max_pos_pct = st.number_input(
-            "Max Position %",
-            value=float(trading.get("limits", {}).get("max_position_pct", 5)),
-            min_value=0.5, max_value=50.0, step=0.5, key="weather_maxpos",
-        )
-
-    # Show current info
-    st.caption(
-        f"API: Open-Meteo (16-Tage Vorhersage) | "
-        f"Unsicherheit: Tag 1 = +-1C, Tag 7 = +-3C, Tag 14 = +-4C | "
-        f"Cashout: {trading.get('cashout', {}).get('sell_pct', 100)}% der Position"
-    )
-
-    # Check for changes
-    orig_edge = float(trading.get("weather_min_edge", 0.15)) * 100
-    orig_interval = int(scheduler.get("weather_edge", {}).get("interval_minutes", 30))
-    orig_cashout = float(trading.get("cashout", {}).get("min_profit_pct", 10))
-    orig_maxpos = float(trading.get("limits", {}).get("max_position_pct", 5))
-
-    if (weather_edge != orig_edge or weather_interval != orig_interval
-            or cashout_pct != orig_cashout or max_pos_pct != orig_maxpos):
-        if st.button("Wetter-Config speichern", key="save_weather_config", type="primary"):
-            config["trading"]["weather_min_edge"] = round(weather_edge / 100, 4)
-            config.setdefault("scheduler", {}).setdefault("weather_edge", {})["interval_minutes"] = weather_interval
-            config.setdefault("trading", {}).setdefault("cashout", {})["min_profit_pct"] = cashout_pct
-            config.setdefault("trading", {}).setdefault("limits", {})["max_position_pct"] = max_pos_pct
-            result = client.save_config(config)
-            if result:
-                st.success("Wetter-Config gespeichert! Wirkt ab naechstem Zyklus.")
-                st.rerun()
-            else:
-                st.error("Fehler beim Speichern")
 
 
 def render():
@@ -396,7 +434,7 @@ def render():
                 definition = {}
 
             if definition:
-                _render_strategy_details(client, sid, name, definition)
+                _render_strategy_details(client, sid, name, definition, strat)
 
             st.markdown("---")
 
@@ -531,5 +569,3 @@ def render():
     else:
         st.info("Pattern-Analyse nicht verfuegbar. Daten werden mit der Zeit gesammelt.")
 
-    # --- Weather Strategy Config ---
-    _render_weather_config(client)
