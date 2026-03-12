@@ -165,10 +165,20 @@ def render():
 
     if closed_markets:
         df_closed = pd.DataFrame(closed_markets)
-        df_closed.columns = ["Market ID", "Markt", "Ergebnis", "Trades"]
-        df_closed["Ergebnis"] = df_closed["Ergebnis"].str.upper()
-        df_closed = df_closed[["Markt", "Ergebnis", "Trades"]]
-        st.dataframe(df_closed, use_container_width=True, hide_index=True)
+        display_cols = {}
+        if "name" in df_closed.columns:
+            display_cols["name"] = "Markt"
+        if "result" in df_closed.columns:
+            display_cols["result"] = "Ergebnis"
+        if "pnl" in df_closed.columns:
+            display_cols["pnl"] = "PnL ($)"
+        if "trade_count" in df_closed.columns:
+            display_cols["trade_count"] = "Trades"
+        df_closed = df_closed.rename(columns=display_cols)
+        if "Ergebnis" in df_closed.columns:
+            df_closed["Ergebnis"] = df_closed["Ergebnis"].str.upper()
+        show_cols = [c for c in ["Markt", "Ergebnis", "PnL ($)", "Trades"] if c in df_closed.columns]
+        st.dataframe(df_closed[show_cols], use_container_width=True, hide_index=True)
     else:
         st.caption("Noch keine abgeschlossenen Märkte.")
 

@@ -390,10 +390,17 @@ def create_app(config: AppConfig) -> FastAPI:
                     wins += 1
                 else:
                     losses += 1
+                settle_pnl_row = engine.query_one(
+                    "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE market_id = ? "
+                    "AND result IN ('win', 'loss')",
+                    (m["market_id"],),
+                )
+                settle_pnl = float(settle_pnl_row["total_pnl"]) if settle_pnl_row else 0
                 closed_markets.append({
                     "market_id": m["market_id"],
                     "name": market_name[:60],
                     "result": "win" if is_win else "loss",
+                    "pnl": round(settle_pnl, 2),
                     "trade_count": m.get("trade_count", 0),
                 })
             else:
