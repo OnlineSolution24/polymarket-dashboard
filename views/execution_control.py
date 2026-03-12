@@ -11,22 +11,6 @@ from datetime import datetime, timedelta
 from services.bot_api_client import get_bot_client
 
 
-def _import_position_to_db(client, pos):
-    """Import an on-chain position into the bot DB so it can be managed."""
-    result = client.import_position({
-        "market_id": pos.get("market_id", ""),
-        "title": pos.get("title", ""),
-        "outcome": pos.get("outcome", "YES"),
-        "avg_price": pos.get("avg_price", 0),
-        "cost": pos.get("cost", 0),
-        "shares": pos.get("shares", 0),
-    })
-    if result and result.get("ok"):
-        st.success(f"Position importiert: {pos['title'][:40]}")
-    else:
-        st.error(f"Import fehlgeschlagen: {result.get('error', '?') if result else 'Keine Antwort'}")
-
-
 def render():
     st.header("Portfolio & Performance")
 
@@ -132,65 +116,61 @@ def render():
 
     live_positions = perf.get("live_positions", [])
     if live_positions:
-        # Build display dataframe
-        df = pd.DataFrame(live_positions)
-        df_display = df[["title", "outcome", "avg_price", "cur_price",
-                         "shares", "cost", "value", "pnl", "pnl_pct"]].copy()
-        df_display.columns = ["Markt", "Seite", "Einstieg", "Aktuell",
-                              "Shares", "Einsatz", "Wert", "PnL $", "PnL %"]
+        # Auto-import: register any untracked on-chain positions in DB
+        imported_count = 0
+        for pos in live_positions:
+            if not pos.get("trade_id") and pos.get("market_id"):
+                result = client.import_position({
+                    "market_id": pos["market_id"],
+                    "title": pos.get("title", ""),
+                    "outcome": pos.get("outcome", "YES"),
+                    "avg_price": pos.get("avg_price", 0),
+                    "cost": pos.get("cost", 0),
+                    "shares": pos.get("shares", 0),
+                })
+                if result and result.get("ok"):
+                    pos["trade_id"] = result["trade_id"]
+                    imported_count += 1
+        if imported_count:
+            st.info(f"{imported_count} Position(en) automatisch importiert und werden jetzt vom Bot verwaltet.")
 
-        df_display["Einstieg"] = df_display["Einstieg"].apply(lambda x: f"${x:.4f}")
-        df_display["Aktuell"] = df_display["Aktuell"].apply(lambda x: f"${x:.4f}")
-        df_display["Shares"] = df_display["Shares"].apply(lambda x: f"{x:,.0f}")
-        df_display["Einsatz"] = df_display["Einsatz"].apply(lambda x: f"${x:.2f}")
-        df_display["Wert"] = df_display["Wert"].apply(lambda x: f"${x:.2f}")
-        df_display["Markt"] = df_display["Markt"].str[:55]
-        df_display["PnL $"] = df_display["PnL $"].apply(lambda x: f"${x:+.2f}")
-        df_display["PnL %"] = df_display["PnL %"].apply(lambda x: f"{x:+.1f}%")
+        # Column header
+        hdr = st.columns([3, 0.5, 0.7, 0.7, 0.6, 0.7, 0.7, 0.7, 0.6, 0.5])
+        labels = ["Markt", "Seite", "Einstieg", "Aktuell", "Shares", "Einsatz", "Wert", "PnL $", "PnL %", ""]
+        for c, l in zip(hdr, labels):
+            c.markdown(f"<small style='color:#5A6478'>{l}</small>", unsafe_allow_html=True)
 
-        def _color_pnl(val):
-            try:
-                num = float(val.replace("$", "").replace("%", "").replace("+", ""))
-            except (ValueError, AttributeError):
-                return ""
-            return "color: #00c853" if num > 0 else "color: #ff1744" if num < 0 else ""
+        for i, pos in enumerate(live_positions):
+            row = st.columns([3, 0.5, 0.7, 0.7, 0.6, 0.7, 0.7, 0.7, 0.6, 0.5])
+            row[0].markdown(f"<small>{pos['title'][:45]}</small>", unsafe_allow_html=True)
+            row[1].markdown(f"<small>{pos['outcome']}</small>", unsafe_allow_html=True)
+            row[2].markdown(f"<small>${pos['avg_price']:.4f}</small>", unsafe_allow_html=True)
+            row[3].markdown(f"<small>${pos['cur_price']:.4f}</small>", unsafe_allow_html=True)
+            row[4].markdown(f"<small>{pos['shares']:,.0f}</small>", unsafe_allow_html=True)
+            row[5].markdown(f"<small>${pos['cost']:.2f}</small>", unsafe_allow_html=True)
+            row[6].markdown(f"<small>${pos['value']:.2f}</small>", unsafe_allow_html=True)
 
-        styled = df_display.style.applymap(
-            _color_pnl, subset=["PnL $", "PnL %"]
-        ).hide(axis="index")
+            pnl, pnl_pct = pos["pnl"], pos["pnl_pct"]
+            c = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
+            row[7].markdown(f"<small style='color:{c}'>${pnl:+.2f}</small>", unsafe_allow_html=True)
+            row[8].markdown(f"<small style='color:{c}'>{pnl_pct:+.1f}%</small>", unsafe_allow_html=True)
 
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+            trade_id = pos.get("trade_id")
+            if trade_id:
+                if row[9].button("Sell", key=f"sell_{trade_id}_{i}"):
+                    with st.spinner("Verkaufe..."):
+                        res = client.manual_cashout(trade_id)
+                    if res and res.get("ok"):
+                        st.success(f"Verkauft! Profit: ${res.get('profit_usd', 0):+.2f}")
+                        st.rerun()
+                    else:
+                        st.error(f"Fehler: {res.get('error', '?') if res else '?'}")
 
         st.caption(
             f"**Gesamt:** Einsatz ${positions_cost:.2f} | "
             f"Wert ${positions_value:.2f} | "
             f"PnL ${unrealized_pnl:+.2f}"
         )
-
-        # Sell buttons row
-        sell_cols = st.columns(min(len(live_positions), 4))
-        for i, pos in enumerate(live_positions):
-            col = sell_cols[i % min(len(live_positions), 4)]
-            trade_id = pos.get("trade_id")
-            market_id = pos.get("market_id", "")
-            pnl = pos["pnl"]
-            label = pos["title"][:25]
-            pnl_prefix = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-
-            if trade_id:
-                if col.button(f"Sell: {label}.. ({pnl_prefix})", key=f"sell_{trade_id}_{i}", use_container_width=True):
-                    with st.spinner(f"Verkaufe {label}..."):
-                        result = client.manual_cashout(trade_id)
-                    if result and result.get("ok"):
-                        st.success(f"Verkauft! Profit: ${result.get('profit_usd', 0):+.2f}")
-                        st.rerun()
-                    else:
-                        st.error(f"Fehler: {result.get('error', '?') if result else 'Keine Antwort'}")
-            elif market_id:
-                # Position exists on Polymarket but not in DB — offer to import
-                if col.button(f"Import: {label}..", key=f"import_{i}", use_container_width=True):
-                    _import_position_to_db(client, pos)
-                    st.rerun()
     else:
         st.caption("Keine offenen Positionen.")
 
