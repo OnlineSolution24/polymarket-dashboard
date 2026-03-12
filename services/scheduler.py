@@ -668,29 +668,51 @@ def _job_daily_summary(config: AppConfig):
 
         today = date.today().isoformat()
 
-        # Collect stats
+        # AI costs today
         cost_row = engine.query_one(
             "SELECT COALESCE(SUM(cost_usd), 0) as total FROM api_costs WHERE date(created_at) = ?", (today,)
         )
-        trade_row = engine.query_one(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as pnl FROM trades WHERE date(executed_at) = ?", (today,)
-        )
-        agent_row = engine.query_one("SELECT COUNT(*) as cnt FROM agents WHERE status = 'active'")
-        sugg_row = engine.query_one(
-            "SELECT COUNT(*) as cnt FROM suggestions WHERE date(created_at) = ?", (today,)
-        )
+        cost = float(cost_row["total"]) if cost_row else 0
 
-        cost = cost_row["total"] if cost_row else 0
-        trades = trade_row["cnt"] if trade_row else 0
-        pnl = trade_row["pnl"] if trade_row else 0
-        agents = agent_row["cnt"] if agent_row else 0
-        suggestions = sugg_row["cnt"] if sugg_row else 0
+        # BUY trades today (exclude cashout/sell records)
+        buy_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM trades WHERE date(executed_at) = ? "
+            "AND status = 'executed' AND amount_usd > 0", (today,)
+        )
+        buys_today = int(buy_row["cnt"]) if buy_row else 0
+
+        # Realized PnL today (only from closed positions — cashout, win, loss)
+        pnl_row = engine.query_one(
+            "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE date(executed_at) = ? "
+            "AND result IN ('cashout', 'win', 'loss') AND amount_usd > 0", (today,)
+        )
+        realized_pnl = float(pnl_row["total_pnl"]) if pnl_row else 0
+
+        # Overall portfolio PnL (from latest portfolio snapshot)
+        snap = engine.query_one(
+            "SELECT unrealized_pnl, realized_pnl, positions_value, position_count "
+            "FROM portfolio_snapshots ORDER BY snapshot_at DESC LIMIT 1"
+        )
+        total_unrealized = float(snap["unrealized_pnl"]) if snap else 0
+        total_realized = float(snap["realized_pnl"]) if snap else 0
+        portfolio_value = float(snap["positions_value"]) if snap else 0
+        open_positions = int(snap["position_count"]) if snap else 0
+
+        # Executed suggestions today (actual trades, not expired/failed)
+        sugg_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM suggestions WHERE date(created_at) = ? "
+            "AND status IN ('executed', 'auto_approved', 'approved')", (today,)
+        )
+        suggestions = int(sugg_row["cnt"]) if sugg_row else 0
 
         summary = (
-            f"Aktive Agents: {agents}\n"
-            f"Trades heute: {trades} (PnL: ${pnl:+.2f})\n"
+            f"Offene Positionen: {open_positions} (Wert: ${portfolio_value:,.2f})\n"
+            f"Neue Käufe heute: {buys_today}\n"
+            f"Realisiert heute: ${realized_pnl:+.2f}\n"
+            f"Gesamt unrealisiert: ${total_unrealized:+.2f}\n"
+            f"Gesamt realisiert: ${total_realized:+.2f}\n"
             f"AI-Kosten: ${cost:.2f}\n"
-            f"Neue Vorschläge: {suggestions}"
+            f"Vorschläge heute: {suggestions}"
         )
 
         alerts = get_alerts(config)
