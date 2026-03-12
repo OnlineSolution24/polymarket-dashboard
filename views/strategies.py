@@ -61,7 +61,26 @@ _FIELD_LABELS = {
     "open_interest": "Open Interest",
     "smart_money_score": "Smart Money Score",
 }
+_FIELD_HELP = {
+    "yes_price": "Aktueller YES-Preis (0-1). Entspricht der Markt-Wahrscheinlichkeit fuer JA.",
+    "no_price": "Aktueller NO-Preis (0-1). Entspricht der Markt-Wahrscheinlichkeit fuer NEIN.",
+    "volume": "Gesamtes Handelsvolumen in USD. Hoeher = mehr Aktivitaet.",
+    "liquidity": "Verfuegbare Liquiditaet im Order Book in USD. Hoeher = leichter zu handeln.",
+    "calculated_edge": "Berechneter Vorteil vs. Marktpreis. ACHTUNG: Wird auch unter Trade-Parameter als 'Min Edge' gesteuert — Duplikat vermeiden!",
+    "sentiment_score": "KI-basierter Sentiment-Score (0-1). Hoeher = positiver Trend.",
+    "days_to_expiry": "Tage bis der Markt schliesst/resolved wird.",
+    "spread": "Differenz zwischen bestem Kauf- und Verkaufsangebot. Kleiner = bessere Liquiditaet.",
+    "whale_net_flow": "Netto-Kauf/Verkaufsvolumen grosser Wallets (Whales). Positiv = Whales kaufen.",
+    "top_holder_concentration": "Anteil der groessten Halter (0-1). Hoeher = konzentrierter Markt.",
+    "open_interest": "Offene Positionen in USD. Zeigt wie viel Kapital im Markt steckt.",
+    "smart_money_score": "Score basierend auf Aktivitaet profitabler Wallet-Adressen (0-1).",
+}
 _SIZING_LABELS = {"kelly": "Kelly-Formel", "fixed_pct": "Fester Prozentsatz", "fixed": "Fester Betrag"}
+_SIZING_HELP = {
+    "kelly": "Berechnet optimale Positionsgroesse basierend auf Edge und Gewinnwahrscheinlichkeit. Empfohlen fuer Fortgeschrittene.",
+    "fixed_pct": "Fester Prozentsatz vom Strategie-Kapital pro Trade.",
+    "fixed": "Fester Dollar-Betrag pro Trade, unabhaengig vom Kapital.",
+}
 
 
 def _render_strategy_details(client, sid: str, name: str, definition: dict, strat: dict):
@@ -93,6 +112,13 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
 
         # --- Entry Rules ---
         st.markdown("**Einstiegsregeln**")
+        st.caption("Filter die bestimmen ob ein Markt fuer diese Strategie in Frage kommt")
+
+        # Check for duplicate edge (entry rule + trade param)
+        has_edge_rule = any(r.get("field") == "calculated_edge" for r in entry_rules)
+        if has_edge_rule:
+            st.warning("Edge ist bereits unter Trade-Parameter als 'Min Edge' steuerbar. Die Einstiegsregel hier ist ein Duplikat — du kannst sie mit X entfernen.", icon="⚠️")
+
         new_entry_rules = []
         for i, rule in enumerate(entry_rules):
             c1, c2, c3, c4 = st.columns([3, 1.5, 2, 0.5])
@@ -106,6 +132,7 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
                     index=list(_FIELD_LABELS.keys()).index(field) if field in _FIELD_LABELS else 0,
                     format_func=lambda x: _FIELD_LABELS.get(x, x),
                     key=f"ef_{sid}_{i}", label_visibility="collapsed",
+                    help=_FIELD_HELP.get(field, ""),
                 )
             with c2:
                 new_op = st.selectbox(
@@ -131,7 +158,7 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
                 changed = True
 
         if st.button("+ Regel hinzufuegen", key=f"add_entry_{sid}"):
-            new_entry_rules.append({"field": "calculated_edge", "op": "gte", "value": 0.05})
+            new_entry_rules.append({"field": "volume", "op": "gte", "value": 5000})
             changed = True
 
         # --- Exit Rules ---
@@ -170,30 +197,99 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
 
         # --- Trade Parameters ---
         st.markdown("**Trade-Parameter**")
-        tp1, tp2, tp3 = st.columns(3)
+
+        # Capital basis — per-strategy override or global
+        global_capital = float(trading_cfg.get("capital_usd", 100))
+        strategy_capital = float(trade_params.get("strategy_capital_usd", 0))
+
+        cap1, cap2 = st.columns(2)
+        with cap1:
+            use_custom_capital = st.checkbox(
+                "Eigenes Kapital fuer diese Strategie",
+                value=strategy_capital > 0,
+                key=f"tp_custom_cap_{sid}",
+                help=f"Standard: globales Kapital (${global_capital:.0f}). Aktivieren um dieser Strategie ein eigenes Budget zuzuweisen.",
+            )
+        with cap2:
+            if use_custom_capital:
+                strategy_capital_input = st.number_input(
+                    "Strategie-Kapital ($)",
+                    value=strategy_capital if strategy_capital > 0 else global_capital,
+                    min_value=1.0, max_value=10000.0, step=5.0,
+                    key=f"tp_cap_{sid}",
+                    help="Maximales Kapital das diese Strategie nutzen darf",
+                )
+            else:
+                strategy_capital_input = 0.0
+                st.caption(f"Nutzt globales Kapital: **${global_capital:.0f}**")
+
+        effective_capital = strategy_capital_input if use_custom_capital and strategy_capital_input > 0 else global_capital
+
+        # Sizing method
+        current_sizing = trade_params.get("sizing_method", "kelly")
+        tp1, tp2 = st.columns(2)
         with tp1:
             sizing = st.selectbox(
                 "Positionsgroesse",
                 list(_SIZING_LABELS.keys()),
-                index=list(_SIZING_LABELS.keys()).index(trade_params.get("sizing_method", "kelly")) if trade_params.get("sizing_method", "kelly") in _SIZING_LABELS else 0,
+                index=list(_SIZING_LABELS.keys()).index(current_sizing) if current_sizing in _SIZING_LABELS else 0,
                 format_func=lambda x: _SIZING_LABELS.get(x, x),
                 key=f"tp_sizing_{sid}",
+                help=_SIZING_HELP.get(current_sizing, ""),
             )
         with tp2:
-            max_pos = st.number_input(
-                "Max Position % (vom Kapital pro Trade)",
-                value=float(trade_params.get("max_position_pct", 5)),
-                min_value=0.5, max_value=50.0, step=0.5,
-                key=f"tp_maxpos_{sid}",
-                help=f"Bei ${trading_cfg.get('capital_usd', 100):.0f} Kapital = max ${trading_cfg.get('capital_usd', 100) * float(trade_params.get('max_position_pct', 5)) / 100:.2f} pro Trade",
-            )
-        with tp3:
             min_edge = st.number_input(
                 "Min Edge % (Einstieg)",
                 value=float(trade_params.get("min_edge", 0.03)) * 100,
                 min_value=0.0, max_value=50.0, step=0.5,
                 key=f"tp_minedge_{sid}",
-                help="Minimaler Edge um einen Trade zu eroeffnen",
+                help="Minimaler berechneter Vorteil gegenueber dem Marktpreis um einen Trade zu eroeffnen",
+            )
+
+        # Sizing-specific fields
+        if sizing == "fixed":
+            fx1, fx2 = st.columns(2)
+            with fx1:
+                fixed_amount = st.number_input(
+                    "Fester Betrag pro Trade ($)",
+                    value=float(trade_params.get("fixed_amount_usd", 5.0)),
+                    min_value=0.10, max_value=500.0, step=0.50,
+                    key=f"tp_fixed_{sid}",
+                    help="Exakter Dollar-Betrag der pro Trade eingesetzt wird",
+                )
+            with fx2:
+                max_pos = st.number_input(
+                    f"Max Position % (von ${effective_capital:.0f})",
+                    value=float(trade_params.get("max_position_pct", 5)),
+                    min_value=0.5, max_value=50.0, step=0.5,
+                    key=f"tp_maxpos_{sid}",
+                    help=f"Obergrenze: max ${effective_capital * float(trade_params.get('max_position_pct', 5)) / 100:.2f} pro Trade",
+                )
+        elif sizing == "fixed_pct":
+            fp1, fp2 = st.columns(2)
+            with fp1:
+                fixed_pct = st.number_input(
+                    f"Prozent pro Trade % (von ${effective_capital:.0f})",
+                    value=float(trade_params.get("fixed_pct", 5.0)),
+                    min_value=0.5, max_value=50.0, step=0.5,
+                    key=f"tp_fixedpct_{sid}",
+                    help=f"= ${effective_capital * float(trade_params.get('fixed_pct', 5.0)) / 100:.2f} pro Trade",
+                )
+            with fp2:
+                max_pos = st.number_input(
+                    f"Max Position % (von ${effective_capital:.0f})",
+                    value=float(trade_params.get("max_position_pct", 5)),
+                    min_value=0.5, max_value=50.0, step=0.5,
+                    key=f"tp_maxpos_{sid}",
+                    help=f"Obergrenze: max ${effective_capital * float(trade_params.get('max_position_pct', 5)) / 100:.2f} pro Trade",
+                )
+        else:  # kelly
+            max_pos = st.number_input(
+                f"Max Position % (von ${effective_capital:.0f})",
+                value=float(trade_params.get("max_position_pct", 5)),
+                min_value=0.5, max_value=50.0, step=0.5,
+                key=f"tp_maxpos_{sid}",
+                help=f"Kelly berechnet die optimale Groesse, aber nie mehr als {float(trade_params.get('max_position_pct', 5)):.1f}% = ${effective_capital * float(trade_params.get('max_position_pct', 5)) / 100:.2f}",
             )
 
         new_trade_params = {
@@ -202,6 +298,16 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
             "max_position_pct": max_pos,
             "min_edge": round(min_edge / 100, 4),
         }
+        if use_custom_capital and strategy_capital_input > 0:
+            new_trade_params["strategy_capital_usd"] = strategy_capital_input
+        elif "strategy_capital_usd" in new_trade_params:
+            del new_trade_params["strategy_capital_usd"]
+
+        if sizing == "fixed":
+            new_trade_params["fixed_amount_usd"] = fixed_amount
+        elif sizing == "fixed_pct":
+            new_trade_params["fixed_pct"] = fixed_pct
+
         if new_trade_params != trade_params:
             changed = True
 
