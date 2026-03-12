@@ -72,14 +72,32 @@ class TraderAgent(BaseAgent):
             "SELECT * FROM suggestions WHERE status = 'auto_approved' AND type = 'trade' ORDER BY created_at"
         )
         count = 0
+        seen_markets = set()  # prevent same-batch duplicates
         for s in suggestions:
             payload = json.loads(s.get("payload") or "{}")
+            market_id = payload.get("market_id", "")
+
+            # Skip if we already processed this market in this batch
+            if market_id in seen_markets:
+                engine.execute(
+                    "UPDATE suggestions SET status = 'expired', resolved_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), s["id"]),
+                )
+                continue
+            seen_markets.add(market_id)
+
             if self._execute_trade(payload, source=f"suggestion:{s['id']}"):
                 engine.execute(
                     "UPDATE suggestions SET status = 'executed', resolved_at = ? WHERE id = ?",
                     (datetime.utcnow().isoformat(), s["id"]),
                 )
                 count += 1
+            else:
+                # Mark as failed so it doesn't retry forever
+                engine.execute(
+                    "UPDATE suggestions SET status = 'failed', resolved_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), s["id"]),
+                )
         return count
 
     def _process_user_approved(self) -> int:
@@ -168,9 +186,9 @@ class TraderAgent(BaseAgent):
         cooldown_hours = dedup_cfg.get("cooldown_hours", 24)
         max_attempts = dedup_cfg.get("max_attempts_per_market", 3)
 
-        # 1. Existing OPEN position (exclude closed: cashout, win, loss, settled, hedge)
+        # 1. Existing OPEN position (include 'executing' to prevent race conditions)
         open_position = engine.query_one(
-            "SELECT id, side FROM trades WHERE market_id = ? AND status = 'executed' "
+            "SELECT id, side FROM trades WHERE market_id = ? AND status IN ('executed', 'executing') "
             "AND (result IS NULL OR result = 'open')",
             (market_id,),
         )

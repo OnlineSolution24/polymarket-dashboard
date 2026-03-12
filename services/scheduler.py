@@ -778,7 +778,7 @@ def _job_weather_edge_analysis(config: AppConfig):
 
             # Skip if we already have an open position for this market
             open_pos = engine.query_one(
-                "SELECT id FROM trades WHERE market_id = ? AND status = 'executed' "
+                "SELECT id FROM trades WHERE market_id = ? AND status IN ('executed', 'executing') "
                 "AND (result IS NULL OR result = 'open')",
                 (market_id,),
             )
