@@ -188,6 +188,9 @@ class BotAPIClient:
     def create_strategy(self, data: dict) -> dict | None:
         return self._post("/api/strategies", data)
 
+    def update_strategy(self, strategy_id: str, data: dict) -> dict | None:
+        return self._put(f"/api/strategies/{strategy_id}", data)
+
     def update_strategy_status(self, strategy_id: str, status: str, approved_by: str = "user") -> dict | None:
         return self._put(f"/api/strategies/{strategy_id}/status", {"status": status, "approved_by": approved_by})
 

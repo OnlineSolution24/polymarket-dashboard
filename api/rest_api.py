@@ -344,25 +344,39 @@ def create_app(config: AppConfig) -> FastAPI:
         for m in (market_stats or []):
             market_name = m.get("name") or m.get("market_id", "?")
             has_open = (m.get("open_count") or 0) > 0
-            if has_open:
-                open_market_count += 1
-                continue
-            cashout_count = engine.query_one(
+
+            # Check for real settlement (market resolved on-chain)
+            settled_row = engine.query_one(
                 "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
-                "AND result IN ('cashout', 'win', 'settled')",
+                "AND result IN ('win', 'loss', 'settled')",
                 (m["market_id"],),
             )
-            has_cashouts = (cashout_count.get("cnt", 0) if cashout_count else 0) > 0
-            if has_cashouts:
-                wins += 1
+            has_settlement = (settled_row.get("cnt", 0) if settled_row else 0) > 0
+
+            if has_settlement:
+                # Market actually resolved — count as win/loss
+                win_row = engine.query_one(
+                    "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
+                    "AND result IN ('win', 'settled')",
+                    (m["market_id"],),
+                )
+                is_win = (win_row.get("cnt", 0) if win_row else 0) > 0
+                if is_win:
+                    wins += 1
+                else:
+                    losses += 1
+                closed_markets.append({
+                    "market_id": m["market_id"],
+                    "name": market_name[:60],
+                    "result": "win" if is_win else "loss",
+                    "trade_count": m.get("trade_count", 0),
+                })
+            elif has_open:
+                # Still has open positions (result IS NULL)
+                open_market_count += 1
             else:
-                losses += 1
-            closed_markets.append({
-                "market_id": m["market_id"],
-                "name": market_name[:60],
-                "result": "win" if has_cashouts else "loss",
-                "trade_count": m.get("trade_count", 0),
-            })
+                # All trades are cashouts — position exited but market not resolved
+                open_market_count += 1  # still count as "open" since market isn't resolved
 
         return {
             "total_deposited": total_deposited,

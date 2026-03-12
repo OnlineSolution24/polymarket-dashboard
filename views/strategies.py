@@ -45,6 +45,233 @@ def _metric_card(label: str, value: str, color: str = "#E8ECF1") -> str:
     </div>"""
 
 
+_OP_LABELS = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<=", "eq": "="}
+_OP_OPTIONS = ["gt", "lt", "gte", "lte", "eq"]
+_FIELD_LABELS = {
+    "yes_price": "YES Preis",
+    "no_price": "NO Preis",
+    "volume": "Volumen ($)",
+    "liquidity": "Liquiditaet ($)",
+    "calculated_edge": "Edge",
+    "sentiment_score": "Sentiment",
+    "days_to_expiry": "Tage bis Ablauf",
+    "spread": "Spread",
+    "whale_net_flow": "Whale Net Flow",
+    "top_holder_concentration": "Top Holder Konz.",
+    "open_interest": "Open Interest",
+    "smart_money_score": "Smart Money Score",
+}
+_SIZING_LABELS = {"kelly": "Kelly-Formel", "fixed_pct": "Fester Prozentsatz", "fixed": "Fester Betrag"}
+
+
+def _render_strategy_details(client, sid: str, name: str, definition: dict):
+    """Render readable, editable strategy parameters."""
+    entry_rules = definition.get("entry_rules", [])
+    exit_rules = definition.get("exit_rules", [])
+    trade_params = definition.get("trade_params", {})
+    source = definition.get("source", "")
+
+    with st.expander("Parameter bearbeiten", expanded=False):
+        changed = False
+
+        # --- Entry Rules ---
+        st.markdown("**Einstiegsregeln**")
+        new_entry_rules = []
+        for i, rule in enumerate(entry_rules):
+            c1, c2, c3, c4 = st.columns([3, 1.5, 2, 0.5])
+            field = rule.get("field", "")
+            op = rule.get("op", "gt")
+            value = rule.get("value", 0)
+
+            with c1:
+                new_field = st.selectbox(
+                    "Feld", list(_FIELD_LABELS.keys()),
+                    index=list(_FIELD_LABELS.keys()).index(field) if field in _FIELD_LABELS else 0,
+                    format_func=lambda x: _FIELD_LABELS.get(x, x),
+                    key=f"ef_{sid}_{i}", label_visibility="collapsed",
+                )
+            with c2:
+                new_op = st.selectbox(
+                    "Op", _OP_OPTIONS,
+                    index=_OP_OPTIONS.index(op) if op in _OP_OPTIONS else 0,
+                    format_func=lambda x: _OP_LABELS.get(x, x),
+                    key=f"eo_{sid}_{i}", label_visibility="collapsed",
+                )
+            with c3:
+                new_val = st.number_input(
+                    "Wert", value=float(value), step=0.01, format="%.4f",
+                    key=f"ev_{sid}_{i}", label_visibility="collapsed",
+                )
+            with c4:
+                remove = st.button("X", key=f"er_{sid}_{i}")
+
+            if not remove:
+                new_rule = {"field": new_field, "op": new_op, "value": new_val}
+                new_entry_rules.append(new_rule)
+                if new_rule != rule:
+                    changed = True
+            else:
+                changed = True
+
+        if st.button("+ Regel hinzufuegen", key=f"add_entry_{sid}"):
+            new_entry_rules.append({"field": "calculated_edge", "op": "gte", "value": 0.05})
+            changed = True
+
+        # --- Exit Rules ---
+        if exit_rules:
+            st.markdown("**Ausstiegsregeln**")
+            new_exit_rules = []
+            for i, rule in enumerate(exit_rules):
+                c1, c2, c3 = st.columns([3, 1.5, 2])
+                with c1:
+                    new_field = st.selectbox(
+                        "Feld", list(_FIELD_LABELS.keys()),
+                        index=list(_FIELD_LABELS.keys()).index(rule.get("field", "")) if rule.get("field", "") in _FIELD_LABELS else 0,
+                        format_func=lambda x: _FIELD_LABELS.get(x, x),
+                        key=f"xf_{sid}_{i}", label_visibility="collapsed",
+                    )
+                with c2:
+                    new_op = st.selectbox(
+                        "Op", _OP_OPTIONS,
+                        index=_OP_OPTIONS.index(rule.get("op", "lt")) if rule.get("op", "lt") in _OP_OPTIONS else 0,
+                        format_func=lambda x: _OP_LABELS.get(x, x),
+                        key=f"xo_{sid}_{i}", label_visibility="collapsed",
+                    )
+                with c3:
+                    new_val = st.number_input(
+                        "Wert", value=float(rule.get("value", 0)), step=0.01, format="%.4f",
+                        key=f"xv_{sid}_{i}", label_visibility="collapsed",
+                    )
+                new_exit_rule = {"field": new_field, "op": new_op, "value": new_val}
+                new_exit_rules.append(new_exit_rule)
+                if new_exit_rule != rule:
+                    changed = True
+        else:
+            new_exit_rules = exit_rules
+
+        st.markdown("---")
+
+        # --- Trade Parameters ---
+        st.markdown("**Trade-Parameter**")
+        tp1, tp2, tp3 = st.columns(3)
+        with tp1:
+            sizing = st.selectbox(
+                "Positionsgroesse",
+                list(_SIZING_LABELS.keys()),
+                index=list(_SIZING_LABELS.keys()).index(trade_params.get("sizing_method", "kelly")) if trade_params.get("sizing_method", "kelly") in _SIZING_LABELS else 0,
+                format_func=lambda x: _SIZING_LABELS.get(x, x),
+                key=f"tp_sizing_{sid}",
+            )
+        with tp2:
+            max_pos = st.number_input(
+                "Max Position %",
+                value=float(trade_params.get("max_position_pct", 5)),
+                min_value=0.5, max_value=50.0, step=0.5,
+                key=f"tp_maxpos_{sid}",
+            )
+        with tp3:
+            min_edge = st.number_input(
+                "Min Edge %",
+                value=float(trade_params.get("min_edge", 0.03)) * 100,
+                min_value=0.0, max_value=50.0, step=0.5,
+                key=f"tp_minedge_{sid}",
+            )
+
+        new_trade_params = {
+            **trade_params,
+            "sizing_method": sizing,
+            "max_position_pct": max_pos,
+            "min_edge": round(min_edge / 100, 4),
+        }
+        if new_trade_params != trade_params:
+            changed = True
+
+        # --- Extra info for special strategies ---
+        if source == "pattern_scanner":
+            st.markdown("---")
+            st.caption(f"Quelle: Pattern Scanner | Regel: `{definition.get('rule', '?')}`")
+
+        # --- Save button ---
+        if changed:
+            if st.button("Aenderungen speichern", key=f"save_{sid}", type="primary", use_container_width=True):
+                update_data = {
+                    "entry_rules": new_entry_rules,
+                    "trade_params": new_trade_params,
+                }
+                if new_exit_rules != exit_rules:
+                    update_data["exit_rules"] = new_exit_rules
+
+                result = client.update_strategy(sid, update_data)
+                if result:
+                    st.success("Strategie aktualisiert! Wirkt ab naechstem Zyklus.")
+                    st.rerun()
+                else:
+                    st.error("Fehler beim Speichern")
+
+
+def _render_weather_config(client):
+    """Render weather strategy config section (editable)."""
+    config = client.get_config()
+    trading = config.get("trading", {})
+    scheduler = config.get("scheduler", {})
+
+    st.markdown("---")
+    st.subheader("Wetter-Strategie Konfiguration")
+    st.caption("Open-Meteo API (kostenlos, kein API-Key) | Analyse alle 30 Min")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        weather_edge = st.number_input(
+            "Min Edge %", value=float(trading.get("weather_min_edge", 0.15)) * 100,
+            min_value=1.0, max_value=50.0, step=1.0, key="weather_min_edge",
+        )
+    with c2:
+        weather_interval = st.number_input(
+            "Check-Intervall (Min)",
+            value=int(scheduler.get("weather_edge", {}).get("interval_minutes", 30)),
+            min_value=5, max_value=120, step=5, key="weather_interval",
+        )
+    with c3:
+        cashout_pct = st.number_input(
+            "Cashout Profit %",
+            value=float(trading.get("cashout", {}).get("min_profit_pct", 10)),
+            min_value=1.0, max_value=100.0, step=1.0, key="weather_cashout",
+        )
+    with c4:
+        max_pos_pct = st.number_input(
+            "Max Position %",
+            value=float(trading.get("limits", {}).get("max_position_pct", 5)),
+            min_value=0.5, max_value=50.0, step=0.5, key="weather_maxpos",
+        )
+
+    # Show current info
+    st.caption(
+        f"API: Open-Meteo (16-Tage Vorhersage) | "
+        f"Unsicherheit: Tag 1 = +-1C, Tag 7 = +-3C, Tag 14 = +-4C | "
+        f"Cashout: {trading.get('cashout', {}).get('sell_pct', 100)}% der Position"
+    )
+
+    # Check for changes
+    orig_edge = float(trading.get("weather_min_edge", 0.15)) * 100
+    orig_interval = int(scheduler.get("weather_edge", {}).get("interval_minutes", 30))
+    orig_cashout = float(trading.get("cashout", {}).get("min_profit_pct", 10))
+    orig_maxpos = float(trading.get("limits", {}).get("max_position_pct", 5))
+
+    if (weather_edge != orig_edge or weather_interval != orig_interval
+            or cashout_pct != orig_cashout or max_pos_pct != orig_maxpos):
+        if st.button("Wetter-Config speichern", key="save_weather_config", type="primary"):
+            config["trading"]["weather_min_edge"] = round(weather_edge / 100, 4)
+            config.setdefault("scheduler", {}).setdefault("weather_edge", {})["interval_minutes"] = weather_interval
+            config.setdefault("trading", {}).setdefault("cashout", {})["min_profit_pct"] = cashout_pct
+            config.setdefault("trading", {}).setdefault("limits", {})["max_position_pct"] = max_pos_pct
+            result = client.save_config(config)
+            if result:
+                st.success("Wetter-Config gespeichert! Wirkt ab naechstem Zyklus.")
+                st.rerun()
+            else:
+                st.error("Fehler beim Speichern")
+
+
 def render():
     st.title("Strategien")
     client = get_bot_client()
@@ -161,7 +388,7 @@ def render():
                     conf_c = "#00D4AA" if confidence >= 0.6 else "#FFB74D" if confidence >= 0.4 else "#FF5252"
                     st.markdown(_metric_card("Confidence", f"{confidence:.0%}", conf_c), unsafe_allow_html=True)
 
-            # Strategy definition (collapsible)
+            # Strategy definition — readable + editable
             definition_raw = strat.get("definition", "{}")
             try:
                 definition = json.loads(definition_raw) if isinstance(definition_raw, str) else definition_raw
@@ -169,24 +396,7 @@ def render():
                 definition = {}
 
             if definition:
-                with st.expander("Strategie-Definition (JSON)", expanded=False):
-                    entry_rules = definition.get("entry_rules", [])
-                    exit_rules = definition.get("exit_rules", [])
-                    trade_params = definition.get("trade_params", {})
-
-                    if entry_rules:
-                        st.markdown("**Entry Rules:**")
-                        for r in entry_rules:
-                            st.markdown(f"- `{r.get('field', '?')}` {r.get('op', '?')} `{r.get('value', '?')}`")
-
-                    if exit_rules:
-                        st.markdown("**Exit Rules:**")
-                        for r in exit_rules:
-                            st.markdown(f"- `{r.get('field', '?')}` {r.get('op', '?')} `{r.get('value', '?')}`")
-
-                    if trade_params:
-                        st.markdown("**Trade Parameters:**")
-                        st.json(trade_params)
+                _render_strategy_details(client, sid, name, definition)
 
             st.markdown("---")
 
@@ -320,3 +530,6 @@ def render():
                 st.info("Noch keine Side-Daten")
     else:
         st.info("Pattern-Analyse nicht verfuegbar. Daten werden mit der Zeit gesammelt.")
+
+    # --- Weather Strategy Config ---
+    _render_weather_config(client)
