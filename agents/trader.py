@@ -617,25 +617,27 @@ class TraderAgent(BaseAgent):
             if profit_pct < threshold_pct or profit_usd < min_profit_usd:
                 continue
 
-            # Execute cashout: sell position
-            sell_amount = round(pos["amount_usd"] * sell_pct, 2)
+            # Execute cashout: sell shares (CLOB API expects token count, not USD)
+            sell_shares = round(shares * sell_pct, 2)
             token_id = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
             if not token_id:
                 continue
 
+            sell_value_usd = round(sell_shares * current_price, 2)
+
             self.log("info",
                 f"CASHOUT: {pos['side']} Position in {market_id[:30]}... "
-                f"Profit: {profit_pct:.1f}% (${profit_usd:.2f}), selling ${sell_amount:.2f}")
+                f"Profit: {profit_pct:.1f}% (${profit_usd:.2f}), selling {sell_shares:.1f} shares (${sell_value_usd:.2f})")
 
             try:
                 config = AppConfig.from_env()
                 if not config.polymarket_private_key:
-                    self.log("info", f"[PAPER-CASHOUT] Would sell ${sell_amount:.2f}")
+                    self.log("info", f"[PAPER-CASHOUT] Would sell {sell_shares:.1f} shares")
                     continue
 
                 from services.polymarket_client import PolymarketService
                 service = PolymarketService(config)
-                result = service.place_sell_order(token_id=token_id, amount=sell_amount)
+                result = service.place_sell_order(token_id=token_id, amount=sell_shares)
 
                 if result.get("ok"):
                     # Record cashout trade
@@ -644,7 +646,7 @@ class TraderAgent(BaseAgent):
                            (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
                            VALUES (?, ?, ?, ?, ?, 'executed', ?, ?, ?, ?, 'cashout', ?)""",
                         (market_id, f"CASHOUT: {pos.get('market_question', '')[:50]}",
-                         pos["side"], -sell_amount, current_price,
+                         pos["side"], -sell_value_usd, current_price,
                          self.id, f"cashout:{pos['id']}",
                          datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
                          round(profit_usd, 4)),
@@ -657,7 +659,7 @@ class TraderAgent(BaseAgent):
                             (round(profit_usd, 4), pos["id"]),
                         )
 
-                    self.log("info", f"Cashout done: SELL ${sell_amount:.2f} (Profit: +${profit_usd:.2f})")
+                    self.log("info", f"Cashout done: SELL {sell_shares:.1f} shares @ ${current_price:.4f} (Profit: +${profit_usd:.2f})")
 
                     try:
                         from services.telegram_alerts import get_alerts

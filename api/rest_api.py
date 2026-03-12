@@ -1001,7 +1001,9 @@ def create_app(config: AppConfig) -> FastAPI:
         try:
             from services.polymarket_client import PolymarketService
             service = PolymarketService(config)
-            result = service.place_sell_order(token_id=token_id, amount=trade["amount_usd"])
+            result = service.place_sell_order(token_id=token_id, amount=shares)
+
+            sell_value_usd = round(shares * current_price, 2) if current_price else trade["amount_usd"]
 
             if result.get("ok"):
                 # Record cashout
@@ -1010,7 +1012,7 @@ def create_app(config: AppConfig) -> FastAPI:
                        (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
                        VALUES (?, ?, ?, ?, ?, 'executed', 'user', ?, ?, ?, 'cashout', ?)""",
                     (trade["market_id"], f"CASHOUT: {trade.get('market_question', '')[:50]}",
-                     trade["side"], -trade["amount_usd"], current_price,
+                     trade["side"], -sell_value_usd, current_price,
                      f"manual_cashout:{trade['id']}",
                      datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
                      round(profit_usd, 4)),
