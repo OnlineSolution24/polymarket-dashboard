@@ -197,6 +197,9 @@ class BotAPIClient:
     def delete_strategy(self, strategy_id: str) -> dict | None:
         return self._delete(f"/api/strategies/{strategy_id}")
 
+    def manual_cashout(self, trade_id: int) -> dict | None:
+        return self._post("/api/trades/cashout", {"trade_id": trade_id})
+
     # ------------------------------------------------------------------
     # Backtest endpoints
     # ------------------------------------------------------------------

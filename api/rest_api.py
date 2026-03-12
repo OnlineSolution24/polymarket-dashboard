@@ -70,6 +70,10 @@ class TradeRequest(BaseModel):
     amount: float
 
 
+class CashoutRequest(BaseModel):
+    trade_id: int
+
+
 class LogEventRequest(BaseModel):
     agent_id: str
     level: str = "info"
@@ -292,6 +296,13 @@ def create_app(config: AppConfig) -> FastAPI:
             # Per-position details for dashboard
             live_positions = []
             for p in positions_data:
+                condition_id = p.get("conditionId", p.get("condition_id", ""))
+                # Find matching DB trade for manual cashout
+                db_trade = engine.query_one(
+                    "SELECT id FROM trades WHERE market_id = ? AND status = 'executed' "
+                    "AND (result IS NULL OR result = 'open') ORDER BY created_at LIMIT 1",
+                    (condition_id,),
+                ) if condition_id else None
                 live_positions.append({
                     "title": p.get("title", "?")[:60],
                     "outcome": p.get("outcome", "?"),
@@ -303,6 +314,8 @@ def create_app(config: AppConfig) -> FastAPI:
                     "pnl": round(float(p.get("cashPnl", 0) or 0), 2),
                     "pnl_pct": round(float(p.get("percentPnl", 0) or 0), 1),
                     "realized_pnl": round(float(p.get("realizedPnl", 0) or 0), 2),
+                    "trade_id": db_trade["id"] if db_trade else None,
+                    "market_id": condition_id,
                 })
         else:
             # Fallback: latest portfolio snapshot
@@ -920,6 +933,79 @@ def create_app(config: AppConfig) -> FastAPI:
              datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
         )
         return {"ok": status == "executed", "status": status}
+
+    @app.post("/api/trades/cashout", dependencies=[Depends(verify_api_key)])
+    def manual_cashout(body: CashoutRequest):
+        """Manually cashout (sell) an open position by trade ID."""
+        trade = engine.query_one(
+            "SELECT id, market_id, market_question, side, amount_usd, price "
+            "FROM trades WHERE id = ? AND status = 'executed' AND (result IS NULL OR result = 'open')",
+            (body.trade_id,),
+        )
+        if not trade:
+            raise HTTPException(404, "Trade not found or already closed")
+
+        market = engine.query_one(
+            "SELECT yes_price, no_price, yes_token_id, no_token_id FROM markets WHERE id = ?",
+            (trade["market_id"],),
+        )
+        if not market:
+            raise HTTPException(404, "Market not found")
+
+        token_id = market.get("yes_token_id") if trade["side"] == "YES" else market.get("no_token_id")
+        if not token_id:
+            raise HTTPException(400, "No token ID for this position")
+
+        if not config.polymarket_private_key:
+            raise HTTPException(400, "No private key configured")
+
+        entry_price = trade["price"] or 0
+        current_price = market.get("yes_price") if trade["side"] == "YES" else market.get("no_price")
+        shares = (trade["amount_usd"] / entry_price) if entry_price > 0 else 0
+        profit_usd = (current_price - entry_price) * shares if entry_price > 0 else 0
+        profit_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+        try:
+            from services.polymarket_client import PolymarketService
+            service = PolymarketService(config)
+            result = service.place_sell_order(token_id=token_id, amount=trade["amount_usd"])
+
+            if result.get("ok"):
+                # Record cashout
+                engine.execute(
+                    """INSERT INTO trades
+                       (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
+                       VALUES (?, ?, ?, ?, ?, 'executed', 'user', ?, ?, ?, 'cashout', ?)""",
+                    (trade["market_id"], f"CASHOUT: {trade.get('market_question', '')[:50]}",
+                     trade["side"], -trade["amount_usd"], current_price,
+                     f"manual_cashout:{trade['id']}",
+                     datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
+                     round(profit_usd, 4)),
+                )
+                # Mark original as cashed out
+                engine.execute(
+                    "UPDATE trades SET result = 'cashout', pnl = ? WHERE id = ?",
+                    (round(profit_usd, 4), trade["id"]),
+                )
+                # Telegram notification
+                try:
+                    from services.telegram_alerts import get_alerts
+                    alerts = get_alerts(config)
+                    alerts.send(
+                        f"🔧 <b>Manueller Cashout</b>\n"
+                        f"Markt: {trade.get('market_question', '')[:60]}\n"
+                        f"Seite: {trade['side']} | Entry: {entry_price:.4f} → Sell: {current_price:.4f}\n"
+                        f"Verkauft: {shares:.1f} Anteile\n"
+                        f"Netto-Profit: ${profit_usd:+.2f} ({profit_pct:+.1f}%)"
+                    )
+                except Exception:
+                    pass
+                return {"ok": True, "profit_usd": round(profit_usd, 2), "profit_pct": round(profit_pct, 1)}
+            else:
+                return {"ok": False, "error": result.get("error", "Sell order failed")}
+        except Exception as e:
+            logger.error(f"Manual cashout failed: {e}")
+            raise HTTPException(500, str(e))
 
     @app.post("/api/trades/simulate", dependencies=[Depends(verify_api_key)])
     def simulate_trade(body: TradeRequest):

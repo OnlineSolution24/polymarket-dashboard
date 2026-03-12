@@ -116,49 +116,45 @@ def render():
 
     live_positions = perf.get("live_positions", [])
     if live_positions:
-        df = pd.DataFrame(live_positions)
-        df_display = df[["title", "outcome", "avg_price", "cur_price",
-                         "shares", "cost", "value", "pnl", "pnl_pct"]].copy()
-        df_display.columns = ["Markt", "Seite", "Einstieg", "Aktuell",
-                              "Shares", "Einsatz", "Wert", "PnL $", "PnL %"]
+        # Table header
+        hdr = st.columns([3.5, 0.6, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.7])
+        for col, label in zip(hdr, ["Markt", "Seite", "Einstieg", "Aktuell", "Shares", "Einsatz", "Wert", "PnL $", "PnL %", ""]):
+            col.caption(label)
 
-        df_display["Einstieg"] = df_display["Einstieg"].apply(lambda x: f"${x:.4f}")
-        df_display["Aktuell"] = df_display["Aktuell"].apply(lambda x: f"${x:.4f}")
-        df_display["Shares"] = df_display["Shares"].apply(lambda x: f"{x:,.0f}")
-        df_display["Einsatz"] = df_display["Einsatz"].apply(lambda x: f"${x:.2f}")
-        df_display["Wert"] = df_display["Wert"].apply(lambda x: f"${x:.2f}")
-        df_display["Markt"] = df_display["Markt"].str[:55]
+        for i, pos in enumerate(live_positions):
+            cols = st.columns([3.5, 0.6, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.7])
+            cols[0].write(pos["title"][:50])
+            cols[1].write(pos["outcome"])
+            cols[2].write(f"${pos['avg_price']:.4f}")
+            cols[3].write(f"${pos['cur_price']:.4f}")
+            cols[4].write(f"{pos['shares']:,.0f}")
+            cols[5].write(f"${pos['cost']:.2f}")
+            cols[6].write(f"${pos['value']:.2f}")
 
-        # Keep PnL as numeric for color styling
-        pnl_vals = df_display["PnL $"].copy()
-        pnl_pct_vals = df_display["PnL %"].copy()
-        df_display["PnL $"] = df_display["PnL $"].apply(lambda x: f"${x:+.2f}")
-        df_display["PnL %"] = df_display["PnL %"].apply(lambda x: f"{x:+.1f}%")
+            pnl = pos["pnl"]
+            pnl_pct = pos["pnl_pct"]
+            pnl_color = "green" if pnl > 0 else "red" if pnl < 0 else "gray"
+            cols[7].markdown(f":{pnl_color}[${pnl:+.2f}]")
+            cols[8].markdown(f":{pnl_color}[{pnl_pct:+.1f}%]")
 
-        def _color_pnl(val):
-            """Color PnL cells green/red based on value."""
-            try:
-                num = float(val.replace("$", "").replace("%", "").replace("+", ""))
-            except (ValueError, AttributeError):
-                return ""
-            if num > 0:
-                return "color: #00c853"
-            elif num < 0:
-                return "color: #ff1744"
-            return ""
+            trade_id = pos.get("trade_id")
+            if trade_id:
+                if cols[9].button("Verkaufen", key=f"sell_{trade_id}_{i}", type="secondary"):
+                    with st.spinner("Verkaufe..."):
+                        result = client.manual_cashout(trade_id)
+                    if result and result.get("ok"):
+                        st.success(f"Verkauft! Profit: ${result.get('profit_usd', 0):+.2f}")
+                        st.rerun()
+                    else:
+                        st.error(f"Fehler: {result.get('error', '?') if result else 'Keine Antwort'}")
+            else:
+                cols[9].caption("—")
 
-        styled = df_display.style.applymap(
-            _color_pnl, subset=["PnL $", "PnL %"]
-        ).hide(axis="index")
-
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-
-        total_display = (
+        st.caption(
             f"**Gesamt:** Einsatz ${positions_cost:.2f} | "
             f"Wert ${positions_value:.2f} | "
             f"PnL ${unrealized_pnl:+.2f}"
         )
-        st.caption(total_display)
     else:
         st.caption("Keine offenen Positionen.")
 
