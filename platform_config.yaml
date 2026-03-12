@@ -56,7 +56,7 @@ cache:
 # Controls how the bot executes trades.
 trading:
   mode: "full-auto"                       # paper | semi-auto | full-auto
-  capital_usd: 100.00                    # Total trading capital available
+  capital_usd: 1000.00                   # Total trading capital available
   limits:
     max_position_pct: 5                  # Max 5% of capital per trade
     max_daily_loss_usd: 50.00            # Stop trading after $50 daily loss
