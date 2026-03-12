@@ -29,9 +29,9 @@ def render():
     total_closed = len(perf.get("closed_markets", []))
 
     # Calculated values
-    cash_available = max(total_deposited - positions_cost + realized_pnl, 0)
-    portfolio_total = positions_value + cash_available
     total_pnl = unrealized_pnl + realized_pnl
+    portfolio_total = total_deposited + total_pnl
+    cash_available = max(portfolio_total - positions_value, 0)
     total_pnl_pct = (total_pnl / total_deposited * 100) if total_deposited > 0 else 0
     wr = (wins / total_closed * 100) if total_closed > 0 else 0
 
