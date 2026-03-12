@@ -147,13 +147,6 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info(f"Scheduled: settlement every {settlement_interval}min")
 
-            # Position sync (every 30min — sync real on-chain positions into DB)
-            _scheduler.add_job(
-                _job_sync_positions, "interval", minutes=30,
-                id="position_sync", replace_existing=True, args=[config],
-            )
-            logger.info("Scheduled: position_sync every 30min")
-
             # Portfolio snapshot (3x daily: 08:05, 14:00, 20:05 UTC)
             for hour in [8, 14, 20]:
                 _scheduler.add_job(
