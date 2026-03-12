@@ -427,12 +427,15 @@ def create_app(config: AppConfig) -> FastAPI:
                     "trade_count": m.get("trade_count", 0),
                 })
 
+        # Realized PnL from DB trades (consistent with closed_markets list)
+        db_realized = sum(m.get("pnl", 0) for m in closed_markets)
+
         return {
             "total_deposited": total_deposited,
             "positions_value": round(total_value, 2),
             "positions_cost": round(total_cost, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
-            "realized_pnl": round(total_realized, 2),
+            "realized_pnl": round(db_realized, 2),
             "live_positions": live_positions,
             "equity_curve": equity_curve,
             "closed_markets": closed_markets,

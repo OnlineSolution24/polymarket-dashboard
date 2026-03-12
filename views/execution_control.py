@@ -75,9 +75,11 @@ def render():
     with c4:
         with st.container(border=True):
             st.caption("Realisiert")
+            _r_color = "green" if realized_pnl >= 0 else "red"
             st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
-            st.markdown(f"{total_closed} Märkte abgeschlossen")
-            st.caption(" ")
+            _m_label = "Markt" if total_closed == 1 else "Märkte"
+            st.markdown(f"{total_closed} {_m_label} abgeschlossen")
+            st.markdown(f"W/L: **{wins}/{losses}**")
 
     # Equity curve (compact, below cards)
     if equity_curve:
@@ -182,7 +184,8 @@ def render():
     else:
         st.caption("Noch keine abgeschlossenen Märkte.")
 
-    st.caption(f"{open_markets} Märkte noch offen")
+    _open_label = "Markt" if open_markets == 1 else "Märkte"
+    st.caption(f"{open_markets} {_open_label} noch offen")
 
     st.divider()
 
