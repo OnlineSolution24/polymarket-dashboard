@@ -681,21 +681,19 @@ class TraderAgent(BaseAgent):
 
                     self.log("info", f"Cashout done: SELL {sell_shares:.1f} shares @ ${current_price:.4f} (Profit: +${profit_usd:.2f})")
 
-                    try:
-                        from services.telegram_alerts import get_alerts
-                        alerts = get_alerts(config)
-                        remaining_shares = shares - sold_shares
-                        net_profit_per_share = current_price - entry_price
-                        alerts.send(
-                            f"💰 <b>Auto-Cashout!</b>\n"
-                            f"Markt: {pos.get('market_question', market_id)[:60]}\n"
-                            f"Seite: {pos['side']} | Entry: {entry_price:.4f} → Sell: {current_price:.4f}\n"
-                            f"Verkauft: {sold_shares:.1f} von {shares:.1f} Anteilen\n"
-                            f"Netto-Profit: +${profit_usd:.2f} ({profit_pct:.1f}%)\n"
-                            f"Noch offen: {remaining_shares:.1f} Anteile"
-                        )
-                    except Exception:
-                        pass
+                    # Only send Telegram for full cashout (not partial sells)
+                    if sell_pct >= 1.0:
+                        try:
+                            from services.telegram_alerts import get_alerts
+                            alerts = get_alerts(config)
+                            alerts.send(
+                                f"💰 <b>Cashout abgeschlossen!</b>\n"
+                                f"Markt: {pos.get('market_question', market_id)[:60]}\n"
+                                f"Seite: {pos['side']} | Entry: {entry_price:.4f} → Sell: {current_price:.4f}\n"
+                                f"Anteile: {shares:.1f} | Profit: +${profit_usd:.2f} ({profit_pct:.1f}%)"
+                            )
+                        except Exception:
+                            pass
 
                     cashed_out += 1
                 else:
