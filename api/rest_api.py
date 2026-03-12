@@ -428,14 +428,17 @@ def create_app(config: AppConfig) -> FastAPI:
                 })
 
         # Realized PnL: prefer Polymarket API (source of truth), fallback to DB
-        # total_realized is set from API positions data or snapshot above
         db_realized_row = engine.query_one(
             "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
             "WHERE status = 'executed' AND result IN ('cashout', 'win', 'loss', 'settled', 'phantom')"
         )
         db_realized = float(db_realized_row["total"]) if db_realized_row else 0
-        # Use whichever has actual data; API is more complete (includes pre-bot trades)
         final_realized = total_realized if total_realized != 0 else db_realized
+
+        # Open market count: prefer API (count unique conditionIds with positions)
+        if live_positions:
+            api_open_markets = len({p["market_id"] for p in live_positions if p.get("market_id")})
+            open_market_count = max(open_market_count, api_open_markets)
 
         return {
             "total_deposited": total_deposited,
