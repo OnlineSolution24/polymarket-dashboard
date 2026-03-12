@@ -41,11 +41,24 @@ class AnalystAgent(BaseAgent):
                 lines = [
                     f"Tiefenanalyse für Polymarket-Markt:",
                     f"Frage: {market['question']}",
+                ]
+
+                # Market description contains resolution rules and context
+                desc = market.get("description", "")
+                if desc:
+                    lines.append(f"Markt-Regeln & Kontext: {desc[:500]}")
+
+                if market.get("end_date"):
+                    lines.append(f"Ablaufdatum: {market['end_date']}")
+                if market.get("category"):
+                    lines.append(f"Kategorie: {market['category']}")
+
+                lines.extend([
                     f"YES Preis: {market['yes_price']:.2f} (={market['yes_price']*100:.0f}%)",
                     f"NO Preis: {market['no_price']:.2f}",
                     f"Volumen: ${market['volume']:,.0f}",
                     f"Liquidität: ${market['liquidity']:,.0f}",
-                ]
+                ])
 
                 # Order book signals
                 if market.get("spread") is not None:

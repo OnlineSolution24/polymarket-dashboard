@@ -211,12 +211,13 @@ def _job_refresh_markets(config: AppConfig):
         for market in markets:
             engine.execute(
                 """INSERT OR REPLACE INTO markets
-                   (id, question, slug, yes_price, no_price, volume, liquidity,
+                   (id, question, description, slug, yes_price, no_price, volume, liquidity,
                     end_date, category, yes_token_id, no_token_id,
                     best_bid, best_ask, spread, volume_24h, volume_1w, volume_1m,
                     last_trade_price, accepting_orders, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (market["id"], market["question"], market.get("slug", ""),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (market["id"], market["question"], market.get("description", ""),
+                 market.get("slug", ""),
                  market.get("yes_price", 0), market.get("no_price", 0),
                  market.get("volume", 0), market.get("liquidity", 0),
                  market.get("end_date"), market.get("category", ""),

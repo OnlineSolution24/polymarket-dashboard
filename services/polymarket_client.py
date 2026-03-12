@@ -156,6 +156,7 @@ class PolymarketService:
                 markets.append({
                     "id": item.get("conditionId", item.get("condition_id", item.get("id", ""))),
                     "question": item.get("question", "Unknown"),
+                    "description": item.get("description", ""),
                     "slug": item.get("slug", ""),
                     "yes_price": yes_price,
                     "no_price": no_price,
