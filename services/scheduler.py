@@ -776,10 +776,19 @@ def _job_weather_edge_analysis(config: AppConfig):
             market_id = r["market_id"]
             side = r["side"]
 
-            # Skip if we already have a pending/auto_approved suggestion for this market
+            # Skip if we already have an open position for this market
+            open_pos = engine.query_one(
+                "SELECT id FROM trades WHERE market_id = ? AND status = 'executed' "
+                "AND (result IS NULL OR result = 'open')",
+                (market_id,),
+            )
+            if open_pos:
+                continue
+
+            # Skip if we already have a pending/approved/executed suggestion for this market
             existing = engine.query_one(
                 "SELECT id FROM suggestions WHERE type = 'trade' "
-                "AND status IN ('pending', 'auto_approved') "
+                "AND status IN ('pending', 'auto_approved', 'executed') "
                 "AND payload LIKE ?",
                 (f'%"market_id": "{market_id}"%',),
             )

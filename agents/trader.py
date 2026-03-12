@@ -421,12 +421,11 @@ class TraderAgent(BaseAgent):
             if entry_price <= 0:
                 continue
 
-            # Skip if this market was already cashed out or settled
+            # Skip if THIS specific position was already cashed out or settled
             already_closed = engine.query_one(
-                "SELECT id FROM trades WHERE market_id = ? "
-                "AND (result IN ('cashout', 'win', 'loss', 'settled') "
-                "     OR user_cmd LIKE 'cashout:%')",
-                (market_id,),
+                "SELECT id FROM trades WHERE id = ? "
+                "AND result IN ('cashout', 'win', 'loss', 'settled')",
+                (pos["id"],),
             )
             if already_closed:
                 continue
@@ -559,11 +558,11 @@ class TraderAgent(BaseAgent):
             market_id = pos["market_id"]
             entry_price = pos["price"]
 
-            # Cooldown: skip if we recently tried to cashout this market
+            # Cooldown: skip if we recently tried to cashout THIS specific position
+            pos_id = pos["id"]
             recent = engine.query_one(
-                "SELECT id FROM trades WHERE market_id = ? AND user_cmd LIKE 'cashout:%' "
-                "AND executed_at > ?",
-                (market_id, (datetime.utcnow() - timedelta(minutes=cooldown_min)).isoformat()),
+                "SELECT id FROM trades WHERE user_cmd = ? AND executed_at > ?",
+                (f"cashout:{pos_id}", (datetime.utcnow() - timedelta(minutes=cooldown_min)).isoformat()),
             )
             if recent:
                 continue
