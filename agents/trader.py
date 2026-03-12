@@ -662,12 +662,15 @@ class TraderAgent(BaseAgent):
                     try:
                         from services.telegram_alerts import get_alerts
                         alerts = get_alerts(config)
+                        remaining_shares = shares - sold_shares
+                        net_profit_per_share = current_price - entry_price
                         alerts.send(
                             f"💰 <b>Auto-Cashout!</b>\n"
                             f"Markt: {pos.get('market_question', market_id)[:60]}\n"
-                            f"Seite: {pos['side']} | Entry: {entry_price:.2f} → Now: {current_price:.2f}\n"
-                            f"Profit: +${profit_usd:.2f} ({profit_pct:.1f}%)\n"
-                            f"Verkauft: ${sell_amount:.2f}"
+                            f"Seite: {pos['side']} | Entry: {entry_price:.4f} → Sell: {current_price:.4f}\n"
+                            f"Verkauft: {sold_shares:.1f} von {shares:.1f} Anteilen\n"
+                            f"Netto-Profit: +${profit_usd:.2f} ({profit_pct:.1f}%)\n"
+                            f"Noch offen: {remaining_shares:.1f} Anteile"
                         )
                     except Exception:
                         pass
