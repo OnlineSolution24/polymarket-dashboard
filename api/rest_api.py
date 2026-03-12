@@ -74,6 +74,15 @@ class CashoutRequest(BaseModel):
     trade_id: int
 
 
+class ImportPositionRequest(BaseModel):
+    market_id: str
+    title: str
+    outcome: str = "YES"
+    avg_price: float = 0
+    cost: float = 0
+    shares: float = 0
+
+
 class LogEventRequest(BaseModel):
     agent_id: str
     level: str = "info"
@@ -1006,6 +1015,30 @@ def create_app(config: AppConfig) -> FastAPI:
         except Exception as e:
             logger.error(f"Manual cashout failed: {e}")
             raise HTTPException(500, str(e))
+
+    @app.post("/api/trades/import", dependencies=[Depends(verify_api_key)])
+    def import_position(body: ImportPositionRequest):
+        """Import an on-chain position into the DB so the bot can manage it."""
+        # Check if already tracked
+        existing = engine.query_one(
+            "SELECT id FROM trades WHERE market_id = ? AND status = 'executed' "
+            "AND (result IS NULL OR result = 'open')",
+            (body.market_id,),
+        )
+        if existing:
+            return {"ok": False, "error": "Position already tracked", "trade_id": existing["id"]}
+
+        side = body.outcome.upper() if body.outcome else "YES"
+        engine.execute(
+            """INSERT INTO trades
+               (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at)
+               VALUES (?, ?, ?, ?, ?, 'executed', 'user', 'imported', ?, ?)""",
+            (body.market_id, body.title, side, round(body.cost, 2),
+             round(body.avg_price, 4),
+             datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+        )
+        trade_id = engine.query_one("SELECT last_insert_rowid() as id")["id"]
+        return {"ok": True, "trade_id": trade_id}
 
     @app.post("/api/trades/simulate", dependencies=[Depends(verify_api_key)])
     def simulate_trade(body: TradeRequest):

@@ -200,6 +200,9 @@ class BotAPIClient:
     def manual_cashout(self, trade_id: int) -> dict | None:
         return self._post("/api/trades/cashout", {"trade_id": trade_id})
 
+    def import_position(self, data: dict) -> dict | None:
+        return self._post("/api/trades/import", data)
+
     # ------------------------------------------------------------------
     # Backtest endpoints
     # ------------------------------------------------------------------
