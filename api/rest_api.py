@@ -375,8 +375,11 @@ def create_app(config: AppConfig) -> FastAPI:
             )
             has_settlement = (settled_row.get("cnt", 0) if settled_row else 0) > 0
 
-            if has_settlement:
-                # Market actually resolved — count as win/loss
+            if has_open:
+                # Still has open positions
+                open_market_count += 1
+            elif has_settlement:
+                # Market resolved on-chain
                 win_row = engine.query_one(
                     "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
                     "AND result IN ('win', 'settled')",
@@ -393,12 +396,26 @@ def create_app(config: AppConfig) -> FastAPI:
                     "result": "win" if is_win else "loss",
                     "trade_count": m.get("trade_count", 0),
                 })
-            elif has_open:
-                # Still has open positions (result IS NULL)
-                open_market_count += 1
             else:
-                # All trades are cashouts — position exited but market not resolved
-                open_market_count += 1  # still count as "open" since market isn't resolved
+                # All trades closed (cashout/loss/phantom) — count by total PnL
+                pnl_row = engine.query_one(
+                    "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE market_id = ? "
+                    "AND result IN ('cashout', 'loss', 'phantom')",
+                    (m["market_id"],),
+                )
+                total_pnl = float(pnl_row["total_pnl"]) if pnl_row else 0
+                is_win = total_pnl > 0
+                if is_win:
+                    wins += 1
+                else:
+                    losses += 1
+                closed_markets.append({
+                    "market_id": m["market_id"],
+                    "name": market_name[:60],
+                    "result": "win" if is_win else "loss",
+                    "pnl": round(total_pnl, 2),
+                    "trade_count": m.get("trade_count", 0),
+                })
 
         return {
             "total_deposited": total_deposited,

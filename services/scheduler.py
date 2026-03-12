@@ -188,6 +188,13 @@ def start_scheduler(config: AppConfig) -> None:
                 id="snapshot_cleanup", replace_existing=True,
             )
 
+            # Position sync with Polymarket wallet (2x daily)
+            _scheduler.add_job(
+                _job_sync_positions, "interval", hours=12,
+                id="position_sync", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: position_sync every 12h")
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
