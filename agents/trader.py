@@ -604,8 +604,11 @@ class TraderAgent(BaseAgent):
                     from services.polymarket_client import PolymarketService
                     _svc = PolymarketService(_AC.from_env())
                     _book = _svc.get_order_book(token_id_for_price)
-                    if _book and _book.get("bids"):
-                        best_bid = float(_book["bids"][0].get("price", 0))
+                    # Handle both dict and OrderBookSummary object
+                    bids = _book.get("bids", []) if isinstance(_book, dict) else getattr(_book, "bids", []) or []
+                    if bids:
+                        bid0 = bids[0]
+                        best_bid = float(bid0.get("price", 0) if isinstance(bid0, dict) else getattr(bid0, "price", 0))
                         if best_bid > 0:
                             self.log("debug", f"Live bid for {market_id[:20]}: {best_bid} (DB: {current_price})")
                             current_price = best_bid
