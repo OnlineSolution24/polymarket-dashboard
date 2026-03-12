@@ -785,6 +785,21 @@ def _job_weather_edge_analysis(config: AppConfig):
             if open_pos:
                 continue
 
+            # Skip if recently closed (rebuy cooldown)
+            rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
+            last_closed = engine.query_one(
+                "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
+                "AND result IN ('cashout', 'win', 'loss', 'settled')",
+                (market_id,),
+            )
+            if last_closed and last_closed.get("last_close"):
+                try:
+                    closed_at = datetime.fromisoformat(last_closed["last_close"])
+                    if (datetime.utcnow() - closed_at).days < rebuy_cooldown_days:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
             # Skip if we already have a pending/approved/executed suggestion for this market
             existing = engine.query_one(
                 "SELECT id FROM suggestions WHERE type = 'trade' "
