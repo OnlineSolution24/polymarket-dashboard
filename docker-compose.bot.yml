@@ -11,7 +11,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - bot-data:/app/data
+      - ./data:/app/data
       - ./platform_config.yaml:/app/platform_config.yaml
       - ./agent_configs:/app/agent_configs
     networks:
@@ -21,9 +21,6 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
-
-volumes:
-  bot-data:
 
 networks:
   bot-net:
