@@ -427,8 +427,12 @@ def create_app(config: AppConfig) -> FastAPI:
                     "trade_count": m.get("trade_count", 0),
                 })
 
-        # Realized PnL from DB trades (consistent with closed_markets list)
-        db_realized = sum(m.get("pnl", 0) for m in closed_markets)
+        # Realized PnL from ALL closed trades (cashouts + settlements)
+        realized_row = engine.query_one(
+            "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+            "WHERE status = 'executed' AND result IN ('cashout', 'win', 'loss', 'settled', 'phantom')"
+        )
+        db_realized = float(realized_row["total"]) if realized_row else 0
 
         return {
             "total_deposited": total_deposited,
