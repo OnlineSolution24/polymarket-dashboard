@@ -45,22 +45,18 @@ def render():
 
     # --- Card 1: Portfolio ---
     with c1:
-        with st.container(border=True, height=280):
+        with st.container(border=True):
             st.caption("Portfolio")
             st.markdown(f"### ${portfolio_total:,.2f}")
-            st.caption("Zum Handeln verfügbar")
-            st.markdown(f"**${cash_available:,.2f}**")
+            st.markdown(f"Verfuegbar: **${cash_available:,.2f}**")
             _today_color = "green" if today_pnl >= 0 else "red"
             _sign = "+" if today_pnl >= 0 else ""
             _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0
-            st.markdown(
-                f":{_today_color}[{_sign}${today_pnl:.2f} ({_sign}{_today_pct:.2f}%) letzter Tag]"
-            )
-            st.caption(f"Eingezahlt: ${total_deposited:,.2f}")
+            st.markdown(f":{_today_color}[{_sign}${today_pnl:.2f} ({_sign}{_today_pct:.2f}%) letzter Tag]")
 
     # --- Card 2: Gewinn / Verlust + Equity Curve ---
     with c2:
-        with st.container(border=True, height=280):
+        with st.container(border=True):
             _pnl_color = "green" if total_pnl >= 0 else "red"
             st.caption("Gewinn/Verlust")
             period = st.segmented_control(
@@ -75,37 +71,25 @@ def render():
                 if not df_eq.empty:
                     _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
                     _build_equity_chart(df_eq, _chart_color)
-                else:
-                    st.caption("Keine Daten")
-            else:
-                st.caption("Noch keine Snapshots")
 
     # --- Card 3: Offene Positionen ---
     with c3:
-        with st.container(border=True, height=280):
+        with st.container(border=True):
             st.caption("Offene Positionen")
             st.markdown(f"### ${positions_value:,.2f}")
-            st.caption("Einsatz")
-            st.markdown(f"**${positions_cost:,.2f}**")
+            st.markdown(f"Einsatz: **${positions_cost:,.2f}**")
             _u_color = "green" if unrealized_pnl >= 0 else "red"
-            st.caption("Unrealisiert")
-            st.markdown(f"**:{_u_color}[${unrealized_pnl:+,.2f}]**")
-            st.caption(f"{open_markets} Märkte offen")
+            st.markdown(f"Unrealisiert: **:{_u_color}[${unrealized_pnl:+,.2f}]**")
+            st.caption(f"{open_markets} Maerkte offen")
 
     # --- Card 4: Realisierter PnL ---
     with c4:
-        with st.container(border=True, height=280):
+        with st.container(border=True):
             st.caption("Realisiert")
             _r_color = "green" if realized_pnl >= 0 else "red"
             st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
-            c4a, c4b = st.columns(2)
-            with c4a:
-                st.caption("W / L")
-                st.markdown(f"**{wins} / {losses}**")
-            with c4b:
-                st.caption("Win Rate")
-                st.markdown(f"**{wr:.0f}%**")
-            st.caption(f"{open_markets} Märkte offen")
+            st.markdown(f"W/L: **{wins}/{losses}** | WR: **{wr:.0f}%**")
+            st.caption(f"{open_markets} Maerkte offen")
 
     st.divider()
 
@@ -134,30 +118,26 @@ def render():
         if imported_count:
             st.info(f"{imported_count} Position(en) automatisch importiert und werden jetzt vom Bot verwaltet.")
 
-        # Column header
-        hdr = st.columns([3, 0.5, 0.7, 0.7, 0.6, 0.7, 0.7, 0.7, 0.6, 0.5])
-        labels = ["Markt", "Seite", "Einstieg", "Aktuell", "Shares", "Einsatz", "Wert", "PnL $", "PnL %", ""]
-        for c, l in zip(hdr, labels):
-            c.markdown(f"<small style='color:#5A6478'>{l}</small>", unsafe_allow_html=True)
+        # Compact table: Markt | Einstieg→Aktuell | Shares | Wert | PnL | Sell
+        _W = [3.5, 1.2, 0.6, 0.6, 0.8, 0.4]
+        hdr = st.columns(_W)
+        for col, lbl in zip(hdr, ["Markt", "Einstieg → Aktuell", "Shares", "Wert", "PnL", ""]):
+            col.markdown(f"<span style='color:#5A6478;font-size:0.75rem'>{lbl}</span>", unsafe_allow_html=True)
 
         for i, pos in enumerate(live_positions):
-            row = st.columns([3, 0.5, 0.7, 0.7, 0.6, 0.7, 0.7, 0.7, 0.6, 0.5])
-            row[0].markdown(f"<small>{pos['title'][:45]}</small>", unsafe_allow_html=True)
-            row[1].markdown(f"<small>{pos['outcome']}</small>", unsafe_allow_html=True)
-            row[2].markdown(f"<small>${pos['avg_price']:.4f}</small>", unsafe_allow_html=True)
-            row[3].markdown(f"<small>${pos['cur_price']:.4f}</small>", unsafe_allow_html=True)
-            row[4].markdown(f"<small>{pos['shares']:,.0f}</small>", unsafe_allow_html=True)
-            row[5].markdown(f"<small>${pos['cost']:.2f}</small>", unsafe_allow_html=True)
-            row[6].markdown(f"<small>${pos['value']:.2f}</small>", unsafe_allow_html=True)
-
+            row = st.columns(_W)
             pnl, pnl_pct = pos["pnl"], pos["pnl_pct"]
-            c = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
-            row[7].markdown(f"<small style='color:{c}'>${pnl:+.2f}</small>", unsafe_allow_html=True)
-            row[8].markdown(f"<small style='color:{c}'>{pnl_pct:+.1f}%</small>", unsafe_allow_html=True)
+            pc = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
+
+            row[0].markdown(f"<span style='font-size:0.82rem'>{pos['title'][:42]}</span>", unsafe_allow_html=True)
+            row[1].markdown(f"<span style='font-size:0.82rem'>${pos['avg_price']:.4f} → ${pos['cur_price']:.4f}</span>", unsafe_allow_html=True)
+            row[2].markdown(f"<span style='font-size:0.82rem'>{pos['shares']:,.0f}</span>", unsafe_allow_html=True)
+            row[3].markdown(f"<span style='font-size:0.82rem'>${pos['value']:.2f}</span>", unsafe_allow_html=True)
+            row[4].markdown(f"<span style='font-size:0.82rem;color:{pc}'>${pnl:+.2f} ({pnl_pct:+.1f}%)</span>", unsafe_allow_html=True)
 
             trade_id = pos.get("trade_id")
             if trade_id:
-                if row[9].button("Sell", key=f"sell_{trade_id}_{i}"):
+                if row[5].button("✕", key=f"sell_{trade_id}_{i}", help="Position verkaufen"):
                     with st.spinner("Verkaufe..."):
                         res = client.manual_cashout(trade_id)
                     if res and res.get("ok"):
