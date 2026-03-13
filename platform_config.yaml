@@ -55,6 +55,12 @@ cache:
 # --- Trading Configuration ---
 # Controls how the bot executes trades.
 trading:
+  market_filters:
+    min_price: 0.03          # Dont buy tokens under 3 cents
+    max_price: 0.95          # Dont buy tokens over 95 cents (no upside)
+    min_volume_24h: 1000     # At least k volume in last 24h
+    min_liquidity: 5000      # At least k liquidity (order book depth)
+    min_orderbook_depth: 0   # At least 3 bids in orderbook
   mode: "full-auto"                       # paper | semi-auto | full-auto
   capital_usd: 1000.00                   # Total trading capital available
   limits:
@@ -141,7 +147,7 @@ scheduler:
 
 # --- Strategy Discovery ---
 strategy:
-  max_active_strategies: 5
+  max_active_strategies: 10
   min_confidence_score: 0.5            # Min backtest confidence to validate
   retire_after_trades: 50              # Retire after 50 live trades
   retire_on_drawdown_pct: 20           # Retire if >20% drawdown
@@ -161,3 +167,32 @@ gamma_api:
 mcp:
   enabled: true
   bot_api_internal_url: "http://polymarket-bot:8000"
+
+# --- Risk Management (Stop-Loss) ---
+risk_management:
+  stop_loss_pct: -50             # sell at -50% loss
+  max_hold_days_losing: 14       # sell losing positions after 14 days
+  dead_market_bid: 0.002         # bid below this = dead market
+  dead_market_hours: 48          # close after 48h of dead market
+
+# --- Portfolio Diversification ---
+diversification:
+  max_positions_per_category: 3        # max 3 positions in same category
+  max_positions_total: 15              # max 15 open positions total
+  max_exposure_per_category_pct: 30    # max 30% of capital in one category
+  preferred_categories:                # categories to focus on
+    - "Politics"
+    - "Sports"
+    - "Crypto"
+    - "Science & Tech"
+    - "Economics"
+    - "Weather"
+
+# --- Arbitrage Scanner Settings ---
+arbitrage:
+  min_profit_pct: 5.0            # minimum 5% return on investment
+  max_settlement_days: 30        # only events settling within 30 days
+  max_outcomes: 20               # skip events with too many outcomes
+  min_absolute_profit: 1.00      # at least  profit after fees
+  max_investment: 25.0           # max 5 per arbitrage opportunity
+  exclude_from_stoploss: true    # don't apply stop-loss to arb positions

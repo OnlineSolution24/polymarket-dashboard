@@ -249,12 +249,28 @@ class AnalystAgent(BaseAgent):
 
     @staticmethod
     def _extract_edge(response: str) -> float | None:
-        """Try to extract edge value from agent response."""
+        """Try to extract edge value from agent response.
+        Normalizes values >1.0 (e.g. 20 -> 0.20) and clamps to [-0.95, 0.95].
+        """
         import re
+        import logging
         match = re.search(r"EDGE\s*=\s*([+-]?\d+\.?\d*)", response, re.IGNORECASE)
         if match:
             try:
-                return float(match.group(1))
+                value = float(match.group(1))
+                # Normalize: if AI returns percentage like 20.0 instead of 0.20
+                if abs(value) > 1.0:
+                    logging.getLogger("analyst").warning(
+                        f"Edge normalization: {value} -> {value / 100.0} (was >1.0, dividing by 100)"
+                    )
+                    value = value / 100.0
+                # Clamp to [-0.95, 0.95] - no edge can realistically be 95%+
+                if abs(value) > 0.95:
+                    logging.getLogger("analyst").warning(
+                        f"Edge clamped: {value} -> {0.95 if value > 0 else -0.95} (exceeded 0.95 limit)"
+                    )
+                    value = 0.95 if value > 0 else -0.95
+                return value
             except ValueError:
                 pass
         return None

@@ -839,6 +839,48 @@ def create_app(config: AppConfig) -> FastAPI:
     # ------------------------------------------------------------------
     # Backtesting
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Snapshot-based backtesting (uses 30k+ market snapshots)
+    # ------------------------------------------------------------------
+
+    class SnapshotBacktestRequest(BaseModel):
+        strategy: str = ""  # strategy name or id
+        days: int = 7
+        initial_capital: float = 1000.0
+
+    @app.post("/api/backtest/snapshot", dependencies=[Depends(verify_api_key)])
+    def run_snapshot_backtest_endpoint(req: SnapshotBacktestRequest):
+        from services.backtester import run_snapshot_backtest
+        # Resolve strategy by name or id
+        strategy_id = req.strategy
+        if not strategy_id.startswith("strat_"):
+            row = engine.query_one(
+                "SELECT id FROM strategies WHERE name = ?", (req.strategy,)
+            )
+            if row:
+                strategy_id = row["id"]
+            else:
+                raise HTTPException(status_code=404, detail=f"Strategy not found: {req.strategy}")
+        result = run_snapshot_backtest(strategy_id, days=req.days, initial_capital=req.initial_capital)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Backtest failed"))
+        return result
+
+    @app.post("/api/backtest/snapshot/all", dependencies=[Depends(verify_api_key)])
+    def run_all_snapshot_backtests(days: int = Query(default=7)):
+        from services.backtester import run_all_backtests
+        return run_all_backtests(days=days)
+
+    @app.get("/api/backtest/snapshot/history/{strategy_id}", dependencies=[Depends(verify_api_key)])
+    def get_snapshot_backtest_history(strategy_id: str, limit: int = Query(default=10)):
+        from services.backtester import get_backtest_history
+        return get_backtest_history(strategy_id, limit=limit)
+
+    @app.get("/api/backtest/snapshot/latest", dependencies=[Depends(verify_api_key)])
+    def get_latest_snapshot_backtests():
+        from services.backtester import get_latest_all_results
+        return get_latest_all_results()
+
 
     @app.post("/api/backtest/{strategy_id}", dependencies=[Depends(verify_api_key)])
     def run_backtest_endpoint(strategy_id: str):
@@ -862,6 +904,7 @@ def create_app(config: AppConfig) -> FastAPI:
         except (json.JSONDecodeError, TypeError):
             row["backtest_results_parsed"] = {}
         return row
+
 
     # ------------------------------------------------------------------
     # Analytics

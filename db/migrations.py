@@ -25,6 +25,8 @@ def initialize_database() -> None:
         _upgrade_to_v5(conn)
     if current < 6:
         _upgrade_to_v6(conn)
+    if current < 7:
+        _upgrade_to_v7(conn)
 
     # Set schema version
     conn.execute(
@@ -96,6 +98,14 @@ def _upgrade_to_v6(conn) -> None:
     """Add description column to markets table for resolution rules/context."""
     try:
         conn.execute("ALTER TABLE markets ADD COLUMN description TEXT")
+    except Exception:
+        pass  # Column already exists
+
+
+def _upgrade_to_v7(conn) -> None:
+    """Add volume_change_24h column to markets table."""
+    try:
+        conn.execute("ALTER TABLE markets ADD COLUMN volume_change_24h REAL")
     except Exception:
         pass  # Column already exists
 
