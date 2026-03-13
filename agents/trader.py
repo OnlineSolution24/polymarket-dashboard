@@ -576,7 +576,6 @@ class TraderAgent(BaseAgent):
         """
         trading_cfg = self._get_trading_config()
         cashout_cfg = trading_cfg.get("cashout", {})
-        self.log("info", "Cashout check starting, enabled=" + str(cashout_cfg.get("enabled", False)))
         if not cashout_cfg.get("enabled", False):
             return 0
 
@@ -593,7 +592,6 @@ class TraderAgent(BaseAgent):
             "FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL) "
             "AND price IS NOT NULL AND price > 0 ORDER BY executed_at"
         )
-        self.log("info", "Cashout: " + str(len(positions)) + " open positions")
         if not positions:
             return 0
 
