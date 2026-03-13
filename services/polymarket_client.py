@@ -334,6 +334,8 @@ class PolymarketService:
             # (buying YES token = betting YES, buying NO token = betting NO)
             # CLOB API: taker amount max 2 decimals, maker amount max 4 decimals
             amount = round(amount, 2)
+            # Round to 2 decimals (Polymarket API requirement for taker amounts)
+            amount = round(amount, 2)
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
@@ -361,6 +363,8 @@ class PolymarketService:
             from py_clob_client.clob_types import MarketOrderArgs
 
             # CLOB API: taker amount max 2 decimals
+            amount = round(amount, 2)
+            # Round to 2 decimals (Polymarket API requirement for taker amounts)
             amount = round(amount, 2)
             order_args = MarketOrderArgs(
                 token_id=token_id,

@@ -83,10 +83,46 @@ _SIZING_HELP = {
 }
 
 
+
+def _normalize_rules(raw):
+    """Convert any rule format to a list of dicts."""
+    # If raw is a JSON string, parse it first
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            # Plain string like "calculated_edge >= 0.05"
+            return [{"field": raw, "operator": "", "value": ""}]
+    # If it is a single dict, wrap in list
+    if isinstance(raw, dict):
+        return [raw]
+    # If it is a list, normalize each item
+    if isinstance(raw, list):
+        result = []
+        for r in raw:
+            if isinstance(r, dict):
+                result.append(r)
+            elif isinstance(r, str):
+                try:
+                    parsed = json.loads(r)
+                    if isinstance(parsed, dict):
+                        result.append(parsed)
+                    elif isinstance(parsed, list):
+                        result.extend(d for d in parsed if isinstance(d, dict))
+                    else:
+                        result.append({"field": r, "op": "", "value": ""})
+                except (json.JSONDecodeError, TypeError):
+                    result.append({"field": r, "op": "", "value": ""})
+            else:
+                result.append({"field": str(r), "op": "", "value": ""})
+        return result
+    return []
+
+
 def _render_strategy_details(client, sid: str, name: str, definition: dict, strat: dict):
     """Render readable, editable strategy parameters inline per strategy."""
-    entry_rules = definition.get("entry_rules", [])
-    exit_rules = definition.get("exit_rules", [])
+    entry_rules = _normalize_rules(definition.get("entry_rules", []))
+    exit_rules = _normalize_rules(definition.get("exit_rules", []))
     trade_params = definition.get("trade_params", {})
     source = definition.get("source", "")
     name_lower = name.lower()
@@ -450,6 +486,34 @@ def render():
     )
     best_wr = max((s.get("backtest_win_rate", 0) or 0 for s in strategies), default=0)
 
+    # --- Echte Performance (von Polymarket API) ---
+    perf = client.get_performance()
+    real_realized = perf.get("realized_pnl", 0)
+    real_unrealized = perf.get("unrealized_pnl", 0)
+    real_total_pnl = real_realized + real_unrealized
+    real_open = perf.get("open_market_count", 0)
+    real_wins = perf.get("wins", 0)
+    real_losses = perf.get("losses", 0)
+
+    st.markdown("### 💰 Echte Performance")
+    st.caption("Daten direkt von Polymarket API — tats\u00e4chlich ausgef\u00fchrte Trades")
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    with rc1:
+        rp_color = "#00D4AA" if real_total_pnl >= 0 else "#FF5252"
+        st.markdown(_metric_card("Echte PnL (Gesamt)", f"${real_total_pnl:.2f}", rp_color), unsafe_allow_html=True)
+    with rc2:
+        rr_color = "#00D4AA" if real_realized >= 0 else "#FF5252"
+        st.markdown(_metric_card("Realisiert", f"${real_realized:.2f}", rr_color), unsafe_allow_html=True)
+    with rc3:
+        ru_color = "#00D4AA" if real_unrealized >= 0 else "#FF5252"
+        st.markdown(_metric_card("Unrealisiert", f"${real_unrealized:.2f}", ru_color), unsafe_allow_html=True)
+    with rc4:
+        st.markdown(_metric_card("Offene Positionen", str(real_open)), unsafe_allow_html=True)
+    st.caption(f"W/L: **{real_wins}/{real_losses}**")
+
+    st.markdown("---")
+
+    st.markdown("### Strategie-\u00dcbersicht")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(_metric_card("Gesamt", str(len(strategies))), unsafe_allow_html=True)
@@ -457,9 +521,10 @@ def render():
         st.markdown(_metric_card("Aktiv", str(len(active)), "#00D4AA"), unsafe_allow_html=True)
     with c3:
         pnl_color = "#00D4AA" if total_live_pnl >= 0 else "#FF5252"
-        st.markdown(_metric_card("Live PnL", f"${total_live_pnl:.2f}", pnl_color), unsafe_allow_html=True)
+        st.markdown(_metric_card("Theoretisch PnL", f"${total_live_pnl:.2f}", pnl_color), unsafe_allow_html=True)
     with c4:
         st.markdown(_metric_card("Avg Confidence", f"{avg_confidence:.0%}"), unsafe_allow_html=True)
+    st.caption("\u26a0\ufe0f Theoretisch \u2014 basiert auf Strategie-Vorschl\u00e4gen, nicht auf echten Trades")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -517,7 +582,7 @@ def render():
                     st.markdown(_metric_card("Max DD", f"{bt_dd:.1f}%", dd_c), unsafe_allow_html=True)
 
             with col_live:
-                st.markdown("##### Live Performance")
+                st.markdown("##### Strategie-Performance (Theoretisch)")
                 m5, m6 = st.columns(2)
                 with m5:
                     st.markdown(_metric_card("Trades", str(live_trades)), unsafe_allow_html=True)
@@ -531,6 +596,23 @@ def render():
                 with m8:
                     conf_c = "#00D4AA" if confidence >= 0.6 else "#FFB74D" if confidence >= 0.4 else "#FF5252"
                     st.markdown(_metric_card("Confidence", f"{confidence:.0%}", conf_c), unsafe_allow_html=True)
+                st.caption("\u26a0\ufe0f Theoretisch \u2014 basiert auf Vorschl\u00e4gen, nicht auf echten Trades")
+
+            # --- Echt ausgefuehrte Trades dieser Strategie ---
+            detail = client.get_strategy(sid)
+            real_trades = []
+            if detail:
+                for st_trade in (detail.get("strategy_trades") or []):
+                    if st_trade.get("trade_id") and st_trade.get("is_backtest") == 0:
+                        real_trades.append(st_trade)
+            real_count = len(real_trades)
+            real_pnl_sum = sum(float(t.get("pnl") or 0) for t in real_trades)
+            rp_c = "#00D4AA" if real_pnl_sum >= 0 else "#FF5252"
+            st.markdown(
+                f"**Echt ausgef\u00fchrt:** {real_count} Trades, "
+                f"<span style='color:{rp_c}'>${real_pnl_sum:+.2f} PnL</span>",
+                unsafe_allow_html=True,
+            )
 
             # Strategy definition — readable + editable
             definition_raw = strat.get("definition", "{}")

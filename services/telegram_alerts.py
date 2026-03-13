@@ -102,9 +102,21 @@ class TelegramAlerts:
             f"Ergebnis: {pnl_str}"
         )
 
+    # Errors to ignore in alerts (auth retries, known harmless patterns)
+    _IGNORED_ERROR_PATTERNS = [
+        "auth/api-key",
+        "auth/derive-api-key",
+        "400 Bad Request",
+        "create_or_derive_api_creds",
+    ]
+
     def alert_agent_error(self, agent_id: str, error: str):
-        """Send agent error alert."""
+        """Send agent error alert. Ignores auth-related and known harmless errors."""
         if not self.alert_config.get("on_agent_error", True):
+            return
+        # Filter out known harmless errors (auth retries etc.)
+        error_lower = error.lower()
+        if any(p.lower() in error_lower for p in self._IGNORED_ERROR_PATTERNS):
             return
         self.send(
             f"❌ <b>Agent Fehler</b>\n"

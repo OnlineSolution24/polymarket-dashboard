@@ -1467,17 +1467,24 @@ def _job_health_watchdog(config: AppConfig):
         if missing:
             problems.append(f"DB Schema: fehlende Spalten: {', '.join(missing)}")
 
-        # --- 3. Recent error count ---
+        # --- 3. Recent error count (excluding auth-related harmless errors) ---
         error_row = engine.query_one(
             "SELECT COUNT(*) as cnt FROM agent_logs "
-            "WHERE level = 'error' AND created_at > datetime('now', '-1 hour')"
+            "WHERE level = 'error' AND created_at > datetime('now', '-1 hour') "
+            "AND message NOT LIKE '%auth/api-key%' "
+            "AND message NOT LIKE '%auth/derive-api-key%' "
+            "AND message NOT LIKE '%create_or_derive_api_creds%'"
         )
         error_count = int(error_row["cnt"]) if error_row else 0
         if error_count >= 5:
-            # Get sample error
+            # Get sample error (excluding auth noise)
             sample = engine.query_one(
                 "SELECT agent_id, message FROM agent_logs "
-                "WHERE level = 'error' ORDER BY created_at DESC LIMIT 1"
+                "WHERE level = 'error' "
+                "AND message NOT LIKE '%auth/api-key%' "
+                "AND message NOT LIKE '%auth/derive-api-key%' "
+                "AND message NOT LIKE '%create_or_derive_api_creds%' "
+                "ORDER BY created_at DESC LIMIT 1"
             )
             sample_msg = f" ({sample['agent_id']}: {sample['message'][:80]})" if sample else ""
             problems.append(
