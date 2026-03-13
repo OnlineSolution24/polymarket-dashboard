@@ -54,6 +54,44 @@ class PolymarketService:
                 creds = self._auth_client.create_or_derive_api_creds()
                 self._auth_client.set_api_creds(creds)
                 logger.info("Authenticated Polymarket client initialized")
+                # Monkey-patch get_market_order_amounts to cap TAKER amount to 2 decimals
+                # The API requires taker_amount max 2 decimal precision for market orders
+                # but the library uses round_config.amount (3-6) for both limit and market orders
+                try:
+                    from py_clob_client.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
+                    from py_clob_client.order_builder.helpers import round_down, round_up, round_normal, decimal_places, to_token_decimals
+                    from py_order_utils.model import BUY as UtilsBuy, SELL as UtilsSell
+                    from py_clob_client.order_builder.constants import BUY, SELL
+
+                    _orig = OrderBuilder.get_market_order_amounts
+
+                    def _patched_market_amounts(self_ob, side, amount, price, round_config):
+                        TAKER_MAX = 2
+                        raw_price = round_normal(price, round_config.price)
+                        if side == BUY or side == UtilsBuy:
+                            raw_maker = round_down(amount, round_config.size)
+                            raw_taker = raw_maker / raw_price
+                            if decimal_places(raw_taker) > TAKER_MAX:
+                                raw_taker = round_up(raw_taker, TAKER_MAX + 4)
+                                if decimal_places(raw_taker) > TAKER_MAX:
+                                    raw_taker = round_down(raw_taker, TAKER_MAX)
+                            return UtilsBuy, to_token_decimals(raw_maker), to_token_decimals(raw_taker)
+                        elif side == SELL or side == UtilsSell:
+                            raw_maker = round_down(amount, round_config.size)
+                            raw_taker = raw_maker * raw_price
+                            if decimal_places(raw_taker) > TAKER_MAX:
+                                raw_taker = round_up(raw_taker, TAKER_MAX + 4)
+                                if decimal_places(raw_taker) > TAKER_MAX:
+                                    raw_taker = round_down(raw_taker, TAKER_MAX)
+                            return UtilsSell, to_token_decimals(raw_maker), to_token_decimals(raw_taker)
+                        else:
+                            return _orig(self_ob, side, amount, price, round_config)
+
+                    OrderBuilder.get_market_order_amounts = _patched_market_amounts
+                    logger.info("Patched get_market_order_amounts: taker amount capped to 2 decimals")
+                except Exception as e:
+                    logger.warning(f"Could not patch market order builder: {e}")
+
         except ImportError:
             logger.warning("py-clob-client not installed. Using mock data.")
         except Exception as e:
@@ -163,7 +201,7 @@ class PolymarketService:
                     "volume": volume,
                     "liquidity": liquidity,
                     "end_date": item.get("endDate", item.get("end_date")),
-                    "category": item.get("groupItemTitle", item.get("category", "")),
+                    "category": self._classify_market_category(item),
                     # Gamma-specific fields
                     "yes_token_id": yes_token,
                     "no_token_id": no_token,
@@ -184,6 +222,32 @@ class PolymarketService:
         except Exception as e:
             logger.error(f"Gamma API fetch failed: {e}")
             return []
+
+    def _classify_market_category(self, item: dict) -> str:
+        """Derive high-level category from Gamma API market item."""
+        try:
+            from services.diversification import classify_category
+            # Extract event tags if available
+            event_tags = []
+            events = item.get("events", [])
+            if events and isinstance(events, list):
+                for evt in events:
+                    tags = evt.get("tags", [])
+                    if isinstance(tags, list):
+                        event_tags.extend(tags)
+            slug = item.get("slug", "")
+            # Also use event slug for better matching
+            if events and isinstance(events, list) and events:
+                evt_slug = events[0].get("slug", "")
+                if evt_slug:
+                    slug = evt_slug + " " + slug
+            return classify_category(
+                slug=slug,
+                question=item.get("question", ""),
+                event_tags=event_tags,
+            )
+        except Exception:
+            return item.get("groupItemTitle", item.get("category", ""))
 
     def fetch_market_events(self, limit: int = 20) -> list[dict]:
         """Fetch active events from Gamma Events API for event grouping."""
@@ -295,6 +359,9 @@ class PolymarketService:
         def _get(obj, key, default=0):
             return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
+        # Sort bids descending, asks ascending (CLOB may return ascending bids)
+        bids = sorted(bids, key=lambda b: float(_get(b, "price", 0)), reverse=True)
+        asks = sorted(asks, key=lambda a: float(_get(a, "price", 0)))
         best_bid = float(_get(bids[0], "price", 0))
         best_ask = float(_get(asks[0], "price", 0))
         spread = best_ask - best_bid if best_ask > best_bid else 0
@@ -332,6 +399,8 @@ class PolymarketService:
 
             # Always BUY the specific outcome token
             # (buying YES token = betting YES, buying NO token = betting NO)
+            # Round to 2 decimals (Polymarket API requirement for taker amounts)
+            amount = round(amount, 2)
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
@@ -358,6 +427,8 @@ class PolymarketService:
             from py_clob_client.order_builder.constants import SELL
             from py_clob_client.clob_types import MarketOrderArgs
 
+            # Round to 2 decimals (Polymarket API requirement for taker amounts)
+            amount = round(amount, 2)
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
