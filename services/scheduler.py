@@ -188,6 +188,13 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info("Scheduled: position_sync every 12h")
 
+            # Health Watchdog (every 30 min) — checks critical jobs, alerts on failure
+            _scheduler.add_job(
+                _job_health_watchdog, "interval", minutes=30,
+                id="health_watchdog", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: health_watchdog every 30min")
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
@@ -1415,3 +1422,121 @@ def _job_expire_old_suggestions():
             logger.info(f"Expired {expired} old stuck suggestions")
     except Exception as e:
         logger.error(f"Expire suggestions failed: {e}")
+
+
+def _job_health_watchdog(config: AppConfig):
+    """Check that critical systems are working and alert via Telegram if not.
+
+    Runs every 30 min. Checks:
+    1. Market refresh is producing fresh data (< 60 min old)
+    2. DB schema has all required columns
+    3. No repeated errors in recent logs
+    4. Active strategies exist
+    5. Polymarket API is reachable
+    """
+    from services.telegram_alerts import get_alerts
+
+    try:
+        from db import engine
+        alerts = get_alerts(config)
+        problems = []
+
+        # --- 1. Market data freshness ---
+        freshest = engine.query_one(
+            "SELECT MAX(last_updated) as latest FROM markets"
+        )
+        if freshest and freshest.get("latest"):
+            try:
+                latest = datetime.fromisoformat(str(freshest["latest"]))
+                age_min = (datetime.utcnow() - latest).total_seconds() / 60
+                if age_min > 60:
+                    problems.append(
+                        f"Marktdaten veraltet: letztes Update vor {age_min:.0f} Min"
+                    )
+            except (ValueError, TypeError):
+                problems.append("Marktdaten: last_updated nicht parsbar")
+        else:
+            problems.append("Keine Marktdaten in der DB")
+
+        # --- 2. DB schema check (critical columns) ---
+        cols = engine.query("PRAGMA table_info(markets)")
+        col_names = {c["name"] for c in cols} if cols else set()
+        required = {"description", "yes_token_id", "spread", "volume_24h",
+                     "accepting_orders", "sentiment_score"}
+        missing = required - col_names
+        if missing:
+            problems.append(f"DB Schema: fehlende Spalten: {', '.join(missing)}")
+
+        # --- 3. Recent error count ---
+        error_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM agent_logs "
+            "WHERE level = 'error' AND created_at > datetime('now', '-1 hour')"
+        )
+        error_count = int(error_row["cnt"]) if error_row else 0
+        if error_count >= 5:
+            # Get sample error
+            sample = engine.query_one(
+                "SELECT agent_id, message FROM agent_logs "
+                "WHERE level = 'error' ORDER BY created_at DESC LIMIT 1"
+            )
+            sample_msg = f" ({sample['agent_id']}: {sample['message'][:80]})" if sample else ""
+            problems.append(
+                f"{error_count} Fehler in der letzten Stunde{sample_msg}"
+            )
+
+        # --- 4. Active strategies ---
+        strat_row = engine.query_one(
+            "SELECT COUNT(*) as cnt FROM strategies WHERE status = 'active'"
+        )
+        active_strats = int(strat_row["cnt"]) if strat_row else 0
+        if active_strats == 0:
+            problems.append("Keine aktiven Strategien")
+
+        # --- 5. Polymarket API reachable ---
+        try:
+            import httpx
+            funder = config.polymarket_funder
+            if funder:
+                resp = httpx.get(
+                    "https://data-api.polymarket.com/positions",
+                    params={"user": funder},
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    problems.append(
+                        f"Polymarket API: Status {resp.status_code}"
+                    )
+            else:
+                problems.append("POLYMARKET_FUNDER nicht konfiguriert")
+        except Exception as e:
+            problems.append(f"Polymarket API nicht erreichbar: {e}")
+
+        # --- 6. OpenRouter API key ---
+        if not config.openrouter_api_key:
+            problems.append("OPENROUTER_API_KEY fehlt")
+
+        # --- 7. Telegram configured ---
+        if not config.telegram_bot_token or not config.alert_telegram_user_id:
+            # Can't alert if Telegram isn't configured, just log
+            logger.warning("Health watchdog: Telegram not configured")
+
+        # --- Report ---
+        if problems:
+            msg = "🚨 <b>Health Watchdog — Probleme erkannt</b>\n\n"
+            for i, p in enumerate(problems, 1):
+                msg += f"{i}. {p}\n"
+            msg += f"\n<i>Geprüft: {datetime.utcnow().strftime('%H:%M UTC')}</i>"
+            alerts.send(msg)
+            logger.warning(f"Health watchdog: {len(problems)} problems found")
+            # Also write to agent_logs for dashboard visibility
+            for p in problems:
+                engine.execute(
+                    "INSERT INTO agent_logs (agent_id, level, message, created_at) "
+                    "VALUES (?, ?, ?, datetime('now'))",
+                    ("health_watchdog", "warn", p),
+                )
+        else:
+            logger.info("Health watchdog: all systems OK")
+
+    except Exception as e:
+        logger.error(f"Health watchdog failed: {e}")
