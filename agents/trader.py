@@ -576,6 +576,7 @@ class TraderAgent(BaseAgent):
         """
         trading_cfg = self._get_trading_config()
         cashout_cfg = trading_cfg.get("cashout", {})
+        self.log("info", "Cashout check starting, enabled=" + str(cashout_cfg.get("enabled", False)))
         if not cashout_cfg.get("enabled", False):
             return 0
 
@@ -592,6 +593,7 @@ class TraderAgent(BaseAgent):
             "FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL) "
             "AND price IS NOT NULL AND price > 0 ORDER BY executed_at"
         )
+        self.log("info", "Cashout: " + str(len(positions)) + " open positions")
         if not positions:
             return 0
 
@@ -631,9 +633,7 @@ class TraderAgent(BaseAgent):
                     # Handle both dict and OrderBookSummary object
                     bids = _book.get("bids", []) if isinstance(_book, dict) else getattr(_book, "bids", []) or []
                     if bids:
-                        # Sort bids descending by price (CLOB returns ascending)
-                        _get_p = lambda b: float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0))
-                        bids = sorted(bids, key=_get_p, reverse=True)
+                        bids = sorted(bids, key=lambda b: float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0)), reverse=True)  # CLOB returns ascending
                         bid0 = bids[0]
                         best_bid = float(bid0.get("price", 0) if isinstance(bid0, dict) else getattr(bid0, "price", 0))
                         if best_bid > 0:
@@ -669,6 +669,30 @@ class TraderAgent(BaseAgent):
             token_id = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
             if not token_id:
                 continue
+
+            # Cap sell_shares to actual on-chain balance to avoid "not enough balance" errors
+            try:
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                _bal_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+                _bal_resp = service_for_balance._auth_client.get_balance_allowance(_bal_params) if "service_for_balance" in dir() else None
+            except Exception:
+                _bal_resp = None
+            if _bal_resp is None:
+                try:
+                    from config import AppConfig as _AC2
+                    from services.polymarket_client import PolymarketService as _PS2
+                    _svc2 = _PS2(_AC2.from_env())
+                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                    _bal_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+                    _bal_resp = _svc2._auth_client.get_balance_allowance(_bal_params)
+                except Exception:
+                    _bal_resp = None
+            if _bal_resp and isinstance(_bal_resp, dict):
+                raw_bal = int(_bal_resp.get("balance", "0"))
+                actual_shares = raw_bal / 1e6  # Polymarket uses 6 decimals for token amounts
+                if actual_shares > 0 and sell_shares > actual_shares:
+                    self.log("info", f"Capping sell from {sell_shares:.2f} to {actual_shares:.2f} (on-chain balance)")
+                    sell_shares = round(actual_shares * 0.99, 2)  # 1% buffer for rounding
 
             sell_value_usd = round(sell_shares * current_price, 2)
 
@@ -816,9 +840,7 @@ class TraderAgent(BaseAgent):
                     _book = _svc.get_order_book(token_id)
                     bids = _book.get("bids", []) if isinstance(_book, dict) else getattr(_book, "bids", []) or []
                     if bids:
-                        # Sort bids descending by price (CLOB returns ascending)
-                        _get_p = lambda b: float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0))
-                        bids = sorted(bids, key=_get_p, reverse=True)
+                        bids = sorted(bids, key=lambda b: float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0)), reverse=True)  # CLOB returns ascending
                         bid0 = bids[0]
                         best_bid = float(bid0.get("price", 0) if isinstance(bid0, dict) else getattr(bid0, "price", 0))
                         if best_bid > 0:

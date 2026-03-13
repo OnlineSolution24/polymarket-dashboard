@@ -66,7 +66,7 @@ class PolymarketService:
                     _orig = OrderBuilder.get_market_order_amounts
 
                     def _patched_market_amounts(self_ob, side, amount, price, round_config):
-                        TAKER_MAX = 2
+                        TAKER_MAX = round_config.amount  # Use API-expected precision, not hardcoded 2
                         raw_price = round_normal(price, round_config.price)
                         if side == BUY or side == UtilsBuy:
                             raw_maker = round_down(amount, round_config.size)
@@ -359,7 +359,6 @@ class PolymarketService:
         def _get(obj, key, default=0):
             return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
-        # Sort bids descending, asks ascending (CLOB may return ascending bids)
         bids = sorted(bids, key=lambda b: float(_get(b, "price", 0)), reverse=True)
         asks = sorted(asks, key=lambda a: float(_get(a, "price", 0)))
         best_bid = float(_get(bids[0], "price", 0))
