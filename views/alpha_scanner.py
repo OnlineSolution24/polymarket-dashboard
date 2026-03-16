@@ -9,7 +9,13 @@ import pandas as pd
 from services.alpha_scanner_service import (
     AlphaScannerService,
     FilterConfig,
-    FILTER_PRESETS,
+    BUILTIN_PRESETS,
+    load_all_presets,
+    save_custom_preset,
+    delete_custom_preset,
+    load_watchlist,
+    add_to_watchlist,
+    remove_from_watchlist,
 )
 from components.status_cards import kpi_row
 
@@ -20,11 +26,6 @@ SCAN_DEPTH_MAP = {
     "Tief (500)": 500,
 }
 
-CATEGORIES = [
-    "OVERALL", "POLITICS", "SPORTS", "CRYPTO",
-    "CULTURE", "WEATHER", "ECONOMICS", "TECH", "FINANCE",
-]
-
 
 def render():
     st.header("Alpha Scanner")
@@ -34,6 +35,19 @@ def render():
         st.session_state.alpha_scan_result = None
     if "alpha_scanning" not in st.session_state:
         st.session_state.alpha_scanning = False
+
+    # --- Tabs: Scanner + Watchlist ---
+    tab_scan, tab_watchlist = st.tabs(["Scanner", "Watchlist"])
+
+    with tab_scan:
+        _render_scanner()
+
+    with tab_watchlist:
+        _render_watchlist()
+
+
+def _render_scanner():
+    """Main scanner tab."""
 
     # --- Header row: info + scan controls ---
     hc1, hc2, hc3 = st.columns([2, 1, 1])
@@ -56,7 +70,7 @@ def render():
         )
     with hc3:
         scan_clicked = st.button(
-            "SCAN STARTEN" if not result else "RESCAN",
+            "SCAN STARTEN" if not st.session_state.alpha_scan_result else "RESCAN",
             type="primary",
             use_container_width=True,
         )
@@ -102,14 +116,25 @@ def render():
         st.session_state["_alpha_do_reset"] = False
         st.session_state["alpha_preset"] = "Standard"
 
-    # --- Presets ---
-    preset_name = st.radio(
-        "Filter-Preset",
-        list(FILTER_PRESETS.keys()),
-        horizontal=True,
-        key="alpha_preset",
-    )
-    preset = FILTER_PRESETS[preset_name]
+    # --- Presets (built-in + custom) ---
+    all_presets = load_all_presets()
+
+    pc1, pc2 = st.columns([4, 1])
+    with pc1:
+        preset_name = st.selectbox(
+            "Filter-Preset",
+            list(all_presets.keys()),
+            key="alpha_preset",
+        )
+    with pc2:
+        # Delete custom preset button (only for non-builtin)
+        if preset_name not in BUILTIN_PRESETS:
+            if st.button("Preset löschen", key="alpha_del_preset"):
+                delete_custom_preset(preset_name)
+                st.session_state["alpha_preset"] = "Standard"
+                st.rerun()
+
+    preset = all_presets.get(preset_name, FilterConfig())
 
     # --- Quick filters ---
     qc1, qc2, qc3 = st.columns([2, 2, 1])
@@ -119,9 +144,9 @@ def render():
             step=500,
         )
     with qc2:
-        max_views = st.slider(
-            "Max Views", 0, 100000, preset.max_views,
-            step=100,
+        max_volume = st.slider(
+            "Max Volume ($)", 0, 10000000, int(preset.max_volume),
+            step=10000,
         )
     with qc3:
         if st.button("RESET"):
@@ -176,19 +201,23 @@ def render():
                 horizontal=True,
                 key="alpha_verified",
             )
-        with vc2:
-            cats = st.multiselect(
-                "Kategorien",
-                CATEGORIES,
-                default=preset.categories,
-                key="alpha_cats",
+
+        # --- Save current filter as custom preset ---
+        st.divider()
+        sc1, sc2 = st.columns([3, 1])
+        with sc1:
+            new_preset_name = st.text_input(
+                "Preset-Name", placeholder="Mein Filter...",
+                key="alpha_new_preset_name",
             )
+        with sc2:
+            save_preset_clicked = st.button("Preset speichern", key="alpha_save_preset")
 
     # Build active filter config
     verified_map = {"Egal": "any", "Nur Verified": "verified", "Nur Unverified": "unverified"}
     active_filter = FilterConfig(
         min_pnl_7d=min_pnl,
-        max_views=max_views,
+        max_volume=max_volume,
         min_trades_day=min_trades,
         max_trades_day=max_trades,
         max_active_pos=max_pos,
@@ -199,8 +228,17 @@ def render():
         min_consistency=min_consistency,
         min_win_rate=min_win_rate,
         verified=verified_map.get(verified_opt, "any"),
-        categories=cats,
     )
+
+    # Save preset if requested (after active_filter is built)
+    if save_preset_clicked:
+        pname = st.session_state.get("alpha_new_preset_name", "").strip()
+        if pname:
+            save_custom_preset(pname, active_filter)
+            st.success(f"Preset '{pname}' gespeichert!")
+            st.rerun()
+        else:
+            st.warning("Bitte einen Namen eingeben.")
 
     # Apply filters
     filtered = AlphaScannerService.filter_wallets(result.wallets, active_filter)
@@ -225,7 +263,7 @@ def render():
         sort_col = st.selectbox(
             "Sortieren nach",
             ["Alpha Score", "Radar Score", "7D PnL", "7D ROI %",
-             "30D PnL", "Win Rate", "Trades/Day", "Active Pos"],
+             "30D PnL", "Win Rate", "Trades/Day", "Active Pos", "Volume"],
             key="alpha_sort",
         )
     with sc2:
@@ -236,16 +274,9 @@ def render():
         st.warning("Keine Wallets entsprechen den Filtern. Versuche die Filter zu lockern.")
         return
 
-    sort_key_map = {
-        "Alpha Score": "Alpha Score",
-        "Radar Score": "Radar Score",
-        "7D PnL": "7D PnL",
-        "7D ROI %": "7D ROI %",
-        "30D PnL": "30D PnL",
-        "Win Rate": "Win Rate",
-        "Trades/Day": "Trades/Day",
-        "Active Pos": "Active Pos",
-    }
+    # Load watchlist for "on watchlist" markers
+    watchlist = load_watchlist()
+    wl_addresses = {w["address"] for w in watchlist}
 
     rows = []
     for w in filtered:
@@ -263,18 +294,22 @@ def render():
             "Active Pos": w.active_positions,
             "Trades/Day": round(w.trades_per_day, 2),
             "Win Rate": round(w.win_rate, 1),
-            "Views": w.views,
+            "Volume": round(w.volume, 0),
             "Alter (Tage)": w.wallet_age_days,
             "Konsistenz": w.consistency_days,
+            "Watchlist": "⭐" if w.address in wl_addresses else "",
+            "_address": w.address,
         })
 
     df = pd.DataFrame(rows)
-    df = df.sort_values(sort_key_map[sort_col], ascending=sort_asc).reset_index(drop=True)
+    df = df.sort_values(sort_col, ascending=sort_asc).reset_index(drop=True)
     df.index = df.index + 1
     df.index.name = "Rank"
 
+    # Display table (without internal _address column)
+    display_cols = [c for c in df.columns if not c.startswith("_")]
     st.dataframe(
-        df,
+        df[display_cols],
         use_container_width=True,
         column_config={
             "Profil": st.column_config.LinkColumn("Profil", display_text="Öffnen"),
@@ -289,11 +324,80 @@ def render():
             "30D PnL": st.column_config.NumberColumn("30D PnL", format="$%.0f"),
             "Win Rate": st.column_config.NumberColumn("Win Rate", format="%.0f%%"),
             "Trades/Day": st.column_config.NumberColumn("Trades/D", format="%.2f"),
+            "Volume": st.column_config.NumberColumn("Volume", format="$%.0f"),
         },
     )
+
+    # --- Add to watchlist ---
+    st.divider()
+    st.subheader("Zur Watchlist hinzufügen")
+    ac1, ac2, ac3 = st.columns([2, 2, 1])
+    with ac1:
+        wallet_options = {
+            f"{r['Wallet']} ({r['_address'][:8]}...)": r["_address"]
+            for _, r in df.iterrows()
+        }
+        selected_wallet = st.selectbox(
+            "Wallet auswählen",
+            list(wallet_options.keys()),
+            key="alpha_add_wl",
+            label_visibility="collapsed",
+        )
+    with ac2:
+        wl_note = st.text_input(
+            "Notiz (optional)", key="alpha_wl_note",
+            placeholder="z.B. 'Starker Crypto-Trader'",
+        )
+    with ac3:
+        if st.button("Zur Watchlist", type="primary", key="alpha_wl_add_btn"):
+            if selected_wallet and wallet_options:
+                addr = wallet_options[selected_wallet]
+                wallet_name = selected_wallet.split(" (")[0]
+                add_to_watchlist(addr, wallet_name, wl_note)
+                st.success(f"{wallet_name} zur Watchlist hinzugefügt!")
+                st.rerun()
 
     # --- Footer ---
     st.caption(
         f"{len(filtered)} Wallets | "
         f"Klicke 'Öffnen' in der Profil-Spalte um das Polymarket-Profil zu sehen"
     )
+
+
+def _render_watchlist():
+    """Watchlist / Copy Trading tab."""
+    watchlist = load_watchlist()
+
+    if not watchlist:
+        st.info(
+            "Deine Watchlist ist leer. Scanne Wallets und füge interessante Trader hinzu."
+        )
+        return
+
+    st.caption(f"{len(watchlist)} Wallets auf der Watchlist")
+
+    for i, entry in enumerate(watchlist):
+        with st.container():
+            wc1, wc2, wc3, wc4 = st.columns([3, 2, 3, 1])
+            with wc1:
+                st.markdown(f"**{entry.get('username', entry['address'][:12])}**")
+                st.caption(f"`{entry['address'][:16]}...`")
+            with wc2:
+                added = entry.get("added_at", "")[:10]
+                st.caption(f"Hinzugefügt: {added}")
+            with wc3:
+                note = entry.get("note", "")
+                if note:
+                    st.caption(f"Notiz: {note}")
+                st.link_button(
+                    "Profil öffnen",
+                    f"https://polymarket.com/profile/{entry['address']}",
+                    use_container_width=False,
+                )
+            with wc4:
+                if st.button("Entfernen", key=f"wl_rm_{i}"):
+                    remove_from_watchlist(entry["address"])
+                    st.rerun()
+            st.divider()
+
+

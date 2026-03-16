@@ -1,13 +1,16 @@
 """
 Alpha Scanner Service — Scans Polymarket leaderboard wallets, enriches them
 with positions/activity/profile data, calculates Alpha and Radar scores,
-and provides filtering with presets.
+and provides filtering with presets. Supports custom preset persistence
+and a copy-trading watchlist.
 """
 
+import json
+import os
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional, Callable
 
 from services.data_api_client import DataAPIClient
@@ -19,6 +22,10 @@ SCAN_CATEGORIES = ["OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE"]
 SCAN_TIME_PERIODS = ["WEEK", "MONTH"]
 SCAN_ORDER_BY = ["PNL", "VOL"]
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+PRESETS_FILE = os.path.join(DATA_DIR, "alpha_scanner_presets.json")
+WATCHLIST_FILE = os.path.join(DATA_DIR, "alpha_scanner_watchlist.json")
+
 
 # -----------------------------------------------------------------------
 # Data classes
@@ -29,7 +36,6 @@ class WalletData:
     address: str
     username: str = ""
     pseudonym: str = ""
-    views: int = 0
     verified: bool = False
     wallet_age_days: int = 0
     pnl_7d: float = 0.0
@@ -58,7 +64,7 @@ class ScanResult:
 @dataclass
 class FilterConfig:
     min_pnl_7d: float = 0.0
-    max_views: int = 20000
+    max_volume: float = 999999999.0
     min_trades_day: float = 1.0
     max_trades_day: float = 50.0
     max_active_pos: int = 150
@@ -69,32 +75,125 @@ class FilterConfig:
     min_consistency: int = 1
     min_win_rate: float = 0.0
     verified: str = "any"  # "any", "verified", "unverified"
-    categories: list[str] = field(default_factory=lambda: ["OVERALL"])
 
 
 # -----------------------------------------------------------------------
-# Filter presets
+# Built-in filter presets
 # -----------------------------------------------------------------------
 
-FILTER_PRESETS: dict[str, FilterConfig] = {
+BUILTIN_PRESETS: dict[str, FilterConfig] = {
     "Standard": FilterConfig(),
     "Under the Radar": FilterConfig(
-        max_views=100, min_pnl_7d=1000.0, min_trades_day=1.0,
-        max_trades_day=20.0, min_consistency=3, min_win_rate=50.0,
+        max_volume=100000.0, min_pnl_7d=1000.0, min_trades_day=1.0,
+        max_trades_day=20.0, min_consistency=3, min_win_rate=30.0,
     ),
     "Consistent Winners": FilterConfig(
         min_trades_day=2.0, max_trades_day=30.0, min_wallet_age=30,
-        min_consistency=6, min_win_rate=60.0,
+        min_consistency=5, min_win_rate=40.0,
     ),
     "High Roller": FilterConfig(
         min_pnl_7d=10000.0, max_active_pos=50, min_pnl_30d=5000.0,
         min_volume=50000.0,
     ),
     "New Alpha": FilterConfig(
-        max_views=500, min_pnl_7d=500.0, min_roi_7d=20.0,
+        max_volume=500000.0, min_pnl_7d=500.0, min_roi_7d=20.0,
         min_wallet_age=0, min_consistency=3,
     ),
 }
+
+
+# -----------------------------------------------------------------------
+# Custom preset persistence
+# -----------------------------------------------------------------------
+
+def load_all_presets() -> dict[str, FilterConfig]:
+    """Load built-in + custom presets."""
+    presets = dict(BUILTIN_PRESETS)
+    try:
+        if os.path.exists(PRESETS_FILE):
+            with open(PRESETS_FILE) as f:
+                custom = json.load(f)
+            for name, cfg in custom.items():
+                presets[name] = FilterConfig(**cfg)
+    except Exception as e:
+        logger.warning(f"Failed to load custom presets: {e}")
+    return presets
+
+
+def save_custom_preset(name: str, config: FilterConfig) -> None:
+    """Save a custom preset to disk."""
+    try:
+        custom = {}
+        if os.path.exists(PRESETS_FILE):
+            with open(PRESETS_FILE) as f:
+                custom = json.load(f)
+        custom[name] = asdict(config)
+        os.makedirs(os.path.dirname(PRESETS_FILE), exist_ok=True)
+        with open(PRESETS_FILE, "w") as f:
+            json.dump(custom, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save preset '{name}': {e}")
+
+
+def delete_custom_preset(name: str) -> None:
+    """Delete a custom preset."""
+    try:
+        if not os.path.exists(PRESETS_FILE):
+            return
+        with open(PRESETS_FILE) as f:
+            custom = json.load(f)
+        custom.pop(name, None)
+        with open(PRESETS_FILE, "w") as f:
+            json.dump(custom, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to delete preset '{name}': {e}")
+
+
+# -----------------------------------------------------------------------
+# Copy-trading watchlist persistence
+# -----------------------------------------------------------------------
+
+def load_watchlist() -> list[dict]:
+    """Load watchlist from disk. Each entry: {address, username, added_at, note}."""
+    try:
+        if os.path.exists(WATCHLIST_FILE):
+            with open(WATCHLIST_FILE) as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load watchlist: {e}")
+    return []
+
+
+def save_watchlist(watchlist: list[dict]) -> None:
+    """Save watchlist to disk."""
+    try:
+        os.makedirs(os.path.dirname(WATCHLIST_FILE), exist_ok=True)
+        with open(WATCHLIST_FILE, "w") as f:
+            json.dump(watchlist, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save watchlist: {e}")
+
+
+def add_to_watchlist(address: str, username: str, note: str = "") -> None:
+    """Add a wallet to the copy-trading watchlist."""
+    wl = load_watchlist()
+    # Don't add duplicates
+    if any(w["address"] == address for w in wl):
+        return
+    wl.append({
+        "address": address,
+        "username": username,
+        "added_at": datetime.now().isoformat(),
+        "note": note,
+    })
+    save_watchlist(wl)
+
+
+def remove_from_watchlist(address: str) -> None:
+    """Remove a wallet from the watchlist."""
+    wl = load_watchlist()
+    wl = [w for w in wl if w["address"] != address]
+    save_watchlist(wl)
 
 
 # -----------------------------------------------------------------------
@@ -105,6 +204,24 @@ def _normalize(value: float, min_val: float, max_val: float) -> float:
     if max_val <= min_val:
         return 0.0
     return max(0.0, min(1.0, (value - min_val) / (max_val - min_val)))
+
+
+def _parse_timestamp(ts_str: str) -> Optional[datetime]:
+    """Parse ISO timestamp with various fractional second formats."""
+    try:
+        clean = ts_str.replace("Z", "+00:00")
+        if "." in clean:
+            parts = clean.split(".")
+            frac_and_tz = parts[1]
+            for i, c in enumerate(frac_and_tz):
+                if c in "+-":
+                    frac = frac_and_tz[:i][:6]
+                    tz = frac_and_tz[i:]
+                    clean = f"{parts[0]}.{frac}{tz}"
+                    break
+        return datetime.fromisoformat(clean)
+    except (ValueError, TypeError):
+        return None
 
 
 # -----------------------------------------------------------------------
@@ -173,7 +290,7 @@ class AlphaScannerService:
         )
 
     # ------------------------------------------------------------------
-    # Phase 1: Collect wallets from leaderboard
+    # Phase 1: Collect wallets from leaderboard (merge WEEK + MONTH)
     # ------------------------------------------------------------------
 
     def _collect_leaderboard(
@@ -181,7 +298,10 @@ class AlphaScannerService:
         max_wallets: int,
         progress_callback: Optional[Callable] = None,
     ) -> dict[str, dict]:
-        """Fetch wallets from leaderboard across categories/periods. Dedup by address."""
+        """Fetch wallets from leaderboard across categories/periods.
+
+        Merges WEEK and MONTH data per wallet so both pnl_7d and pnl_30d are filled.
+        """
         wallets: dict[str, dict] = {}
         step = 0
         total_steps = len(SCAN_CATEGORIES) * len(SCAN_TIME_PERIODS) * len(SCAN_ORDER_BY)
@@ -202,15 +322,34 @@ class AlphaScannerService:
 
                         for e in entries:
                             addr = e.get("proxyWallet")
-                            if addr and addr not in wallets:
+                            if not addr:
+                                continue
+                            pnl = float(e.get("pnl", 0) or 0)
+                            vol = float(e.get("vol", 0) or 0)
+
+                            if addr not in wallets:
                                 wallets[addr] = {
                                     "username": e.get("userName", ""),
-                                    "pnl": float(e.get("pnl", 0) or 0),
-                                    "vol": float(e.get("vol", 0) or 0),
                                     "verified": bool(e.get("verifiedBadge")),
                                     "category": category,
-                                    "period": period,
+                                    "pnl_7d": 0.0,
+                                    "pnl_30d": 0.0,
+                                    "vol_7d": 0.0,
+                                    "vol_30d": 0.0,
                                 }
+
+                            # Merge data from different periods
+                            w = wallets[addr]
+                            if period == "WEEK":
+                                if pnl > w["pnl_7d"]:
+                                    w["pnl_7d"] = pnl
+                                if vol > w["vol_7d"]:
+                                    w["vol_7d"] = vol
+                            elif period == "MONTH":
+                                if pnl > w["pnl_30d"]:
+                                    w["pnl_30d"] = pnl
+                                if vol > w["vol_30d"]:
+                                    w["vol_30d"] = vol
 
                         if len(entries) < 50:
                             break
@@ -243,17 +382,13 @@ class AlphaScannerService:
             profile_url=f"https://polymarket.com/profile/{address}",
         )
 
-        # Leaderboard data
-        pnl = lb_data.get("pnl", 0)
-        vol = lb_data.get("vol", 0)
-        period = lb_data.get("period", "WEEK")
-        if period == "WEEK":
-            wallet.pnl_7d = pnl
-            wallet.volume = vol
-            wallet.roi_7d = (pnl / vol * 100) if vol > 0 else 0.0
-        elif period == "MONTH":
-            wallet.pnl_30d = pnl
-            wallet.volume = max(wallet.volume, vol)
+        # Leaderboard data (merged from WEEK + MONTH)
+        wallet.pnl_7d = lb_data.get("pnl_7d", 0)
+        wallet.pnl_30d = lb_data.get("pnl_30d", 0)
+        vol_7d = lb_data.get("vol_7d", 0)
+        vol_30d = lb_data.get("vol_30d", 0)
+        wallet.volume = max(vol_7d, vol_30d)
+        wallet.roi_7d = (wallet.pnl_7d / vol_7d * 100) if vol_7d > 0 else 0.0
 
         # Profile (Gamma API)
         profile = self.client.get_user_profile(address)
@@ -263,31 +398,16 @@ class AlphaScannerService:
             wallet.verified = wallet.verified or bool(profile.get("verifiedBadge"))
             created = profile.get("createdAt")
             if created:
-                try:
-                    # Handle various timestamp formats (e.g. "2026-01-14T16:29:23.49458Z")
-                    clean = created.replace("Z", "+00:00")
-                    # Truncate fractional seconds if too many digits
-                    if "." in clean:
-                        parts = clean.split(".")
-                        frac_and_tz = parts[1]
-                        # Find where timezone starts (+ or - after the dot)
-                        for i, c in enumerate(frac_and_tz):
-                            if c in "+-":
-                                frac = frac_and_tz[:i][:6]  # max 6 digits
-                                tz = frac_and_tz[i:]
-                                clean = f"{parts[0]}.{frac}{tz}"
-                                break
-                    dt = datetime.fromisoformat(clean)
+                dt = _parse_timestamp(created)
+                if dt:
                     wallet.wallet_age_days = (datetime.now(timezone.utc) - dt).days
-                except (ValueError, TypeError):
-                    pass
 
         # Positions
         positions = self.client.get_user_positions(address, limit=100)
         if positions:
             active = [p for p in positions if float(p.get("size", 0) or 0) > 0]
             wallet.active_positions = len(active)
-            # Win rate: count all positions with cashPnl data (active + closed)
+            # Win rate: all positions with cashPnl data
             with_pnl = [p for p in positions if p.get("cashPnl") is not None]
             if with_pnl:
                 wins = sum(1 for p in with_pnl if float(p.get("cashPnl", 0) or 0) > 0)
@@ -298,7 +418,6 @@ class AlphaScannerService:
         activities = self.client.get_user_activity(address, start=seven_days_ago, limit=200)
         if activities:
             wallet.trades_per_day = round(len(activities) / 7, 2)
-            # Consistency: unique days with trades
             trade_days: set[str] = set()
             for a in activities:
                 ts = a.get("timestamp")
@@ -321,34 +440,27 @@ class AlphaScannerService:
         if not wallets:
             return
 
-        # Collect ranges for normalization
-        pnls_7d = [w.pnl_7d for w in wallets]
-        rois = [w.roi_7d for w in wallets]
-        pnls_30d = [w.pnl_30d for w in wallets]
-        views_list = [w.views for w in wallets]
-        pos_list = [w.active_positions for w in wallets]
-
-        max_pnl7 = max(pnls_7d) if pnls_7d else 1
-        max_roi = max(rois) if rois else 1
-        max_pnl30 = max(pnls_30d) if pnls_30d else 1
-        max_views = max(views_list) if views_list else 1
-        max_pos = max(pos_list) if pos_list else 1
+        max_pnl7 = max((w.pnl_7d for w in wallets), default=1) or 1
+        max_roi = max((w.roi_7d for w in wallets), default=1) or 1
+        max_pnl30 = max((w.pnl_30d for w in wallets), default=1) or 1
+        max_vol = max((w.volume for w in wallets), default=1) or 1
+        max_pos = max((w.active_positions for w in wallets), default=1) or 1
 
         for w in wallets:
-            # Alpha Score
+            # Alpha Score: weighted composite
             components = [
-                0.25 * _normalize(w.roi_7d, 0, max(max_roi, 1)),
-                0.20 * _normalize(w.pnl_7d, 0, max(max_pnl7, 1)),
-                0.15 * _normalize(w.pnl_30d, 0, max(max_pnl30, 1)),
-                0.15 * (1 - _normalize(w.views, 0, max(max_views, 1))),
-                0.10 * (1 - _normalize(w.active_positions, 0, max(max_pos, 1))),
+                0.25 * _normalize(w.roi_7d, 0, max_roi),
+                0.20 * _normalize(w.pnl_7d, 0, max_pnl7),
+                0.15 * _normalize(w.pnl_30d, 0, max_pnl30),
+                0.15 * (1 - _normalize(w.volume, 0, max_vol)),  # less volume = under the radar
+                0.10 * (1 - _normalize(w.active_positions, 0, max_pos)),
                 0.15 * (w.consistency_days / 7),
             ]
             w.alpha_score = round(max(0.0, min(1.0, sum(components))), 2)
 
-            # Radar Score: low visibility + high skill
+            # Radar Score: low volume = under the radar
             w.radar_score = round(
-                max(0.0, min(1.0, 1 - _normalize(w.views, 0, max(max_views, 1)))),
+                max(0.0, min(1.0, 1 - _normalize(w.volume, 0, max_vol))),
                 2,
             )
 
@@ -363,7 +475,7 @@ class AlphaScannerService:
         for w in wallets:
             if w.pnl_7d < config.min_pnl_7d:
                 continue
-            if w.views > config.max_views:
+            if w.volume > config.max_volume:
                 continue
             if w.trades_per_day < config.min_trades_day:
                 continue
