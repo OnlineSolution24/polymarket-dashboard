@@ -25,6 +25,7 @@ SCAN_ORDER_BY = ["PNL", "VOL"]
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 PRESETS_FILE = os.path.join(DATA_DIR, "alpha_scanner_presets.json")
 WATCHLIST_FILE = os.path.join(DATA_DIR, "alpha_scanner_watchlist.json")
+COPYTRADES_FILE = os.path.join(DATA_DIR, "alpha_scanner_copytrades.json")
 
 
 # -----------------------------------------------------------------------
@@ -194,6 +195,80 @@ def remove_from_watchlist(address: str) -> None:
     wl = load_watchlist()
     wl = [w for w in wl if w["address"] != address]
     save_watchlist(wl)
+
+
+# -----------------------------------------------------------------------
+# Copy-trade market selections (per wallet, per market)
+# -----------------------------------------------------------------------
+
+def load_copy_trades() -> list[dict]:
+    """Load copy trade selections.
+
+    Each entry: {wallet_address, wallet_name, market_title, condition_id,
+                 outcome, size, added_at}
+    """
+    try:
+        if os.path.exists(COPYTRADES_FILE):
+            with open(COPYTRADES_FILE) as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load copy trades: {e}")
+    return []
+
+
+def save_copy_trades(trades: list[dict]) -> None:
+    """Save copy trades to disk."""
+    try:
+        os.makedirs(os.path.dirname(COPYTRADES_FILE), exist_ok=True)
+        with open(COPYTRADES_FILE, "w") as f:
+            json.dump(trades, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save copy trades: {e}")
+
+
+def add_copy_trade(
+    wallet_address: str,
+    wallet_name: str,
+    market_title: str,
+    condition_id: str,
+    outcome: str,
+    size: float = 0.0,
+) -> None:
+    """Add a specific market position to copy trades."""
+    ct = load_copy_trades()
+    # No duplicates (same wallet + condition_id)
+    if any(
+        t["wallet_address"] == wallet_address and t["condition_id"] == condition_id
+        for t in ct
+    ):
+        return
+    ct.append({
+        "wallet_address": wallet_address,
+        "wallet_name": wallet_name,
+        "market_title": market_title,
+        "condition_id": condition_id,
+        "outcome": outcome,
+        "size": size,
+        "added_at": datetime.now().isoformat(),
+    })
+    save_copy_trades(ct)
+
+
+def remove_copy_trade(wallet_address: str, condition_id: str) -> None:
+    """Remove a specific market from copy trades."""
+    ct = load_copy_trades()
+    ct = [
+        t for t in ct
+        if not (t["wallet_address"] == wallet_address and t["condition_id"] == condition_id)
+    ]
+    save_copy_trades(ct)
+
+
+def remove_all_copy_trades_for_wallet(wallet_address: str) -> None:
+    """Remove all copy trades for a wallet."""
+    ct = load_copy_trades()
+    ct = [t for t in ct if t["wallet_address"] != wallet_address]
+    save_copy_trades(ct)
 
 
 # -----------------------------------------------------------------------

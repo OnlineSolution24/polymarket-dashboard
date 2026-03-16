@@ -16,7 +16,12 @@ from services.alpha_scanner_service import (
     load_watchlist,
     add_to_watchlist,
     remove_from_watchlist,
+    load_copy_trades,
+    add_copy_trade,
+    remove_copy_trade,
+    remove_all_copy_trades_for_wallet,
 )
+from services.data_api_client import DataAPIClient
 from components.status_cards import kpi_row
 
 
@@ -36,14 +41,19 @@ def render():
     if "alpha_scanning" not in st.session_state:
         st.session_state.alpha_scanning = False
 
-    # --- Tabs: Scanner + Watchlist ---
-    tab_scan, tab_watchlist = st.tabs(["Scanner", "Watchlist"])
+    # --- Tabs: Scanner + Watchlist + Copy Trades ---
+    tab_scan, tab_watchlist, tab_copytrades = st.tabs(
+        ["Scanner", "Watchlist", "Copy Trades"]
+    )
 
     with tab_scan:
         _render_scanner()
 
     with tab_watchlist:
         _render_watchlist()
+
+    with tab_copytrades:
+        _render_copy_trades()
 
 
 def _render_scanner():
@@ -127,7 +137,6 @@ def _render_scanner():
             key="alpha_preset",
         )
     with pc2:
-        # Delete custom preset button (only for non-builtin)
         if preset_name not in BUILTIN_PRESETS:
             if st.button("Preset löschen", key="alpha_del_preset"):
                 delete_custom_preset(preset_name)
@@ -258,15 +267,15 @@ def _render_scanner():
     st.divider()
 
     # --- Sort ---
-    sc1, sc2 = st.columns([3, 1])
-    with sc1:
+    so1, so2 = st.columns([3, 1])
+    with so1:
         sort_col = st.selectbox(
             "Sortieren nach",
             ["Alpha Score", "Radar Score", "7D PnL", "7D ROI %",
              "30D PnL", "Win Rate", "Trades/Day", "Active Pos", "Volume"],
             key="alpha_sort",
         )
-    with sc2:
+    with so2:
         sort_asc = st.toggle("Aufsteigend", False, key="alpha_sort_dir")
 
     # --- Build dataframe ---
@@ -274,7 +283,7 @@ def _render_scanner():
         st.warning("Keine Wallets entsprechen den Filtern. Versuche die Filter zu lockern.")
         return
 
-    # Load watchlist for "on watchlist" markers
+    # Load watchlist for favorite markers
     watchlist = load_watchlist()
     wl_addresses = {w["address"] for w in watchlist}
 
@@ -297,7 +306,7 @@ def _render_scanner():
             "Volume": round(w.volume, 0),
             "Alter (Tage)": w.wallet_age_days,
             "Konsistenz": w.consistency_days,
-            "Watchlist": "⭐" if w.address in wl_addresses else "",
+            "Favorit": "\u2b50" if w.address in wl_addresses else "",
             "_address": w.address,
         })
 
@@ -306,7 +315,7 @@ def _render_scanner():
     df.index = df.index + 1
     df.index.name = "Rank"
 
-    # Display table (without internal _address column)
+    # Display table
     display_cols = [c for c in df.columns if not c.startswith("_")]
     st.dataframe(
         df[display_cols],
@@ -328,76 +337,227 @@ def _render_scanner():
         },
     )
 
-    # --- Add to watchlist ---
+    # --- Quick Favorite: one-click add/remove per wallet ---
     st.divider()
-    st.subheader("Zur Watchlist hinzufügen")
-    ac1, ac2, ac3 = st.columns([2, 2, 1])
-    with ac1:
-        wallet_options = {
-            f"{r['Wallet']} ({r['_address'][:8]}...)": r["_address"]
-            for _, r in df.iterrows()
-        }
-        selected_wallet = st.selectbox(
-            "Wallet auswählen",
-            list(wallet_options.keys()),
-            key="alpha_add_wl",
-            label_visibility="collapsed",
-        )
-    with ac2:
-        wl_note = st.text_input(
-            "Notiz (optional)", key="alpha_wl_note",
-            placeholder="z.B. 'Starker Crypto-Trader'",
-        )
-    with ac3:
-        if st.button("Zur Watchlist", type="primary", key="alpha_wl_add_btn"):
-            if selected_wallet and wallet_options:
-                addr = wallet_options[selected_wallet]
-                wallet_name = selected_wallet.split(" (")[0]
-                add_to_watchlist(addr, wallet_name, wl_note)
-                st.success(f"{wallet_name} zur Watchlist hinzugefügt!")
-                st.rerun()
+    st.subheader("Favoriten verwalten")
+
+    # Build wallet list for display
+    wallet_list = []
+    for _, r in df.iterrows():
+        addr = r["_address"]
+        is_fav = addr in wl_addresses
+        wallet_list.append({
+            "name": r["Wallet"],
+            "address": addr,
+            "is_fav": is_fav,
+        })
+
+    # Show in a compact grid: 4 columns per row
+    cols_per_row = 4
+    for row_start in range(0, min(len(wallet_list), 20), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col_idx, winfo in enumerate(wallet_list[row_start:row_start + cols_per_row]):
+            with cols[col_idx]:
+                if winfo["is_fav"]:
+                    if st.button(
+                        f"\u2b50 {winfo['name'][:18]}",
+                        key=f"unfav_{winfo['address'][:10]}",
+                        use_container_width=True,
+                    ):
+                        remove_from_watchlist(winfo["address"])
+                        st.rerun()
+                else:
+                    if st.button(
+                        f"\u2606 {winfo['name'][:18]}",
+                        key=f"fav_{winfo['address'][:10]}",
+                        use_container_width=True,
+                    ):
+                        add_to_watchlist(winfo["address"], winfo["name"])
+                        st.rerun()
+
+    if len(wallet_list) > 20:
+        st.caption(f"... und {len(wallet_list) - 20} weitere Wallets")
 
     # --- Footer ---
     st.caption(
         f"{len(filtered)} Wallets | "
-        f"Klicke 'Öffnen' in der Profil-Spalte um das Polymarket-Profil zu sehen"
+        f"Klicke \u2606 um ein Wallet als Favorit zu speichern"
     )
 
 
 def _render_watchlist():
-    """Watchlist / Copy Trading tab."""
+    """Watchlist tab with per-wallet market selection for copy trading."""
     watchlist = load_watchlist()
 
     if not watchlist:
         st.info(
-            "Deine Watchlist ist leer. Scanne Wallets und füge interessante Trader hinzu."
+            "Deine Watchlist ist leer. Scanne Wallets und markiere "
+            "interessante Trader als Favorit (\u2606)."
         )
         return
 
     st.caption(f"{len(watchlist)} Wallets auf der Watchlist")
 
+    copy_trades = load_copy_trades()
+
     for i, entry in enumerate(watchlist):
+        addr = entry["address"]
+        name = entry.get("username", addr[:12])
+
         with st.container():
-            wc1, wc2, wc3, wc4 = st.columns([3, 2, 3, 1])
+            # Header row
+            wc1, wc2, wc3 = st.columns([4, 2, 1])
             with wc1:
-                st.markdown(f"**{entry.get('username', entry['address'][:12])}**")
-                st.caption(f"`{entry['address'][:16]}...`")
-            with wc2:
-                added = entry.get("added_at", "")[:10]
-                st.caption(f"Hinzugefügt: {added}")
-            with wc3:
+                st.markdown(f"**{name}**")
                 note = entry.get("note", "")
                 if note:
                     st.caption(f"Notiz: {note}")
+            with wc2:
                 st.link_button(
                     "Profil öffnen",
-                    f"https://polymarket.com/profile/{entry['address']}",
-                    use_container_width=False,
+                    f"https://polymarket.com/profile/{addr}",
                 )
-            with wc4:
+            with wc3:
                 if st.button("Entfernen", key=f"wl_rm_{i}"):
-                    remove_from_watchlist(entry["address"])
+                    remove_from_watchlist(addr)
+                    remove_all_copy_trades_for_wallet(addr)
                     st.rerun()
+
+            # Expandable: show positions and select markets to copy
+            with st.expander(f"Positionen von {name} laden & copy traden"):
+                _render_wallet_positions(addr, name, copy_trades)
+
             st.divider()
 
 
+def _render_wallet_positions(
+    wallet_address: str, wallet_name: str, copy_trades: list[dict]
+):
+    """Show a wallet's active positions and allow selecting individual markets."""
+
+    # Cache positions in session state to avoid re-fetching on every rerun
+    cache_key = f"_wl_positions_{wallet_address[:10]}"
+
+    if st.button("Positionen laden", key=f"load_pos_{wallet_address[:10]}"):
+        client = DataAPIClient(timeout=20)
+        try:
+            positions = client.get_user_positions(wallet_address, limit=50)
+            # Keep only active positions (size > 0)
+            active = [
+                p for p in positions
+                if float(p.get("size", 0) or 0) > 0
+            ]
+            st.session_state[cache_key] = active
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+            return
+        finally:
+            client.close()
+
+    positions = st.session_state.get(cache_key)
+    if not positions:
+        st.caption("Klicke 'Positionen laden' um die aktiven Märkte zu sehen.")
+        return
+
+    # Get currently tracked condition_ids for this wallet
+    tracked_ids = {
+        t["condition_id"]
+        for t in copy_trades
+        if t["wallet_address"] == wallet_address
+    }
+
+    st.caption(f"{len(positions)} aktive Positionen")
+
+    for j, pos in enumerate(positions):
+        title = pos.get("title", pos.get("slug", "Unbekannter Markt"))
+        outcome = pos.get("outcome", "?")
+        size = float(pos.get("size", 0) or 0)
+        avg_price = float(pos.get("avgPrice", 0) or 0)
+        cur_price = float(pos.get("curPrice", 0) or 0)
+        cash_pnl = float(pos.get("cashPnl", 0) or 0)
+        condition_id = pos.get("conditionId", pos.get("condition_id", ""))
+
+        is_tracked = condition_id in tracked_ids
+
+        pc1, pc2, pc3, pc4 = st.columns([4, 1, 1, 1])
+        with pc1:
+            pnl_color = "green" if cash_pnl >= 0 else "red"
+            st.markdown(
+                f"**{title[:60]}** — {outcome}  \n"
+                f"Size: {size:.1f} | Avg: {avg_price:.2f} → {cur_price:.2f} | "
+                f"PnL: :{pnl_color}[${cash_pnl:.2f}]"
+            )
+        with pc2:
+            st.caption(f"${size * cur_price:.0f}")
+        with pc3:
+            pct = ((cur_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
+            st.caption(f"{pct:+.1f}%")
+        with pc4:
+            if is_tracked:
+                if st.button(
+                    "Entfernen",
+                    key=f"ct_rm_{wallet_address[:8]}_{j}",
+                ):
+                    remove_copy_trade(wallet_address, condition_id)
+                    st.rerun()
+            else:
+                if st.button(
+                    "Copy Trade",
+                    key=f"ct_add_{wallet_address[:8]}_{j}",
+                    type="primary",
+                ):
+                    add_copy_trade(
+                        wallet_address=wallet_address,
+                        wallet_name=wallet_name,
+                        market_title=title,
+                        condition_id=condition_id,
+                        outcome=outcome,
+                        size=size,
+                    )
+                    st.rerun()
+
+
+def _render_copy_trades():
+    """Copy Trades tab — overview of all selected market positions."""
+    trades = load_copy_trades()
+
+    if not trades:
+        st.info(
+            "Noch keine Copy Trades ausgewählt. Gehe zur Watchlist, "
+            "lade die Positionen eines Wallets und wähle einzelne Märkte aus."
+        )
+        return
+
+    st.caption(f"{len(trades)} Märkte zum Copy Traden ausgewählt")
+
+    # Group by wallet
+    by_wallet: dict[str, list[dict]] = {}
+    for t in trades:
+        key = t.get("wallet_name", t["wallet_address"][:12])
+        by_wallet.setdefault(key, []).append(t)
+
+    for wallet_name, wallet_trades in by_wallet.items():
+        st.subheader(wallet_name)
+
+        for k, t in enumerate(wallet_trades):
+            tc1, tc2, tc3, tc4 = st.columns([5, 1, 1, 1])
+            with tc1:
+                st.markdown(f"**{t['market_title'][:70]}**")
+                st.caption(f"Outcome: {t['outcome']} | Size: {t.get('size', 0):.1f}")
+            with tc2:
+                added = t.get("added_at", "")[:10]
+                st.caption(f"Seit: {added}")
+            with tc3:
+                st.link_button(
+                    "Profil",
+                    f"https://polymarket.com/profile/{t['wallet_address']}",
+                )
+            with tc4:
+                if st.button(
+                    "Entfernen",
+                    key=f"ctrm_{t['wallet_address'][:8]}_{k}",
+                ):
+                    remove_copy_trade(t["wallet_address"], t["condition_id"])
+                    st.rerun()
+
+        st.divider()
