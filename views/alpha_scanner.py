@@ -97,6 +97,11 @@ def render():
         )
         return
 
+    # --- Reset handling (must happen before widgets) ---
+    if st.session_state.get("_alpha_do_reset"):
+        st.session_state["_alpha_do_reset"] = False
+        st.session_state["alpha_preset"] = "Standard"
+
     # --- Presets ---
     preset_name = st.radio(
         "Filter-Preset",
@@ -111,19 +116,17 @@ def render():
     with qc1:
         min_pnl = st.slider(
             "Min 7D PnL ($)", 0, 50000, int(preset.min_pnl_7d),
-            step=500, key="alpha_min_pnl",
+            step=500,
         )
     with qc2:
         max_views = st.slider(
             "Max Views", 0, 100000, preset.max_views,
-            step=100, key="alpha_max_views",
+            step=100,
         )
     with qc3:
-        reset = st.button("RESET", key="alpha_reset")
-
-    if reset:
-        st.session_state.alpha_preset = "Standard"
-        st.rerun()
+        if st.button("RESET"):
+            st.session_state["_alpha_do_reset"] = True
+            st.rerun()
 
     # --- Advanced filters ---
     with st.expander("Erweiterte Filter"):
