@@ -129,43 +129,40 @@ def render():
     with st.expander("Erweiterte Filter"):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            min_trades = st.number_input(
-                "Min Trades/Tag", 0.0, 200.0, float(preset.min_trades_day),
-                step=0.5, key="alpha_min_trades",
+            min_trades = st.slider(
+                "Min Trades/Tag", 0.0, 50.0, float(preset.min_trades_day),
+                step=0.5,
             )
-            max_trades = st.number_input(
+            max_trades = st.slider(
                 "Max Trades/Tag", 1.0, 200.0, float(preset.max_trades_day),
-                step=1.0, key="alpha_max_trades",
+                step=1.0,
             )
-            max_pos = st.number_input(
+            max_pos = st.slider(
                 "Max Aktive Positionen", 1, 500, int(preset.max_active_pos),
-                step=1, key="alpha_max_pos",
             )
         with fc2:
-            min_roi = st.number_input(
-                "Min 7D ROI (%)", -100.0, 10000.0, float(preset.min_roi_7d),
-                step=5.0, key="alpha_min_roi",
+            min_roi = st.slider(
+                "Min 7D ROI (%)", 0.0, 500.0, float(preset.min_roi_7d),
+                step=5.0,
             )
-            min_pnl_30d = st.number_input(
-                "Min 30D PnL ($)", 0.0, 1000000.0, float(preset.min_pnl_30d),
-                step=500.0, key="alpha_min_pnl30",
+            min_pnl_30d = st.slider(
+                "Min 30D PnL ($)", 0, 100000, int(preset.min_pnl_30d),
+                step=500,
             )
-            min_volume = st.number_input(
-                "Min Volume ($)", 0.0, 10000000.0, float(preset.min_volume),
-                step=1000.0, key="alpha_min_vol",
+            min_volume = st.slider(
+                "Min Volume ($)", 0, 500000, int(preset.min_volume),
+                step=1000,
             )
         with fc3:
             min_wallet_age = st.slider(
-                "Min Wallet-Alter (Tage)", 0, 365, preset.min_wallet_age,
-                key="alpha_min_age",
+                "Min Wallet-Alter (Tage)", 0, 365, int(preset.min_wallet_age),
             )
             min_consistency = st.slider(
-                "Min Konsistenz (Tage/7)", 1, 7, preset.min_consistency,
-                key="alpha_min_cons",
+                "Min Konsistenz (Tage/7)", 1, 7, int(preset.min_consistency),
             )
             min_win_rate = st.slider(
                 "Min Win Rate (%)", 0, 100, int(preset.min_win_rate),
-                step=5, key="alpha_min_wr",
+                step=5,
             )
 
         vc1, vc2 = st.columns(2)
