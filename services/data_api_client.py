@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 DATA_API = "https://data-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 # Trades above this USD value count as "whale" activity
 WHALE_THRESHOLD_USD = 500
@@ -179,6 +180,7 @@ class DataAPIClient:
         time_period: str = "WEEK",
         order_by: str = "PNL",
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
         """Fetch top trader leaderboard.
 
@@ -192,6 +194,7 @@ class DataAPIClient:
                     "timePeriod": time_period,
                     "orderBy": order_by,
                     "limit": limit,
+                    "offset": offset,
                 },
             )
             resp.raise_for_status()
@@ -285,3 +288,73 @@ class DataAPIClient:
 
         # Clamp
         return round(max(0, min(100, score)), 1)
+
+    # ------------------------------------------------------------------
+    # Alpha Scanner: User Positions
+    # ------------------------------------------------------------------
+
+    def get_user_positions(self, user: str, limit: int = 100) -> list[dict]:
+        """Fetch positions for a wallet address.
+
+        Returns list of position dicts with: size, avgPrice, curPrice,
+        cashPnl, percentPnl, title, outcome, etc.
+        """
+        try:
+            resp = self._client.get(
+                f"{DATA_API}/positions",
+                params={"user": user, "limit": limit},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.debug(f"Positions fetch failed for {user[:12]}: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Alpha Scanner: User Activity
+    # ------------------------------------------------------------------
+
+    def get_user_activity(
+        self,
+        user: str,
+        activity_type: str = "TRADE",
+        start: Optional[int] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Fetch activity/trade history for a wallet.
+
+        Returns list of activity dicts with: type, timestamp, amount, side.
+        """
+        try:
+            params: dict = {"user": user, "type": activity_type, "limit": limit}
+            if start is not None:
+                params["start"] = start
+            resp = self._client.get(f"{DATA_API}/activity", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.debug(f"Activity fetch failed for {user[:12]}: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Alpha Scanner: User Profile (Gamma API)
+    # ------------------------------------------------------------------
+
+    def get_user_profile(self, address: str) -> Optional[dict]:
+        """Fetch public profile from Gamma API.
+
+        Returns dict with: pseudonym, createdAt, profileImage, verifiedBadge, etc.
+        """
+        try:
+            resp = self._client.get(
+                f"{GAMMA_API}/public-profile",
+                params={"address": address},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.debug(f"Profile fetch failed for {address[:12]}: {e}")
+            return None
