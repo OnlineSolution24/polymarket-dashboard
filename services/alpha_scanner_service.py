@@ -57,17 +57,17 @@ class ScanResult:
 
 @dataclass
 class FilterConfig:
-    min_pnl_7d: float = 0
+    min_pnl_7d: float = 0.0
     max_views: int = 20000
-    min_trades_day: float = 1
-    max_trades_day: float = 50
+    min_trades_day: float = 1.0
+    max_trades_day: float = 50.0
     max_active_pos: int = 150
-    min_roi_7d: float = 0
-    min_pnl_30d: float = 0
-    min_volume: float = 0
+    min_roi_7d: float = 0.0
+    min_pnl_30d: float = 0.0
+    min_volume: float = 0.0
     min_wallet_age: int = 7
     min_consistency: int = 3
-    min_win_rate: float = 50
+    min_win_rate: float = 50.0
     verified: str = "any"  # "any", "verified", "unverified"
     categories: list[str] = field(default_factory=lambda: ["OVERALL"])
 
@@ -79,19 +79,19 @@ class FilterConfig:
 FILTER_PRESETS: dict[str, FilterConfig] = {
     "Standard": FilterConfig(),
     "Under the Radar": FilterConfig(
-        max_views=100, min_pnl_7d=1000, min_trades_day=1,
-        max_trades_day=20, min_consistency=3, min_win_rate=50,
+        max_views=100, min_pnl_7d=1000.0, min_trades_day=1.0,
+        max_trades_day=20.0, min_consistency=3, min_win_rate=50.0,
     ),
     "Consistent Winners": FilterConfig(
-        min_trades_day=2, max_trades_day=30, min_wallet_age=30,
-        min_consistency=6, min_win_rate=60,
+        min_trades_day=2.0, max_trades_day=30.0, min_wallet_age=30,
+        min_consistency=6, min_win_rate=60.0,
     ),
     "High Roller": FilterConfig(
-        min_pnl_7d=10000, max_active_pos=50, min_pnl_30d=5000,
-        min_volume=50000,
+        min_pnl_7d=10000.0, max_active_pos=50, min_pnl_30d=5000.0,
+        min_volume=50000.0,
     ),
     "New Alpha": FilterConfig(
-        max_views=500, min_pnl_7d=500, min_roi_7d=20,
+        max_views=500, min_pnl_7d=500.0, min_roi_7d=20.0,
         min_wallet_age=0, min_consistency=3,
     ),
 }
