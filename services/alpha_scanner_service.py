@@ -65,9 +65,9 @@ class FilterConfig:
     min_roi_7d: float = 0.0
     min_pnl_30d: float = 0.0
     min_volume: float = 0.0
-    min_wallet_age: int = 7
-    min_consistency: int = 3
-    min_win_rate: float = 50.0
+    min_wallet_age: int = 0
+    min_consistency: int = 1
+    min_win_rate: float = 0.0
     verified: str = "any"  # "any", "verified", "unverified"
     categories: list[str] = field(default_factory=lambda: ["OVERALL"])
 
@@ -264,7 +264,20 @@ class AlphaScannerService:
             created = profile.get("createdAt")
             if created:
                 try:
-                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    # Handle various timestamp formats (e.g. "2026-01-14T16:29:23.49458Z")
+                    clean = created.replace("Z", "+00:00")
+                    # Truncate fractional seconds if too many digits
+                    if "." in clean:
+                        parts = clean.split(".")
+                        frac_and_tz = parts[1]
+                        # Find where timezone starts (+ or - after the dot)
+                        for i, c in enumerate(frac_and_tz):
+                            if c in "+-":
+                                frac = frac_and_tz[:i][:6]  # max 6 digits
+                                tz = frac_and_tz[i:]
+                                clean = f"{parts[0]}.{frac}{tz}"
+                                break
+                    dt = datetime.fromisoformat(clean)
                     wallet.wallet_age_days = (datetime.now(timezone.utc) - dt).days
                 except (ValueError, TypeError):
                     pass
@@ -274,10 +287,11 @@ class AlphaScannerService:
         if positions:
             active = [p for p in positions if float(p.get("size", 0) or 0) > 0]
             wallet.active_positions = len(active)
-            closed = [p for p in positions if float(p.get("size", 0) or 0) == 0 and p.get("cashPnl") is not None]
-            if closed:
-                wins = sum(1 for p in closed if float(p.get("cashPnl", 0) or 0) > 0)
-                wallet.win_rate = round(wins / len(closed) * 100, 1)
+            # Win rate: count all positions with cashPnl data (active + closed)
+            with_pnl = [p for p in positions if p.get("cashPnl") is not None]
+            if with_pnl:
+                wins = sum(1 for p in with_pnl if float(p.get("cashPnl", 0) or 0) > 0)
+                wallet.win_rate = round(wins / len(with_pnl) * 100, 1)
 
         # Activity (last 7 days)
         seven_days_ago = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp())
