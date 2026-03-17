@@ -988,11 +988,11 @@ def _job_weather_edge_analysis(config: AppConfig):
             if open_pos:
                 continue
 
-            # Skip if recently closed (rebuy cooldown)
+            # Skip if recently closed (rebuy cooldown) - catches ALL result types
             rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
             last_closed = engine.query_one(
                 "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
-                "AND result IN ('cashout', 'win', 'loss', 'settled')",
+                "AND status = 'closed' AND result IS NOT NULL",
                 (market_id,),
             )
             if last_closed and last_closed.get("last_close"):
@@ -1024,6 +1024,13 @@ def _job_weather_edge_analysis(config: AppConfig):
             amount = max(amount, 1.0)  # minimum $1
 
             price = r["yes_price"] if side == "YES" else (1 - r["yes_price"])
+
+            # Max entry price check - skip if price too high (no upside)
+            max_entry = ws_config.get("max_entry_price", 0.93)
+            if price > max_entry:
+                logger.debug(f"Weather: skip {market_id[:30]} - price {price:.3f} > max {max_entry}")
+                continue
+
             status = "auto_approved" if mode == "full-auto" else "pending"
 
             payload = {

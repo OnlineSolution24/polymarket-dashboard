@@ -229,7 +229,7 @@ class TraderAgent(BaseAgent):
         rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
         last_closed = engine.query_one(
             "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
-            "AND result IN ('cashout', 'win', 'loss', 'settled')",
+            "AND status = 'closed' AND result IS NOT NULL",
             (market_id,),
         )
         if last_closed and last_closed.get("last_close"):
@@ -295,7 +295,7 @@ class TraderAgent(BaseAgent):
         rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
         last_closed = engine.query_one(
             "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
-            "AND result IN ('cashout', 'win', 'loss', 'settled')",
+            "AND status = 'closed' AND result IS NOT NULL",
             (payload.get("market_id"),),
         )
         if last_closed and last_closed.get("last_close"):

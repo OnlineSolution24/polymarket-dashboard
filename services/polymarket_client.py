@@ -466,14 +466,19 @@ class PolymarketService:
             # Check if order was actually matched/filled
             if isinstance(result, dict):
                 status = result.get("status", "").lower()
-                if status in ("matched", "filled", "delayed"):
+                success = result.get("success", False)
+                if status in ("matched", "filled") and success:
                     return {"ok": True, "result": result, "filled": True}
-                elif status in ("unmatched", "live"):
-                    logger.warn(f"Sell order placed but NOT filled (status={status}). No buyer available.")
+                elif status == "delayed":
+                    logger.warning(f"Sell order delayed (may or may not fill): {result}")
+                    return {"ok": False, "error": "Order delayed, not confirmed", "result": result}
+                else:
+                    logger.warning(f"Sell order NOT filled (status={status}, success={success}): {result}")
                     return {"ok": False, "error": f"Order not filled: {status}", "result": result}
 
-            # Fallback: assume ok if we got a non-error response
-            return {"ok": True, "result": result, "filled": True}
+            # Non-dict response = unexpected, treat as failure
+            logger.warning(f"Sell order unexpected response type ({type(result).__name__}): {result}")
+            return {"ok": False, "error": f"Unexpected response: {result}"}
 
         except Exception as e:
             logger.error(f"Sell order failed: {e}")
