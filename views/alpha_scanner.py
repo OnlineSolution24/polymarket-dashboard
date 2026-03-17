@@ -584,7 +584,7 @@ Antworte strukturiert und präzise."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "anthropic/claude-haiku-4-5-20251001",
+                    "model": "anthropic/claude-3.5-haiku",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 1500,
                 },
