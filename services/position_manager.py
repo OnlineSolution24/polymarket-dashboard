@@ -281,16 +281,23 @@ class PositionManager:
             }
 
         # -- Rule 2: Take Profit (tiered) --
-        tp_pct = self._get_tiered_tp(entry_price, cashout_cfg)
-        min_profit_usd = cashout_cfg.get("min_profit_usd", 0.05)
+        # Skip TP if price is near $1.00 — wait for settlement instead (pays full $1/share)
+        if best_bid >= 0.95:
+            logger.debug(
+                f"Skipping TP for {pos.get('condition_id', '?')[:20]}... "
+                f"bid={best_bid:.3f} >= 0.95 — waiting for settlement ($1.00/share)"
+            )
+        else:
+            tp_pct = self._get_tiered_tp(entry_price, cashout_cfg)
+            min_profit_usd = cashout_cfg.get("min_profit_usd", 0.05)
 
-        if pnl_pct >= tp_pct and pnl_usd >= min_profit_usd:
-            return {
-                "type": "take_profit",
-                "reason": f"TP {pnl_pct:.1f}% >= {tp_pct:.1f}%",
-                "pnl_pct": pnl_pct,
-                "pnl_usd": pnl_usd,
-            }
+            if pnl_pct >= tp_pct and pnl_usd >= min_profit_usd:
+                return {
+                    "type": "take_profit",
+                    "reason": f"TP {pnl_pct:.1f}% >= {tp_pct:.1f}%",
+                    "pnl_pct": pnl_pct,
+                    "pnl_usd": pnl_usd,
+                }
 
         # -- Rule 3: Breakeven Stop (weather trades only) --
         if ws_cfg.get("breakeven_enabled", False):
@@ -395,7 +402,8 @@ class PositionManager:
             if result.get("ok"):
                 # SAFETY CHECK: Verify position is actually gone from Polymarket
                 import time as _time
-                _time.sleep(2)  # Wait for on-chain settlement
+                wait_secs = 5 if result.get("delayed") else 2
+                _time.sleep(wait_secs)  # Wait for on-chain settlement
                 still_there = self._verify_position_gone(pos["token_id"])
                 if still_there:
                     logger.warning(

@@ -470,8 +470,9 @@ class PolymarketService:
                 if status in ("matched", "filled") and success:
                     return {"ok": True, "result": result, "filled": True}
                 elif status == "delayed":
-                    logger.warning(f"Sell order delayed (may or may not fill): {result}")
-                    return {"ok": False, "error": "Order delayed, not confirmed", "result": result}
+                    # Delayed orders often fill within seconds — mark as pending verification
+                    logger.info(f"Sell order delayed, needs on-chain verification: {result}")
+                    return {"ok": True, "result": result, "filled": False, "delayed": True}
                 else:
                     logger.warning(f"Sell order NOT filled (status={status}, success={success}): {result}")
                     return {"ok": False, "error": f"Order not filled: {status}", "result": result}
