@@ -114,6 +114,10 @@ scheduler:
   snapshot_cleanup:
     enabled: true
     interval_hours: 24
+  blockchain_indexer:
+    enabled: false
+    interval_hours: 6
+    max_chunks_per_run: 500
 strategy:
   max_active_strategies: 5
   min_confidence_score: 0.5

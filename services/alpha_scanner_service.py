@@ -543,6 +543,25 @@ class AlphaScannerService:
                         pass
             wallet.consistency_days = len(trade_days)
 
+        # Historical blockchain data enrichment (if available)
+        try:
+            from services.historical_analytics import (
+                get_wallet_pnl_estimate,
+                get_wallet_win_rate_historical,
+                _has_data,
+            )
+            if _has_data():
+                hist_pnl = get_wallet_pnl_estimate(address)
+                if hist_pnl and hist_pnl.get("total_trades", 0) > 10:
+                    # Use historical win rate if we have enough data
+                    hist_wr = get_wallet_win_rate_historical(address)
+                    if hist_wr and hist_wr.get("total_round_trips", 0) > 5:
+                        wallet.win_rate = hist_wr["estimated_win_rate"]
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
         return wallet
 
     # ------------------------------------------------------------------

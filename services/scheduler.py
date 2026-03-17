@@ -205,6 +205,18 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info("Scheduled: health_watchdog every 30min")
 
+            # Blockchain indexer (incremental, default every 6h, disabled by default)
+            bi_cfg = sched_cfg.get("blockchain_indexer", {})
+            if bi_cfg.get("enabled", False):
+                bi_hours = bi_cfg.get("interval_hours", 6)
+                bi_max_chunks = bi_cfg.get("max_chunks_per_run", 500)
+                _scheduler.add_job(
+                    _job_blockchain_indexer, "interval", hours=bi_hours,
+                    id="blockchain_indexer", replace_existing=True,
+                    args=[bi_max_chunks],
+                )
+                logger.info(f"Scheduled: blockchain_indexer every {bi_hours}h")
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
@@ -1705,3 +1717,27 @@ def _job_health_watchdog(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Health watchdog failed: {e}")
+
+
+def _job_blockchain_indexer(max_chunks: int = 500):
+    """Incremental blockchain trade indexer — fetches new Polymarket trades from Polygon."""
+    try:
+        from services.blockchain_indexer import run_incremental, get_data_stats
+
+        stats_before = get_data_stats()
+        logger.info(
+            f"Blockchain indexer starting (cursor: {stats_before.get('cursor_block')}, "
+            f"files: {stats_before.get('total_files')})"
+        )
+
+        result = run_incremental(max_chunks=max_chunks)
+
+        if result.get("ok"):
+            trades = result.get("trades_fetched", 0)
+            blocks = result.get("blocks_processed", 0)
+            logger.info(f"Blockchain indexer done: {trades} trades, {blocks} blocks processed")
+        else:
+            logger.error(f"Blockchain indexer failed: {result.get('error')}")
+
+    except Exception as e:
+        logger.error(f"Blockchain indexer job failed: {e}")

@@ -69,6 +69,14 @@ def scan_smart_money_consensus(
 
         logger.info(f"Smart money consensus: scanning {len(wallets)} wallets")
 
+        # Check if historical blockchain data is available
+        has_historical = False
+        try:
+            from services.historical_analytics import _has_data, get_wallet_win_rate_historical
+            has_historical = _has_data()
+        except ImportError:
+            pass
+
         # Phase 2: Fetch positions for each wallet
         market_positions: dict[str, list[dict]] = {}
         for i, wallet in enumerate(wallets):
@@ -76,6 +84,16 @@ def scan_smart_money_consensus(
             if not positions:
                 time.sleep(0.15)
                 continue
+
+            # Enrich with historical win rate if available
+            win_rate = wallet.get("win_rate", 0)
+            if has_historical:
+                try:
+                    hist = get_wallet_win_rate_historical(wallet["address"])
+                    if hist and hist.get("total_round_trips", 0) > 5:
+                        win_rate = hist["estimated_win_rate"]
+                except Exception:
+                    pass
 
             for pos in positions:
                 size = float(pos.get("size", 0) or 0)
@@ -93,7 +111,7 @@ def scan_smart_money_consensus(
                     "wallet_address": wallet["address"],
                     "wallet_name": wallet.get("username", wallet["address"][:12]),
                     "wallet_pnl_7d": wallet.get("pnl_7d", 0),
-                    "wallet_win_rate": wallet.get("win_rate", 0),
+                    "wallet_win_rate": win_rate,
                     "outcome": pos.get("outcome", "Yes"),
                     "size": size,
                     "avg_price": float(pos.get("avgPrice", 0) or 0),

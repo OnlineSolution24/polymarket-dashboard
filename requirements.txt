@@ -32,5 +32,10 @@ httpx>=0.27.0
 # === Security ===
 bcrypt>=4.2.0
 
+# === Blockchain / Historical Analytics ===
+duckdb>=0.10.0
+web3>=6.0.0
+pyarrow>=14.0.0
+
 # === Utils ===
 joblib>=1.4.0
