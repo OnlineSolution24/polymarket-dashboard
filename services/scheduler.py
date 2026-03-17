@@ -1613,19 +1613,6 @@ def _job_arbitrage_scan(config: AppConfig):
         logger.error(f"Arbitrage scan failed: {e}")
 
 
-def _job_edge_sources(config):
-    """Run all external edge data sources."""
-    try:
-        from services.edge_sources import run_all_edge_sources
-        from config import load_platform_config
-
-        platform_cfg = load_platform_config()
-        summary = run_all_edge_sources(platform_cfg)
-        logger.info(f"Edge sources completed: {summary}")
-    except Exception as e:
-        logger.error(f"Edge sources scan failed: {e}")
-
-
 def _job_health_monitor(config):
     """Check all strategy heartbeats and alert on issues."""
     try:

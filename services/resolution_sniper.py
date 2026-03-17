@@ -693,7 +693,7 @@ def _fetch_live_scores() -> list:
                         "away_score": away.get("score", ""),
                         "status": game_status,
                         "sport": sport,
-                        "league": event.get("season", {}).get("type", {}).get("name", sport),
+                        "league": event.get("league", {}).get("abbreviation", sport),
                         "event_name": event.get("name", ""),
                         "date": event.get("date", ""),
                     }
