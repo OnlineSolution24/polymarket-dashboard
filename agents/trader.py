@@ -291,6 +291,13 @@ class TraderAgent(BaseAgent):
         if market and market.get("category") in blacklist:
             return False, f"Kategorie '{market['category']}' ist gesperrt"
 
+        # 5a. Keyword blacklist
+        keyword_blacklist = trading_cfg.get("keyword_blacklist", [])
+        question = str(payload.get("question", "") or payload.get("market_question", "")).lower()
+        for kw in keyword_blacklist:
+            if kw.lower() in question:
+                return False, f"Keyword '{kw}' ist gesperrt"
+
         # 5b. Re-buy cooldown: wait 7 days after closing a position in same market
         rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
         last_closed = engine.query_one(
