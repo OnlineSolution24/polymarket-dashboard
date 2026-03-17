@@ -20,6 +20,8 @@ from services.alpha_scanner_service import (
     add_copy_trade,
     remove_copy_trade,
     remove_all_copy_trades_for_wallet,
+    load_copytrading_config,
+    save_copytrading_config,
 )
 from services.data_api_client import DataAPIClient
 from components.status_cards import kpi_row
@@ -41,9 +43,9 @@ def render():
     if "alpha_scanning" not in st.session_state:
         st.session_state.alpha_scanning = False
 
-    # --- Tabs: Scanner + Watchlist + Copy Trades ---
-    tab_scan, tab_watchlist, tab_copytrades = st.tabs(
-        ["Scanner", "Watchlist", "Copy Trades"]
+    # --- Tabs ---
+    tab_scan, tab_watchlist, tab_copytrades, tab_settings = st.tabs(
+        ["Scanner", "Watchlist", "Copy Trades", "Einstellungen"]
     )
 
     with tab_scan:
@@ -54,6 +56,9 @@ def render():
 
     with tab_copytrades:
         _render_copy_trades()
+
+    with tab_settings:
+        _render_settings()
 
 
 def _render_scanner():
@@ -239,7 +244,7 @@ def _render_scanner():
         verified=verified_map.get(verified_opt, "any"),
     )
 
-    # Save preset if requested (after active_filter is built)
+    # Save preset if requested
     if save_preset_clicked:
         pname = st.session_state.get("alpha_new_preset_name", "").strip()
         if pname:
@@ -288,11 +293,13 @@ def _render_scanner():
     wl_addresses = {w["address"] for w in watchlist}
 
     rows = []
+    addresses = []
     for w in filtered:
         name = w.username or w.pseudonym or w.address[:12]
         if w.verified:
             name += " \u2713"
         rows.append({
+            "Favorit": w.address in wl_addresses,
             "Wallet": name,
             "Profil": f"https://polymarket.com/profile/{w.address}",
             "Alpha Score": w.alpha_score,
@@ -304,23 +311,26 @@ def _render_scanner():
             "Trades/Day": round(w.trades_per_day, 2),
             "Win Rate": round(w.win_rate, 1),
             "Volume": round(w.volume, 0),
-            "Alter (Tage)": w.wallet_age_days,
-            "Konsistenz": w.consistency_days,
-            "Favorit": "\u2b50" if w.address in wl_addresses else "",
-            "_address": w.address,
         })
+        addresses.append(w.address)
 
     df = pd.DataFrame(rows)
     df = df.sort_values(sort_col, ascending=sort_asc).reset_index(drop=True)
-    df.index = df.index + 1
-    df.index.name = "Rank"
+    # Reorder addresses to match sorted df
+    sorted_addresses = [addresses[i] for i in df.index] if len(addresses) == len(df) else addresses
+    df.index = range(len(df))
 
-    # Display table
-    display_cols = [c for c in df.columns if not c.startswith("_")]
-    st.dataframe(
-        df[display_cols],
+    # Display editable table with Favorit checkbox
+    edited_df = st.data_editor(
+        df,
         use_container_width=True,
+        key="alpha_table_editor",
+        disabled=[c for c in df.columns if c != "Favorit"],
         column_config={
+            "Favorit": st.column_config.CheckboxColumn(
+                "Favorit", help="Klicke um Wallet als Favorit zu speichern",
+                default=False,
+            ),
             "Profil": st.column_config.LinkColumn("Profil", display_text="Öffnen"),
             "Alpha Score": st.column_config.ProgressColumn(
                 "Alpha Score", min_value=0, max_value=1, format="%.2f",
@@ -337,62 +347,36 @@ def _render_scanner():
         },
     )
 
-    # --- Quick Favorite: one-click add/remove per wallet ---
-    st.divider()
-    st.subheader("Favoriten verwalten")
+    # Detect checkbox changes and update watchlist
+    if edited_df is not None:
+        for idx in range(len(edited_df)):
+            if idx >= len(sorted_addresses):
+                break
+            addr = sorted_addresses[idx]
+            was_fav = addr in wl_addresses
+            is_fav_now = bool(edited_df.iloc[idx]["Favorit"])
 
-    # Build wallet list for display
-    wallet_list = []
-    for _, r in df.iterrows():
-        addr = r["_address"]
-        is_fav = addr in wl_addresses
-        wallet_list.append({
-            "name": r["Wallet"],
-            "address": addr,
-            "is_fav": is_fav,
-        })
-
-    # Show in a compact grid: 4 columns per row
-    cols_per_row = 4
-    for row_start in range(0, min(len(wallet_list), 20), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col_idx, winfo in enumerate(wallet_list[row_start:row_start + cols_per_row]):
-            with cols[col_idx]:
-                if winfo["is_fav"]:
-                    if st.button(
-                        f"\u2b50 {winfo['name'][:18]}",
-                        key=f"unfav_{winfo['address'][:10]}",
-                        use_container_width=True,
-                    ):
-                        remove_from_watchlist(winfo["address"])
-                        st.rerun()
-                else:
-                    if st.button(
-                        f"\u2606 {winfo['name'][:18]}",
-                        key=f"fav_{winfo['address'][:10]}",
-                        use_container_width=True,
-                    ):
-                        add_to_watchlist(winfo["address"], winfo["name"])
-                        st.rerun()
-
-    if len(wallet_list) > 20:
-        st.caption(f"... und {len(wallet_list) - 20} weitere Wallets")
+            if is_fav_now and not was_fav:
+                wallet_name = str(edited_df.iloc[idx]["Wallet"])
+                add_to_watchlist(addr, wallet_name)
+            elif not is_fav_now and was_fav:
+                remove_from_watchlist(addr)
 
     # --- Footer ---
     st.caption(
         f"{len(filtered)} Wallets | "
-        f"Klicke \u2606 um ein Wallet als Favorit zu speichern"
+        f"Klicke die Favorit-Checkbox um Wallets zur Watchlist hinzuzufügen"
     )
 
 
 def _render_watchlist():
-    """Watchlist tab with per-wallet market selection for copy trading."""
+    """Watchlist tab with per-wallet market selection and AI analysis."""
     watchlist = load_watchlist()
 
     if not watchlist:
         st.info(
             "Deine Watchlist ist leer. Scanne Wallets und markiere "
-            "interessante Trader als Favorit (\u2606)."
+            "interessante Trader als Favorit in der Tabelle."
         )
         return
 
@@ -406,7 +390,7 @@ def _render_watchlist():
 
         with st.container():
             # Header row
-            wc1, wc2, wc3 = st.columns([4, 2, 1])
+            wc1, wc2, wc3, wc4 = st.columns([3, 2, 2, 1])
             with wc1:
                 st.markdown(f"**{name}**")
                 note = entry.get("note", "")
@@ -418,13 +402,16 @@ def _render_watchlist():
                     f"https://polymarket.com/profile/{addr}",
                 )
             with wc3:
+                if st.button("AI Analyse", key=f"wl_ai_{i}", type="secondary"):
+                    _run_ai_analysis(addr, name)
+            with wc4:
                 if st.button("Entfernen", key=f"wl_rm_{i}"):
                     remove_from_watchlist(addr)
                     remove_all_copy_trades_for_wallet(addr)
                     st.rerun()
 
             # Expandable: show positions and select markets to copy
-            with st.expander(f"Positionen von {name} laden & copy traden"):
+            with st.expander(f"Positionen laden & einzelne Märkte copy traden"):
                 _render_wallet_positions(addr, name, copy_trades)
 
             st.divider()
@@ -435,14 +422,12 @@ def _render_wallet_positions(
 ):
     """Show a wallet's active positions and allow selecting individual markets."""
 
-    # Cache positions in session state to avoid re-fetching on every rerun
     cache_key = f"_wl_positions_{wallet_address[:10]}"
 
     if st.button("Positionen laden", key=f"load_pos_{wallet_address[:10]}"):
         client = DataAPIClient(timeout=20)
         try:
             positions = client.get_user_positions(wallet_address, limit=50)
-            # Keep only active positions (size > 0)
             active = [
                 p for p in positions
                 if float(p.get("size", 0) or 0) > 0
@@ -484,7 +469,7 @@ def _render_wallet_positions(
             pnl_color = "green" if cash_pnl >= 0 else "red"
             st.markdown(
                 f"**{title[:60]}** — {outcome}  \n"
-                f"Size: {size:.1f} | Avg: {avg_price:.2f} → {cur_price:.2f} | "
+                f"Size: {size:.1f} | Avg: {avg_price:.2f} \u2192 {cur_price:.2f} | "
                 f"PnL: :{pnl_color}[${cash_pnl:.2f}]"
             )
         with pc2:
@@ -517,13 +502,135 @@ def _render_wallet_positions(
                     st.rerun()
 
 
+def _run_ai_analysis(wallet_address: str, wallet_name: str):
+    """Run AI analysis on a wallet's positions using OpenRouter."""
+    import os
+
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    if not api_key:
+        st.error("OPENROUTER_API_KEY nicht konfiguriert.")
+        return
+
+    # Load positions
+    client = DataAPIClient(timeout=20)
+    try:
+        positions = client.get_user_positions(wallet_address, limit=50)
+        profile = client.get_user_profile(wallet_address)
+    finally:
+        client.close()
+
+    if not positions:
+        st.warning("Keine Positionen gefunden für dieses Wallet.")
+        return
+
+    # Build analysis prompt
+    active = [p for p in positions if float(p.get("size", 0) or 0) > 0]
+    closed = [p for p in positions if float(p.get("size", 0) or 0) == 0 and p.get("cashPnl")]
+
+    pos_summary = []
+    for p in active[:20]:
+        title = p.get("title", "?")
+        outcome = p.get("outcome", "?")
+        size = float(p.get("size", 0) or 0)
+        pnl = float(p.get("cashPnl", 0) or 0)
+        cur = float(p.get("curPrice", 0) or 0)
+        avg = float(p.get("avgPrice", 0) or 0)
+        pos_summary.append(
+            f"- {title} ({outcome}): Size {size:.1f}, Avg {avg:.2f}, Cur {cur:.2f}, PnL ${pnl:.2f}"
+        )
+
+    closed_summary = []
+    for p in closed[:10]:
+        title = p.get("title", "?")
+        pnl = float(p.get("cashPnl", 0) or 0)
+        closed_summary.append(f"- {title}: PnL ${pnl:.2f}")
+
+    total_pnl = sum(float(p.get("cashPnl", 0) or 0) for p in positions)
+    win_count = sum(1 for p in positions if float(p.get("cashPnl", 0) or 0) > 0)
+    loss_count = sum(1 for p in positions if float(p.get("cashPnl", 0) or 0) < 0)
+
+    prompt = f"""Analysiere dieses Polymarket-Trader-Profil und gib eine Empfehlung auf Deutsch.
+
+**Wallet:** {wallet_name} ({wallet_address[:16]}...)
+**Aktive Positionen:** {len(active)}
+**Geschlossene Positionen:** {len(closed)}
+**Gesamt PnL:** ${total_pnl:.2f}
+**Wins/Losses:** {win_count}/{loss_count}
+
+**Aktive Positionen (Top 20):**
+{chr(10).join(pos_summary) if pos_summary else "Keine"}
+
+**Letzte geschlossene Positionen:**
+{chr(10).join(closed_summary) if closed_summary else "Keine"}
+
+Bitte analysiere:
+1. **Trading-Stil**: Welche Märkte/Kategorien bevorzugt dieser Trader?
+2. **Stärken**: In welchen Bereichen performt er gut?
+3. **Schwächen**: Wo verliert er Geld?
+4. **Empfehlung**: Welche seiner AKTIVEN Positionen lohnen sich zum Copy Traden? Nenne konkrete Markt-Titel.
+5. **Warnung**: Welche Positionen sollte man NICHT kopieren und warum?
+6. **Gesamt-Bewertung**: Skala 1-10 — wie gut ist dieser Trader zum Copy Traden?
+
+Antworte strukturiert und präzise."""
+
+    with st.spinner(f"AI analysiert {wallet_name}..."):
+        try:
+            import httpx
+
+            resp = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "anthropic/claude-haiku-4-5-20251001",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1500,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            analysis = data["choices"][0]["message"]["content"]
+
+            st.subheader(f"AI Analyse: {wallet_name}")
+            st.markdown(analysis)
+
+            # Save to session state so it persists
+            st.session_state[f"_ai_analysis_{wallet_address[:10]}"] = analysis
+
+        except Exception as e:
+            st.error(f"AI Analyse fehlgeschlagen: {e}")
+
+    # Show cached analysis if available
+    cached = st.session_state.get(f"_ai_analysis_{wallet_address[:10]}")
+    if cached and not st.session_state.get("_ai_running"):
+        st.subheader(f"AI Analyse: {wallet_name}")
+        st.markdown(cached)
+
+
 def _render_copy_trades():
-    """Copy Trades tab — overview of all selected market positions."""
+    """Copy Trades tab — overview of all selected market positions + config."""
+    ct_config = load_copytrading_config()
     trades = load_copy_trades()
+
+    # Status banner
+    if ct_config.get("enabled"):
+        mode = ct_config.get("mode", "paper")
+        amount = ct_config.get("amount_per_trade", 1.0)
+        mode_label = "PAPER" if mode == "paper" else "LIVE"
+        st.success(
+            f"Copy Trading **{mode_label}** aktiv | "
+            f"${amount:.2f} pro Trade | "
+            f"Max {ct_config.get('max_daily_trades', 10)} Trades/Tag"
+        )
+    else:
+        st.warning("Copy Trading ist deaktiviert. Aktiviere es in den Einstellungen.")
 
     if not trades:
         st.info(
-            "Noch keine Copy Trades ausgewählt. Gehe zur Watchlist, "
+            "Noch keine Märkte ausgewählt. Gehe zur Watchlist, "
             "lade die Positionen eines Wallets und wähle einzelne Märkte aus."
         )
         return
@@ -561,3 +668,98 @@ def _render_copy_trades():
                     st.rerun()
 
         st.divider()
+
+
+def _render_settings():
+    """Copy Trading Einstellungen."""
+    st.subheader("Copy Trading Konfiguration")
+
+    config = load_copytrading_config()
+
+    # Enable/Disable
+    enabled = st.toggle(
+        "Copy Trading aktivieren",
+        value=config.get("enabled", False),
+        key="ct_enabled",
+    )
+
+    # Mode
+    mode = st.radio(
+        "Modus",
+        ["paper", "live"],
+        index=0 if config.get("mode", "paper") == "paper" else 1,
+        horizontal=True,
+        key="ct_mode",
+        help="Paper = simuliert Trades nur. Live = echte Trades mit echtem Geld!",
+    )
+
+    if mode == "live":
+        st.warning(
+            "ACHTUNG: Im Live-Modus werden echte Trades mit echtem Geld ausgeführt! "
+            "Stelle sicher, dass dein POLYMARKET_PRIVATE_KEY konfiguriert ist."
+        )
+
+    st.divider()
+
+    # Trade parameters
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        amount = st.slider(
+            "Betrag pro Trade ($)",
+            0.10, 50.0,
+            float(config.get("amount_per_trade", 1.0)),
+            step=0.10,
+            key="ct_amount",
+            help="Wie viel Dollar pro kopiertem Trade investiert wird",
+        )
+        max_daily_trades = st.slider(
+            "Max Trades pro Tag",
+            1, 50,
+            int(config.get("max_daily_trades", 10)),
+            key="ct_max_trades",
+        )
+    with cc2:
+        max_daily_amount = st.slider(
+            "Max Tagesbetrag ($)",
+            1.0, 200.0,
+            float(config.get("max_daily_amount", 20.0)),
+            step=1.0,
+            key="ct_max_amount",
+            help="Maximaler Gesamtbetrag pro Tag",
+        )
+        min_pos_size = st.slider(
+            "Min Position Size des Traders ($)",
+            0.1, 100.0,
+            float(config.get("min_position_size", 0.5)),
+            step=0.1,
+            key="ct_min_pos",
+            help="Nur kopieren wenn der Trader mindestens so viel investiert",
+        )
+
+    poll_interval = st.slider(
+        "Poll-Intervall (Minuten)",
+        1, 30,
+        int(config.get("poll_interval_minutes", 5)),
+        key="ct_poll",
+        help="Wie oft nach neuen Trades der beobachteten Wallets geschaut wird",
+    )
+
+    # Save button
+    if st.button("Einstellungen speichern", type="primary", key="ct_save"):
+        new_config = {
+            "enabled": enabled,
+            "mode": mode,
+            "amount_per_trade": amount,
+            "max_daily_trades": max_daily_trades,
+            "max_daily_amount": max_daily_amount,
+            "min_position_size": min_pos_size,
+            "poll_interval_minutes": poll_interval,
+        }
+        save_copytrading_config(new_config)
+        st.success("Einstellungen gespeichert!")
+        st.rerun()
+
+    # Current config summary
+    st.divider()
+    st.caption("Aktuelle Konfiguration:")
+    st.json(config)

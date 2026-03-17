@@ -14,6 +14,7 @@ from agents.analyst import AnalystAgent
 from agents.risk_manager import RiskManagerAgent
 from agents.trader import TraderAgent
 from agents.backtester_agent import BacktesterAgent
+from agents.copy_trader import CopyTraderAgent
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ ROLE_MAP: dict[str, type[BaseAgent]] = {
     "risk_manager": RiskManagerAgent,
     "trader": TraderAgent,
     "backtester": BacktesterAgent,
+    "copy_trader": CopyTraderAgent,
 }
 
 

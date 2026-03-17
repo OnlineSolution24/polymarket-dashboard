@@ -26,6 +26,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 PRESETS_FILE = os.path.join(DATA_DIR, "alpha_scanner_presets.json")
 WATCHLIST_FILE = os.path.join(DATA_DIR, "alpha_scanner_watchlist.json")
 COPYTRADES_FILE = os.path.join(DATA_DIR, "alpha_scanner_copytrades.json")
+COPYTRADING_CONFIG_FILE = os.path.join(DATA_DIR, "alpha_scanner_copytrading_config.json")
 
 
 # -----------------------------------------------------------------------
@@ -269,6 +270,44 @@ def remove_all_copy_trades_for_wallet(wallet_address: str) -> None:
     ct = load_copy_trades()
     ct = [t for t in ct if t["wallet_address"] != wallet_address]
     save_copy_trades(ct)
+
+
+# -----------------------------------------------------------------------
+# Copy-trading configuration
+# -----------------------------------------------------------------------
+
+DEFAULT_COPYTRADING_CONFIG = {
+    "enabled": False,
+    "amount_per_trade": 1.0,
+    "max_daily_trades": 10,
+    "max_daily_amount": 20.0,
+    "poll_interval_minutes": 5,
+    "mode": "paper",  # "paper" or "live"
+    "min_position_size": 0.5,  # only copy if wallet position >= $X
+}
+
+
+def load_copytrading_config() -> dict:
+    """Load copy-trading configuration."""
+    config = dict(DEFAULT_COPYTRADING_CONFIG)
+    try:
+        if os.path.exists(COPYTRADING_CONFIG_FILE):
+            with open(COPYTRADING_CONFIG_FILE) as f:
+                saved = json.load(f)
+            config.update(saved)
+    except Exception as e:
+        logger.warning(f"Failed to load copytrading config: {e}")
+    return config
+
+
+def save_copytrading_config(config: dict) -> None:
+    """Save copy-trading configuration."""
+    try:
+        os.makedirs(os.path.dirname(COPYTRADING_CONFIG_FILE), exist_ok=True)
+        with open(COPYTRADING_CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save copytrading config: {e}")
 
 
 # -----------------------------------------------------------------------
