@@ -399,6 +399,27 @@ class TraderAgent(BaseAgent):
                 self.log("error", f"Kein CLOB Token-ID für {market_id[:30]} (side={side})")
                 return False
 
+            # SAFETY CHECK: Verify position does NOT already exist on Polymarket
+            try:
+                import os, httpx
+                funder = os.getenv("POLYMARKET_FUNDER", "")
+                if funder:
+                    resp = httpx.get(
+                        f"https://data-api.polymarket.com/positions?user={funder}",
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        for pos in resp.json():
+                            pos_token = pos.get("asset", "")
+                            pos_size = float(pos.get("size") or 0)
+                            if pos_token == token_id and pos_size > 0.01:
+                                self._finalize_trade(trade_id, "failed", payload,
+                                    error=f"Position already exists on-chain ({pos_size:.2f} shares)")
+                                self.log("warn", f"SAFETY: Position existiert bereits on-chain für {market_id[:30]} ({pos_size:.2f} shares)")
+                                return False
+            except Exception as e:
+                self.log("debug", f"On-chain position check failed (proceeding): {e}")
+
             # Pre-check: verify orderbook exists (with retry)
             book = None
             for _ob_attempt in range(2):

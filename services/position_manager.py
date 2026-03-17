@@ -392,10 +392,23 @@ class PositionManager:
             result = self.service.place_sell_order(pos["token_id"], sell_amount)
 
             if result.get("ok"):
-                sold = True
-                actual_pnl = (best_bid - entry_price) * shares if entry_price > 0 else 0
-                self._close_trade_in_db(trade_id, signal_type, actual_pnl)
-                self._send_exit_alert(pos, best_bid, signal, sold=True)
+                # SAFETY CHECK: Verify position is actually gone from Polymarket
+                import time as _time
+                _time.sleep(2)  # Wait for on-chain settlement
+                still_there = self._verify_position_gone(pos["token_id"])
+                if still_there:
+                    logger.warning(
+                        f"SAFETY: Sell reported OK but position still on-chain! "
+                        f"{pos['condition_id'][:30]} token={pos['token_id'][:20]}... "
+                        f"shares_remaining={still_there:.2f}. NOT closing DB."
+                    )
+                    self._sell_cooldowns[pos["token_id"]] = datetime.utcnow()
+                    sold = False
+                else:
+                    sold = True
+                    actual_pnl = (best_bid - entry_price) * shares if entry_price > 0 else 0
+                    self._close_trade_in_db(trade_id, signal_type, actual_pnl)
+                    self._send_exit_alert(pos, best_bid, signal, sold=True)
             else:
                 # Sell FAILED - do NOT close DB, do NOT alert. Retry next cycle.
                 error_msg = result.get("error", "?")
@@ -505,6 +518,27 @@ class PositionManager:
                         logger.info(f"Closed trade {trade['id']} - position gone from chain (sold externally)")
                 except:
                     pass
+
+    # -- Helper: verify position gone from chain -----------------------------
+
+    def _verify_position_gone(self, token_id: str) -> float:
+        """Check if position still exists on-chain after sell. Returns remaining shares or 0."""
+        try:
+            import httpx
+            resp = httpx.get(
+                f"https://data-api.polymarket.com/positions?user={self.funder}",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                for pos in resp.json():
+                    if pos.get("asset") == token_id:
+                        remaining = float(pos.get("size") or 0)
+                        if remaining > 0.01:
+                            return remaining
+            return 0.0
+        except Exception as e:
+            logger.debug(f"Position verification failed: {e}")
+            return 0.0  # Can't verify = assume gone (fallback)
 
     # -- Helper: close trade in DB ------------------------------------------
 
