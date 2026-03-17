@@ -11,6 +11,7 @@ Every 2 minutes:
 """
 
 import os
+import math
 import logging
 import html
 import time
@@ -384,7 +385,7 @@ class PositionManager:
 
         # Try to sell
         try:
-            sell_amount = round(shares, 2)
+            sell_amount = math.floor(shares * 100) / 100  # Floor to avoid exceeding balance
             if sell_amount < 0.01:
                 self._close_trade_in_db(trade_id, signal_type, pnl_usd)
                 return True
