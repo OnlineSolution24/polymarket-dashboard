@@ -169,6 +169,16 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info("Scheduled: weather_edge_analysis every 30min")
 
+            # Smart Money Consensus (every 30 min)
+            smc_cfg = sched_cfg.get("smart_money_consensus", {})
+            if smc_cfg.get("enabled", True):
+                smc_interval = smc_cfg.get("interval_minutes", 30)
+                _scheduler.add_job(
+                    _job_smart_money_consensus, "interval", minutes=smc_interval,
+                    id="smart_money_consensus", replace_existing=True, args=[config],
+                )
+                logger.info(f"Scheduled: smart_money_consensus every {smc_interval}min")
+
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
                 _job_cleanup_cache, "interval", hours=6,
@@ -888,6 +898,154 @@ def _job_weather_edge_analysis(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Weather edge analysis failed: {e}")
+
+
+def _job_smart_money_consensus(config: AppConfig):
+    """Scan top wallets for position consensus and create trade suggestions.
+
+    Finds markets where 3+ top-performing wallets agree on the same side.
+    Creates trade suggestions based on consensus strength.
+    """
+    try:
+        from db import engine
+        from services.smart_money_consensus import scan_smart_money_consensus
+        import json as _json
+
+        platform_cfg = load_platform_config()
+        trading_cfg = platform_cfg.get("trading", {})
+        mode = trading_cfg.get("mode", "paper")
+        min_edge = trading_cfg.get("smart_money_min_edge", 0.08)
+
+        smc_cfg = platform_cfg.get("scheduler", {}).get("smart_money_consensus", {})
+        max_wallets = smc_cfg.get("max_wallets", 30)
+        min_consensus = smc_cfg.get("min_consensus_wallets", 3)
+
+        signals = scan_smart_money_consensus(
+            max_wallets=max_wallets,
+            min_consensus=min_consensus,
+        )
+
+        if not signals:
+            logger.debug("Smart money consensus: no signals found")
+            return
+
+        # Update calculated_edge in DB for markets with consensus
+        for s in signals:
+            engine.execute(
+                "UPDATE markets SET calculated_edge = ?, last_updated = datetime('now') WHERE id = ?",
+                (s.edge, s.market_id),
+            )
+
+        # Create trade suggestions for strong signals
+        suggestions_created = 0
+        for s in signals:
+            if s.abs_edge < min_edge:
+                continue
+
+            if s.consensus_score < 0.3:
+                continue
+
+            market_id = s.market_id
+
+            # Skip if we already have an open position
+            open_pos = engine.query_one(
+                "SELECT id FROM trades WHERE market_id = ? AND status IN ('executed', 'executing') "
+                "AND (result IS NULL OR result = 'open')",
+                (market_id,),
+            )
+            if open_pos:
+                continue
+
+            # Skip if recently closed (rebuy cooldown)
+            rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
+            last_closed = engine.query_one(
+                "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
+                "AND result IN ('cashout', 'win', 'loss', 'settled')",
+                (market_id,),
+            )
+            if last_closed and last_closed.get("last_close"):
+                try:
+                    closed_at = datetime.fromisoformat(last_closed["last_close"])
+                    if (datetime.utcnow() - closed_at).days < rebuy_cooldown_days:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Skip duplicate suggestions
+            existing = engine.query_one(
+                "SELECT id FROM suggestions WHERE type = 'trade' "
+                "AND status IN ('pending', 'auto_approved', 'executed') "
+                "AND payload LIKE ?",
+                (f'%"market_id": "{market_id}"%',),
+            )
+            if existing:
+                continue
+
+            # Calculate amount (scale by consensus strength)
+            capital = trading_cfg.get("capital_usd", 100.0)
+            limits = trading_cfg.get("limits", {})
+            max_pct = limits.get("max_position_pct", 5) / 100
+            max_amount = capital * max_pct
+
+            amount = min(round(s.consensus_score * capital * 0.3, 2), max_amount)
+            amount = max(amount, 1.0)
+
+            price = s.current_price if s.consensus_side == "YES" else (1 - s.current_price)
+            status = "auto_approved" if mode == "full-auto" else "pending"
+
+            wallets_str = ", ".join(s.wallet_names[:5])
+            payload = {
+                "market_id": market_id,
+                "market_question": s.market_title,
+                "side": s.consensus_side,
+                "amount_usd": amount,
+                "price": price,
+                "edge": s.edge,
+                "strategy_name": "Smart Money Consensus",
+                "consensus_wallets": s.wallet_count,
+                "consensus_score": s.consensus_score,
+                "avg_wallet_pnl": s.avg_wallet_pnl,
+            }
+
+            engine.execute(
+                """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (
+                    "smart-money-consensus",
+                    "trade",
+                    f"SMC: {s.consensus_side} '{s.market_title[:50]}'",
+                    f"Consensus: {s.wallet_count} Wallets ({wallets_str}) | "
+                    f"Score: {s.consensus_score:.0%} | Edge: {s.edge:+.1%} | "
+                    f"Avg PnL: ${s.avg_wallet_pnl:.0f}",
+                    _json.dumps(payload),
+                    status,
+                ),
+            )
+            suggestions_created += 1
+
+        logger.info(
+            f"Smart money consensus: {len(signals)} signals, "
+            f"{suggestions_created} suggestions created (min_edge={min_edge:.0%})"
+        )
+
+        # Send Telegram alert for strong signals
+        if suggestions_created > 0:
+            try:
+                from services.telegram_alerts import get_alerts
+                alerts = get_alerts(config)
+                top = signals[0]
+                alerts.send(
+                    f"🧠 <b>Smart Money Consensus</b>\n\n"
+                    f"Top Signal: <b>{top.consensus_side}</b> auf '{top.market_title[:60]}'\n"
+                    f"Wallets: {top.wallet_count} | Score: {top.consensus_score:.0%}\n"
+                    f"Edge: {top.edge:+.1%} | Avg PnL: ${top.avg_wallet_pnl:.0f}\n\n"
+                    f"Insgesamt {suggestions_created} Vorschläge erstellt."
+                )
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Smart money consensus failed: {e}")
 
 
 def _job_cleanup_cache():

@@ -44,12 +44,15 @@ def render():
         st.session_state.alpha_scanning = False
 
     # --- Tabs ---
-    tab_scan, tab_watchlist, tab_copytrades, tab_settings = st.tabs(
-        ["Scanner", "Watchlist", "Copy Trades", "Einstellungen"]
+    tab_scan, tab_consensus, tab_watchlist, tab_copytrades, tab_settings = st.tabs(
+        ["Scanner", "Consensus", "Watchlist", "Copy Trades", "Einstellungen"]
     )
 
     with tab_scan:
         _render_scanner()
+
+    with tab_consensus:
+        _render_consensus()
 
     with tab_watchlist:
         _render_watchlist()
@@ -366,6 +369,128 @@ def _render_scanner():
     st.caption(
         f"{len(filtered)} Wallets | "
         f"Klicke die Favorit-Checkbox um Wallets zur Watchlist hinzuzufügen"
+    )
+
+
+def _render_consensus():
+    """Smart Money Consensus tab — shows markets where top wallets agree."""
+
+    st.subheader("Smart Money Consensus")
+    st.caption(
+        "Findet Märkte, in denen mehrere Top-Trader die gleiche Position halten. "
+        "Je mehr profitable Wallets sich einig sind, desto stärker das Signal."
+    )
+
+    # Settings
+    cc1, cc2, cc3 = st.columns([1, 1, 1])
+    with cc1:
+        max_wallets = st.slider("Top Wallets scannen", 10, 80, 30, step=10, key="smc_wallets")
+    with cc2:
+        min_consensus = st.slider("Min Wallets für Consensus", 2, 10, 3, key="smc_min")
+    with cc3:
+        scan_btn = st.button("Consensus scannen", type="primary", key="smc_scan")
+
+    if scan_btn:
+        from services.smart_money_consensus import scan_smart_money_consensus
+
+        progress = st.progress(0)
+        status = st.empty()
+        status.text("Scanne Top-Wallets und deren Positionen...")
+        progress.progress(10)
+
+        try:
+            signals = scan_smart_money_consensus(
+                max_wallets=max_wallets,
+                min_consensus=min_consensus,
+            )
+            st.session_state["_smc_signals"] = signals
+            progress.progress(100)
+            status.text(f"Fertig! {len(signals)} Consensus-Signals gefunden.")
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+            return
+        finally:
+            progress.empty()
+            status.empty()
+
+        st.rerun()
+
+    # Show cached results
+    signals = st.session_state.get("_smc_signals")
+    if not signals:
+        st.info(
+            "Klicke 'Consensus scannen' um die Positionen der Top-Wallets zu aggregieren "
+            "und Märkte mit starkem Consensus zu finden."
+        )
+        return
+
+    # KPIs
+    strong = [s for s in signals if s.consensus_score >= 0.4]
+    kpi_row([
+        {"label": "Consensus Signals", "value": len(signals)},
+        {"label": "Starke Signals (>40%)", "value": len(strong)},
+        {"label": "Bestes Signal", "value": f"{signals[0].consensus_score:.0%}" if signals else "—"},
+        {"label": "Max Wallets", "value": signals[0].wallet_count if signals else 0},
+    ])
+
+    st.divider()
+
+    # Signals table
+    rows = []
+    for s in signals:
+        rows.append({
+            "Markt": s.market_title[:70] if s.market_title else s.market_id[:20],
+            "Seite": s.consensus_side,
+            "Wallets": s.wallet_count,
+            "Consensus": s.consensus_score,
+            "Edge": round(s.edge * 100, 1),
+            "Avg PnL": round(s.avg_wallet_pnl, 0),
+            "Position $": round(s.total_position_size, 0),
+            "Avg Entry": round(s.avg_entry_price, 3),
+            "Aktuell": round(s.current_price, 3),
+            "Trader": ", ".join(s.wallet_names[:3]),
+        })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            column_config={
+                "Consensus": st.column_config.ProgressColumn(
+                    "Consensus", min_value=0, max_value=1, format="%.0%%",
+                ),
+                "Edge": st.column_config.NumberColumn("Edge %", format="%+.1f%%"),
+                "Avg PnL": st.column_config.NumberColumn("Avg PnL", format="$%.0f"),
+                "Position $": st.column_config.NumberColumn("Pos. $", format="$%.0f"),
+            },
+        )
+
+    # Detail view for top signals
+    if signals:
+        st.divider()
+        st.subheader("Top Signals im Detail")
+
+        for i, s in enumerate(signals[:5]):
+            with st.expander(
+                f"{'🟢' if s.edge > 0 else '🔴'} {s.consensus_side} — "
+                f"{s.market_title[:60]} ({s.wallet_count} Wallets, {s.consensus_score:.0%})"
+            ):
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    st.metric("Consensus Score", f"{s.consensus_score:.0%}")
+                    st.metric("Edge", f"{s.edge:+.1%}")
+                    st.metric("Wallets", f"{s.wallet_count}/{s.total_wallets_checked}")
+                with dc2:
+                    st.metric("Avg Wallet PnL (7d)", f"${s.avg_wallet_pnl:.0f}")
+                    st.metric("Gesamt Position", f"${s.total_position_size:.0f}")
+                    st.metric("Avg Entry → Aktuell", f"{s.avg_entry_price:.3f} → {s.current_price:.3f}")
+
+                st.caption(f"Trader: {', '.join(s.wallet_names)}")
+
+    st.caption(
+        "Der Consensus-Scanner läuft automatisch alle 30 Minuten im Hintergrund. "
+        "Starke Signals werden als Trade-Vorschläge erstellt."
     )
 
 
