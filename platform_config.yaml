@@ -144,7 +144,7 @@ scheduler:
     enabled: true
     interval_hours: 24
 strategy:
-  max_active_strategies: 10
+  max_active_strategies: 20
   min_confidence_score: 0.5
   retire_after_trades: 50
   retire_on_drawdown_pct: 15
