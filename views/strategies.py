@@ -289,7 +289,7 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
                 fixed_amount = st.number_input(
                     "Fester Betrag pro Trade ($)",
                     value=float(trade_params.get("fixed_amount_usd", 5.0)),
-                    min_value=0.10, max_value=500.0, step=0.50,
+                    min_value=0.01, max_value=500.0, step=0.50,
                     key=f"tp_fixed_{sid}",
                     help="Exakter Dollar-Betrag der pro Trade eingesetzt wird",
                 )
