@@ -34,8 +34,36 @@ SCAN_DEPTH_MAP = {
 }
 
 
+def _render_blockchain_status():
+    """Show blockchain data availability indicator."""
+    try:
+        from services.historical_analytics import get_data_summary
+        summary = get_data_summary()
+        if summary.get("available"):
+            trades = summary.get("total_trades", 0)
+            makers = summary.get("unique_makers", 0)
+            takers = summary.get("unique_takers", 0)
+            st.success(
+                f"Blockchain-Daten aktiv: {trades:,} Trades | "
+                f"{makers:,} Maker | {takers:,} Taker — "
+                f"Historische Daten werden fuer Scoring & Backtesting genutzt"
+            )
+        else:
+            st.info(
+                "Blockchain-Daten nicht verfuegbar — Scanner nutzt API-Daten (7 Tage). "
+                "Aktiviere den Blockchain Indexer in platform_config.yaml fuer tiefere Analyse."
+            )
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+
 def render():
     st.header("Alpha Scanner")
+
+    # --- Blockchain data status ---
+    _render_blockchain_status()
 
     # --- Session state init ---
     if "alpha_scan_result" not in st.session_state:

@@ -1,6 +1,7 @@
 """
 Historical data loader for backtesting.
 Loads from DB trades, generates synthetic data for simulation,
+loads from blockchain Parquet files via DuckDB,
 or fetches from Polymarket API historical endpoints.
 """
 
@@ -90,6 +91,155 @@ def generate_synthetic_trades(
         })
 
     return pd.DataFrame(trades)
+
+
+def load_blockchain_trades(
+    wallet_address: str | None = None,
+    limit: int = 10000,
+) -> pd.DataFrame:
+    """
+    Load historical trades from blockchain Parquet data via DuckDB.
+
+    Returns a DataFrame compatible with the backtesting simulator:
+    columns: executed_at, pnl, amount_usd, result, price, side, market_id
+
+    Args:
+        wallet_address: If set, only load trades for this wallet.
+        limit: Max trades to load.
+
+    Falls back to empty DataFrame if blockchain data unavailable.
+    """
+    try:
+        from services.historical_analytics import _has_data, _get_duckdb, _trades_glob
+
+        if not _has_data():
+            return pd.DataFrame()
+
+        duckdb = _get_duckdb()
+        if not duckdb:
+            return pd.DataFrame()
+
+        where = ""
+        if wallet_address:
+            where = f"WHERE LOWER(maker) = LOWER('{wallet_address}') OR LOWER(taker) = LOWER('{wallet_address}')"
+
+        df = duckdb.sql(f"""
+            SELECT
+                block_number,
+                transaction_hash,
+                maker,
+                taker,
+                maker_asset_id,
+                taker_asset_id,
+                maker_amount,
+                taker_amount,
+                fee
+            FROM read_parquet('{_trades_glob()}')
+            {where}
+            ORDER BY block_number
+            LIMIT {limit}
+        """).fetchdf()
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Transform to backtesting format
+        trades = []
+        for _, row in df.iterrows():
+            maker_asset = str(row["maker_asset_id"])
+            taker_asset = str(row["taker_asset_id"])
+            maker_amt = int(row["maker_amount"])
+            taker_amt = int(row["taker_amount"])
+            fee = int(row["fee"])
+
+            # Determine side: maker_asset_id = '0' means maker pays USDC (BUY)
+            is_buy = maker_asset == "0"
+
+            if is_buy:
+                amount_usdc = maker_amt / 1e6
+                tokens = taker_amt / 1e6
+                price = (maker_amt / taker_amt) if taker_amt > 0 else 0
+                market_id = taker_asset
+            else:
+                amount_usdc = taker_amt / 1e6
+                tokens = maker_amt / 1e6
+                price = (taker_amt / maker_amt) if maker_amt > 0 else 0
+                market_id = maker_asset
+
+            fee_usdc = fee / 1e6
+
+            trades.append({
+                "market_id": market_id,
+                "side": "YES" if is_buy else "NO",
+                "amount_usd": round(amount_usdc, 4),
+                "price": round(min(price, 1.0), 6),
+                "fee_usd": round(fee_usdc, 4),
+                "block_number": row["block_number"],
+                "transaction_hash": row["transaction_hash"],
+            })
+
+        result = pd.DataFrame(trades)
+
+        # For backtesting: compute PnL from round trips (buy→sell pairs per market)
+        result = _compute_round_trip_pnl(result)
+
+        return result
+
+    except ImportError:
+        return pd.DataFrame()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error loading blockchain trades: {e}")
+        return pd.DataFrame()
+
+
+def _compute_round_trip_pnl(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute PnL from buy/sell round trips per market_id.
+
+    Groups trades by market_id, pairs buys with sells, and calculates
+    PnL as: sell_proceeds - buy_cost - fees.
+
+    Returns DataFrame with: executed_at, pnl, amount_usd, result, price, side, market_id
+    """
+    if df.empty or "market_id" not in df.columns:
+        return pd.DataFrame()
+
+    completed_trades = []
+
+    for market_id, group in df.groupby("market_id"):
+        buys = group[group["side"] == "YES"].to_dict("records")
+        sells = group[group["side"] == "NO"].to_dict("records")
+
+        # Match buys with sells
+        for i, buy in enumerate(buys):
+            if i >= len(sells):
+                break
+
+            sell = sells[i]
+            buy_cost = buy["amount_usd"]
+            sell_proceeds = sell["amount_usd"]
+            fees = buy.get("fee_usd", 0) + sell.get("fee_usd", 0)
+            pnl = sell_proceeds - buy_cost - fees
+
+            completed_trades.append({
+                "market_id": str(market_id),
+                "side": "YES",
+                "amount_usd": round(buy_cost, 2),
+                "price": buy["price"],
+                "pnl": round(pnl, 2),
+                "result": "win" if pnl > 0 else "loss",
+                "executed_at": datetime.utcnow().isoformat(),  # placeholder
+                "block_number": sell["block_number"],
+            })
+
+    if not completed_trades:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(completed_trades)
+    result["executed_at"] = pd.to_datetime(result["executed_at"])
+    result.sort_values("block_number", inplace=True)
+    return result
 
 
 def generate_price_series(

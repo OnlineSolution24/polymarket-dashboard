@@ -544,19 +544,41 @@ class AlphaScannerService:
             wallet.consistency_days = len(trade_days)
 
         # Historical blockchain data enrichment (if available)
+        # When blockchain data exists, it's far more accurate than 7-day API data:
+        # - Full trade history (months/years vs 7 days)
+        # - Exact entry/exit prices with fees
+        # - True win rate from actual round-trip trades
         try:
             from services.historical_analytics import (
                 get_wallet_pnl_estimate,
                 get_wallet_win_rate_historical,
+                get_wallet_trade_count,
                 _has_data,
             )
             if _has_data():
                 hist_pnl = get_wallet_pnl_estimate(address)
                 if hist_pnl and hist_pnl.get("total_trades", 0) > 10:
-                    # Use historical win rate if we have enough data
+                    # Override volume with historical total (more accurate)
+                    hist_vol = hist_pnl.get("total_bought_usdc", 0)
+                    if hist_vol > wallet.volume:
+                        wallet.volume = hist_vol
+
+                    # Override PnL with net flow (covers full history)
+                    net_flow = hist_pnl.get("net_flow_usdc", 0)
+                    if abs(net_flow) > abs(wallet.pnl_30d):
+                        wallet.pnl_30d = net_flow
+
+                    # Historical win rate (much more data points)
                     hist_wr = get_wallet_win_rate_historical(address)
                     if hist_wr and hist_wr.get("total_round_trips", 0) > 5:
                         wallet.win_rate = hist_wr["estimated_win_rate"]
+
+                    # Trade count for trades_per_day (based on all history)
+                    total_trades = hist_pnl.get("total_trades", 0)
+                    if total_trades > 0 and wallet.wallet_age_days > 0:
+                        wallet.trades_per_day = round(
+                            total_trades / max(wallet.wallet_age_days, 1), 2
+                        )
         except ImportError:
             pass
         except Exception:

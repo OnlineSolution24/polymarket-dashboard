@@ -41,9 +41,19 @@ def run_strategy_backtest(strategy_id: str) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {"ok": False, "error": "Invalid strategy definition JSON"}
 
-    # 2. Load historical data
+    # 2. Load historical data (DB trades + blockchain trades if available)
     trades_df = _load_historical_trades()
     snapshots_df = _load_market_snapshots()
+
+    # Try to augment with blockchain Parquet data for much deeper history
+    try:
+        from backtesting.data_loader import load_blockchain_trades
+        bc_trades = load_blockchain_trades(limit=20000)
+        if not bc_trades.empty and "pnl" in bc_trades.columns:
+            trades_df = _merge_trade_sources(trades_df, bc_trades)
+            logger.info(f"Backtest: merged {len(bc_trades)} blockchain trades, total={len(trades_df)}")
+    except Exception:
+        pass
 
     if trades_df.empty or len(trades_df) < 10:
         # Generate synthetic data for testing when real data is sparse
@@ -257,6 +267,29 @@ def get_pattern_analysis() -> dict:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _merge_trade_sources(db_trades: pd.DataFrame, bc_trades: pd.DataFrame) -> pd.DataFrame:
+    """Merge DB trades with blockchain trades, deduplicating by market_id."""
+    if db_trades.empty:
+        return bc_trades
+    if bc_trades.empty:
+        return db_trades
+
+    # Ensure both have executed_at as datetime
+    for df in [db_trades, bc_trades]:
+        if "executed_at" in df.columns:
+            df["executed_at"] = pd.to_datetime(df["executed_at"], errors="coerce")
+
+    # Ensure required columns exist in blockchain trades
+    for col in ["amount_usd", "pnl", "result"]:
+        if col not in bc_trades.columns:
+            return db_trades
+
+    # Concat and sort by time
+    combined = pd.concat([db_trades, bc_trades], ignore_index=True)
+    combined.sort_values("executed_at", inplace=True, na_position="last")
+    return combined
+
 
 def _load_historical_trades() -> pd.DataFrame:
     """Load trade history as DataFrame."""
