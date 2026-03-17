@@ -270,22 +270,43 @@ class PolymarketService:
     # Market Resolution (Settlement)
     # ------------------------------------------------------------------
 
-    def get_market_resolution(self, condition_id: str) -> dict | None:
+    def get_market_resolution(self, condition_id: str, token_id: str = "") -> dict | None:
         """
         Check if a market has been resolved via Gamma API.
         Returns dict with 'resolved', 'winning_side', 'outcome_prices' or None on error.
+        Strategy: Query by clob_token_ids (token_id) first (reliable), fallback to condition_id.
         """
         try:
-            response = self._gamma.get("/markets", params={
-                "condition_id": condition_id,
-                "limit": 1,
-            })
-            response.raise_for_status()
-            results = response.json()
-            if not results:
-                return None
+            market = None
 
-            market = results[0] if isinstance(results, list) else results
+            # Strategy 1: Query by token_id (most reliable)
+            if token_id:
+                response = self._gamma.get("/markets", params={
+                    "clob_token_ids": token_id,
+                    "limit": 1,
+                })
+                response.raise_for_status()
+                results = response.json()
+                if results:
+                    market = results[0] if isinstance(results, list) else results
+                    logger.debug(f"Gamma resolution: found market by token_id")
+
+            # Strategy 2: Fallback to condition_id
+            if not market:
+                response = self._gamma.get("/markets", params={
+                    "condition_id": condition_id,
+                    "limit": 1,
+                })
+                response.raise_for_status()
+                results = response.json()
+                if not results:
+                    return None
+                market = results[0] if isinstance(results, list) else results
+                # Verify the match is correct (condition_id should match)
+                gamma_cid = market.get("conditionId", "")
+                if gamma_cid and gamma_cid.lower() != condition_id.lower():
+                    logger.warning(f"Gamma condition_id mismatch: asked={condition_id[:20]}... got={gamma_cid[:20]}...")
+                    return None
             closed = market.get("closed", False)
             resolution_status = market.get("umaResolutionStatus", "")
 
@@ -335,7 +356,10 @@ class PolymarketService:
         try:
             return self._public_client.get_order_book(token_id)
         except Exception as e:
-            logger.error(f"Error fetching order book: {e}")
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.debug(f"No orderbook for token (404): {e}")
+            else:
+                logger.warning(f"Error fetching order book: {e}")
             return {"bids": [], "asks": []}
 
     def get_order_book_analysis(self, token_id: str) -> dict:
@@ -406,8 +430,9 @@ class PolymarketService:
                 side=BUY,
             )
             order = self._auth_client.create_market_order(order_args)
-            result = self._auth_client.post_order(order)
-            logger.info(f"Order placed: BUY ${amount} on token {token_id[:20]}... (side={side})")
+            from py_clob_client.clob_types import OrderType
+            result = self._auth_client.post_order(order, orderType=OrderType.FOK)
+            logger.info(f"Order placed: BUY ${amount} on token {token_id[:20]}... (side={side}), response: {str(result)[:200]}")
             return {"ok": True, "result": result}
 
         except Exception as e:
@@ -434,7 +459,8 @@ class PolymarketService:
                 side=SELL,
             )
             order = self._auth_client.create_market_order(order_args)
-            result = self._auth_client.post_order(order)
+            from py_clob_client.clob_types import OrderType
+            result = self._auth_client.post_order(order, orderType=OrderType.FOK)
             logger.info(f"Sell order response: {result}")
 
             # Check if order was actually matched/filled

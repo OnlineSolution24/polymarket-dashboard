@@ -14,6 +14,24 @@ from config import load_platform_config, AppConfig
 
 logger = logging.getLogger(__name__)
 
+
+# --- Market Blocklist (spam prevention) ---
+_MARKET_BLOCKLIST_KEYWORDS = [
+    "leganes", "leganés",
+    "wichita state shockers",
+]
+
+def _is_market_blocklisted(question: str) -> bool:
+    """Check if a market question matches any blocklisted keyword."""
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in _MARKET_BLOCKLIST_KEYWORDS)
+
+
+# Lazy import to avoid circular deps
+def _preflight(market_id, side="YES", edge=0, amount=0):
+    from services.suggestion_preflight import suggestion_preflight_check
+    return suggestion_preflight_check(market_id, side, edge, amount)
+
 _scheduler = None
 _lock = threading.Lock()
 
@@ -39,6 +57,7 @@ def start_scheduler(config: AppConfig) -> None:
                 _scheduler.add_job(
                     _job_refresh_markets, "interval", minutes=interval,
                     id="market_refresh", replace_existing=True, args=[config],
+                    next_run_time=datetime.now(),
                 )
                 logger.info(f"Scheduled: market_refresh every {interval}min")
 
@@ -47,6 +66,7 @@ def start_scheduler(config: AppConfig) -> None:
             _scheduler.add_job(
                 _job_whale_signals, "interval", minutes=whale_interval,
                 id="whale_signals", replace_existing=True, args=[config],
+                next_run_time=datetime.now(),
             )
             logger.info(f"Scheduled: whale_signals every {whale_interval}min")
 
@@ -73,6 +93,7 @@ def start_scheduler(config: AppConfig) -> None:
                 _scheduler.add_job(
                     _job_run_agent_cycles, "interval", minutes=interval,
                     id="agent_cycles", replace_existing=True, args=[config],
+                    next_run_time=datetime.now(),
                 )
                 logger.info(f"Scheduled: agent_cycles every {interval}min")
 
@@ -84,12 +105,14 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info(f"Scheduled: chief_analysis daily at {chief_hour}:00 UTC")
 
-            # Analyst cycle (every 4 hours = 6x/day)
-            _scheduler.add_job(
-                _job_run_analyst_cycle, "interval", hours=4,
-                id="analyst_cycle", replace_existing=True, args=[config],
-            )
-            logger.info("Scheduled: analyst_cycle every 4 hours (6x/day)")
+            # Analyst cycle: 3x daily at strategic times (EU pre-open, US pre-open, evening review)
+            for analyst_hour in [6, 13, 21]:
+                _scheduler.add_job(
+                    _job_run_analyst_cycle, "cron",
+                    hour=analyst_hour, minute=0,
+                    id=f"analyst_cycle_{analyst_hour}", replace_existing=True, args=[config],
+                )
+            logger.info("Scheduled: analyst_cycle at 06:00, 13:00, 21:00 UTC")
 
             # ML retraining
             if sched_cfg.get("ml_retrain", {}).get("enabled", False):
@@ -144,6 +167,7 @@ def start_scheduler(config: AppConfig) -> None:
             _scheduler.add_job(
                 _job_run_trader_cycle, "interval", minutes=trader_interval,
                 id="trader_cycle", replace_existing=True, args=[config],
+                next_run_time=datetime.now(),
             )
             logger.info(f"Scheduled: trader_cycle every {trader_interval}min")
 
@@ -154,14 +178,11 @@ def start_scheduler(config: AppConfig) -> None:
                 id="pattern_scanner", replace_existing=True, args=[config],
             )
             logger.info(f"Scheduled: pattern_scanner daily at {pattern_hour}:00 UTC")
+            # Settlement: handled by PositionManager (no scheduler job)
 
-            # Settlement: check if markets resolved, update trade results
-            settlement_interval = sched_cfg.get("settlement", {}).get("interval_minutes", 30)
-            _scheduler.add_job(
-                _job_settle_trades, "interval", minutes=settlement_interval,
-                id="settlement", replace_existing=True, args=[config],
-            )
-            logger.info(f"Scheduled: settlement every {settlement_interval}min")
+
+
+
 
             # Portfolio snapshot (3x daily: 08:05, 14:00, 20:05 UTC)
             for hour in [8, 14, 20]:
@@ -179,11 +200,7 @@ def start_scheduler(config: AppConfig) -> None:
             logger.info("Scheduled: expire_old_suggestions every 1h")
 
             # Weather edge analysis (every 30 min)
-            _scheduler.add_job(
-                _job_weather_edge_analysis, "interval", minutes=30,
-                id="weather_edge", replace_existing=True, args=[config],
-            )
-            logger.info("Scheduled: weather_edge_analysis every 30min")
+            # DISABLED: weather_edge (zero results, unnecessary load)
 
             # Resolution Sniper: Weather (every 15 min - precise hourly forecasts)
             _scheduler.add_job(
@@ -207,11 +224,7 @@ def start_scheduler(config: AppConfig) -> None:
             logger.info("Scheduled: sport_sniper every 10min")
 
             # New Market Scanner (every 15 min)
-            _scheduler.add_job(
-                _job_new_market_scan, "interval", minutes=15,
-                id="new_market_scan", replace_existing=True, args=[config],
-            )
-            logger.info("Scheduled: new_market_scan every 15min")
+            # DISABLED: new_market_scan (zero results, unnecessary load)
 
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
@@ -226,10 +239,7 @@ def start_scheduler(config: AppConfig) -> None:
             )
 
             # Position sync with Polymarket wallet (2x daily)
-            _scheduler.add_job(
-                _job_sync_positions, "interval", hours=12,
-                id="position_sync", replace_existing=True, args=[config],
-            )
+            # Position sync job removed - handled by PositionManager
             logger.info("Scheduled: position_sync every 12h")
 
             # Arbitrage scanner (every 30 min)
@@ -238,6 +248,18 @@ def start_scheduler(config: AppConfig) -> None:
                 id="arbitrage_scan", replace_existing=True, args=[config],
             )
             logger.info("Scheduled: arbitrage_scan every 30min")
+            # Edge Sources (every 20 min)
+            # DISABLED: edge_sources (zero results, unnecessary load)
+
+            # Health Monitor (every 2 hours)
+            _scheduler.add_job(
+                _job_health_monitor, "interval", hours=2,
+                id="health_monitor", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: health_monitor every 2h")
+
+            # Live Sports Edge (every 5 min during games)
+            # DISABLED: live_sports_edge (zero results, unnecessary load)
 
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
@@ -256,6 +278,13 @@ def _job_refresh_markets(config: AppConfig):
 
         service = PolymarketService(config)
         markets = service.fetch_markets()
+
+        # Filter out closed/non-accepting markets
+        active_markets = [m for m in markets if m.get("accepting_orders", 1) != 0]
+        closed_count = len(markets) - len(active_markets)
+        if closed_count:
+            logger.info(f"Market refresh: filtered out {closed_count} closed/non-accepting markets")
+        markets = active_markets
 
         now = datetime.utcnow().isoformat()
 
@@ -450,7 +479,7 @@ def _job_run_agent_cycles(config: AppConfig):
         configs = load_agent_configs()
 
         # Agents that have their own dedicated schedule
-        _SEPARATE_SCHEDULE = {"chief", "analyst"}
+        _SEPARATE_SCHEDULE = {"chief", "analyst", "trader"}
 
         for agent_cfg in configs:
             if not agent_cfg.enabled:
@@ -585,8 +614,24 @@ def _job_evaluate_strategies(config: AppConfig):
                     params["strategy_id"] = strategy["id"]
                     params["strategy_name"] = strategy["name"]
 
+                    # Pre-flight: open position, rebuy cooldown, min edge, circuit breaker
+                    pf_ok, pf_reason = _preflight(market["id"], params.get("side", "YES"), params.get("edge", 0), params.get("amount_usd", 0))
+                    if not pf_ok:
+                        logger.debug(f"Preflight reject ({strategy['name']}): {pf_reason} for {market['id'][:30]}")
+                        continue
+
                     status = "auto_approved" if mode == "full-auto" else "pending"
                     now = datetime.utcnow().isoformat()
+
+                    # Dedup: skip if suggestion for this market exists in last 24h (any status)
+                    _dup = engine.query_one(
+                        "SELECT id FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                        "AND created_at > datetime('now', '-24 hours')",
+                        (market["id"],),
+                    )
+                    if _dup:
+                        logger.debug(f"Strategy dedup: skip {market['id'][:30]} - already suggested")
+                        continue
 
                     engine.execute(
                         """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
@@ -994,6 +1039,16 @@ def _job_weather_edge_analysis(config: AppConfig):
                 "strategy_name": "Weather Forecast Edge",
             }
 
+            # Dedup: skip if suggestion for this market exists in last 24h (any status)
+            _dup = engine.query_one(
+                "SELECT id FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                "AND created_at > datetime('now', '-24 hours')",
+                (market_id,),
+            )
+            if _dup:
+                logger.debug(f"Weather dedup: skip {market_id[:30]} - already suggested")
+                continue
+
             engine.execute(
                 """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
@@ -1212,500 +1267,7 @@ def _job_pattern_scanner(config: AppConfig):
         logger.error(f"Pattern scanner failed: {e}")
 
 
-def _job_settle_trades(config):
-    """
-    Enhanced Settlement: 3-layer check to ensure no ghost positions.
-
-    Check 1: Gamma API resolution status (existing, improved)
-    Check 2: Position sync - compare DB vs on-chain positions
-    Check 3: Time-based expiry - parse event dates from market questions
-
-    Runs every 30 minutes.
-    """
-    try:
-        from db import engine
-        from services.polymarket_client import PolymarketService
-        from services.telegram_alerts import get_alerts
-
-        service = PolymarketService(config)
-        alerts = get_alerts(config)
-        settled_count = 0
-        wins = 0
-        losses = 0
-        total_pnl = 0.0
-
-        # -------------------------------------------------------
-        # Get all open trades (executed but not yet settled)
-        # -------------------------------------------------------
-        open_trades = engine.query(
-            "SELECT id, market_id, market_question, side, amount_usd, price, executed_at "
-            "FROM trades WHERE status = 'executed' AND result IS NULL"
-        )
-
-        if not open_trades:
-            logger.debug("Settlement: no open trades to check")
-            return
-
-        logger.info(f"Settlement: checking {len(open_trades)} open trades")
-
-        # -------------------------------------------------------
-        # CHECK 1: Gamma API resolution status
-        # -------------------------------------------------------
-        resolution_cache = {}
-        settled_ids = set()  # trade IDs settled by any check
-
-        for trade in open_trades:
-            market_id = trade["market_id"]
-            if market_id not in resolution_cache:
-                resolution_cache[market_id] = service.get_market_resolution(market_id)
-
-            resolution = resolution_cache[market_id]
-            if not resolution or not resolution.get("resolved"):
-                continue
-
-            result, pnl = _calculate_result(trade, resolution["winning_side"])
-            if result is None:
-                continue
-
-            _settle_trade(engine, trade, result, pnl, "gamma_api")
-            _notify_settlement(alerts, trade, result, pnl, "Gamma API")
-
-            settled_ids.add(trade["id"])
-            settled_count += 1
-            if result == "win":
-                wins += 1
-            else:
-                losses += 1
-            total_pnl += pnl
-
-        # -------------------------------------------------------
-        # CHECK 2: Position sync - DB vs on-chain positions
-        # Only for trades NOT already settled by check 1
-        # -------------------------------------------------------
-        remaining_trades = [t for t in open_trades if t["id"] not in settled_ids]
-
-        if remaining_trades:
-            funder = config.polymarket_funder
-            if funder:
-                try:
-                    on_chain_positions = service.get_user_positions(funder)
-                    # Build set of condition_ids with active on-chain positions
-                    active_condition_ids = set()
-                    for pos in on_chain_positions:
-                        shares = float(pos.get("size", 0) or 0)
-                        if shares > 0:
-                            cid = pos.get("conditionId", "")
-                            if not cid and isinstance(pos.get("market"), dict):
-                                cid = pos["market"].get("conditionId", "")
-                            if cid:
-                                active_condition_ids.add(cid)
-
-                    for trade in remaining_trades:
-                        if trade["id"] in settled_ids:
-                            continue
-                        market_id = trade["market_id"]
-
-                        if market_id in active_condition_ids:
-                            # Position still on-chain, not settled
-                            continue
-
-                        # Position gone - avoid race condition: only if >2h old
-                        executed_at = trade.get("executed_at")
-                        if executed_at:
-                            if isinstance(executed_at, str):
-                                try:
-                                    executed_at = datetime.fromisoformat(
-                                        executed_at.replace("Z", "+00:00")
-                                    )
-                                except ValueError:
-                                    executed_at = None
-                            if executed_at:
-                                age = datetime.utcnow() - executed_at.replace(tzinfo=None)
-                                if age < timedelta(hours=2):
-                                    continue
-
-                        # Fresh Gamma check (bypass cache)
-                        fresh_resolution = service.get_market_resolution(market_id)
-                        if fresh_resolution and fresh_resolution.get("resolved"):
-                            result, pnl = _calculate_result(
-                                trade, fresh_resolution["winning_side"]
-                            )
-                            if result is not None:
-                                _settle_trade(engine, trade, result, pnl, "position_sync")
-                                _notify_settlement(
-                                    alerts, trade, result, pnl, "Position Sync"
-                                )
-                                settled_ids.add(trade["id"])
-                                settled_count += 1
-                                if result == "win":
-                                    wins += 1
-                                else:
-                                    losses += 1
-                                total_pnl += pnl
-                                continue
-
-                        # Position gone but not resolved on Gamma = unknown outcome
-                        # Mark as loss (manual sell, expired, etc.)
-                        pnl = -(trade["amount_usd"] or 0)
-                        pnl = round(pnl, 4)
-                        _settle_trade(engine, trade, "loss", pnl, "position_gone")
-                        _notify_settlement(
-                            alerts, trade, "loss", pnl, "Position verschwunden"
-                        )
-                        settled_ids.add(trade["id"])
-                        settled_count += 1
-                        losses += 1
-                        total_pnl += pnl
-
-                except Exception as e:
-                    logger.warning(f"Settlement Check 2 (position sync) failed: {e}")
-            else:
-                logger.debug(
-                    "Settlement Check 2 skipped: no POLYMARKET_FUNDER configured"
-                )
-
-        # -------------------------------------------------------
-        # CHECK 3: Time-based expiry for date-bound markets
-        # Only for trades NOT settled by checks 1 or 2
-        # -------------------------------------------------------
-        still_remaining = [t for t in open_trades if t["id"] not in settled_ids]
-
-        if still_remaining:
-            now = datetime.utcnow()
-            for trade in still_remaining:
-                market_id = trade["market_id"]
-                question = trade.get("market_question") or ""
-
-                # Get end_date from markets table
-                market_row = engine.query_one(
-                    "SELECT end_date FROM markets WHERE id = ?", (market_id,)
-                )
-                end_date = None
-                if market_row and market_row.get("end_date"):
-                    try:
-                        ed = market_row["end_date"]
-                        if isinstance(ed, str):
-                            end_date = datetime.fromisoformat(
-                                ed.replace("Z", "+00:00")
-                            ).replace(tzinfo=None)
-                        else:
-                            end_date = ed
-                    except (ValueError, TypeError):
-                        pass
-
-                # Fallback: parse date from question text
-                if not end_date:
-                    end_date = _parse_date_from_question(question, now)
-
-                if not end_date:
-                    continue
-
-                # 24h grace period: try Gamma again
-                if now > end_date + timedelta(hours=24):
-                    fresh = service.get_market_resolution(market_id)
-                    if fresh and fresh.get("resolved"):
-                        result, pnl = _calculate_result(
-                            trade, fresh["winning_side"]
-                        )
-                        if result is not None:
-                            _settle_trade(
-                                engine, trade, result, pnl, "time_expiry_resolved"
-                            )
-                            _notify_settlement(
-                                alerts, trade, result, pnl, "Zeitablauf+Gamma"
-                            )
-                            settled_ids.add(trade["id"])
-                            settled_count += 1
-                            if result == "win":
-                                wins += 1
-                            else:
-                                losses += 1
-                            total_pnl += pnl
-                            continue
-
-                    # 48h past expiry and still no resolution: force-settle as loss
-                    if now > end_date + timedelta(hours=48):
-                        pnl = -(trade["amount_usd"] or 0)
-                        pnl = round(pnl, 4)
-                        _settle_trade(
-                            engine, trade, "loss", pnl, "time_expiry_force"
-                        )
-                        _notify_settlement(
-                            alerts, trade, "loss", pnl, "Zeitablauf (48h)"
-                        )
-                        settled_ids.add(trade["id"])
-                        settled_count += 1
-                        losses += 1
-                        total_pnl += pnl
-
-        # -------------------------------------------------------
-        # Summary
-        # -------------------------------------------------------
-        if settled_count > 0:
-            _update_circuit_breaker_from_settlements(config)
-            logger.info(
-                f"Settlement: {settled_count} trades settled "
-                f"({wins}W/{losses}L, PnL: ${total_pnl:+.2f})"
-            )
-        else:
-            logger.debug("Settlement: no trades settled this cycle")
-
-    except Exception as e:
-        logger.error(f"Settlement job failed: {e}")
-
-
-def _calculate_result(trade, winning_side):
-    """Calculate win/loss and PnL for a trade given the winning side."""
-    trade_side = trade["side"]
-    entry_price = trade["price"] or 0
-    amount = trade["amount_usd"] or 0
-
-    if entry_price <= 0 or amount <= 0:
-        logger.warning(f"Trade {trade['id']}: invalid price/amount, skipping")
-        return None, None
-
-    shares = amount / entry_price
-
-    if trade_side == winning_side:
-        payout = shares * 1.0
-        pnl = payout - amount
-        result = "win"
-    else:
-        pnl = -amount
-        result = "loss"
-
-    return result, round(pnl, 4)
-
-
-def _settle_trade(engine, trade, result, pnl, source):
-    """Update trade and strategy_trades in DB."""
-    engine.execute(
-        "UPDATE trades SET result = ?, pnl = ?, status = 'closed' WHERE id = ?",
-        (result, pnl, trade["id"]),
-    )
-    engine.execute(
-        "UPDATE strategy_trades SET result = ?, pnl = ?, exit_price = ? "
-        "WHERE market_id = ? AND result IS NULL",
-        (result, pnl, 1.0 if result == "win" else 0.0, trade["market_id"]),
-    )
-    logger.info(
-        f"Trade {trade['id']} settled: {result} (PnL: ${pnl:+.4f}) via {source}"
-    )
-
-
-def _notify_settlement(alerts, trade, result, pnl, source):
-    """Send Telegram notification for settlement."""
-    market_name = (trade.get("market_question") or trade["market_id"])[:80]
-    side = trade["side"]
-    amount = trade["amount_usd"] or 0
-    emoji = "\u2705" if result == "win" else "\u274c"
-    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-    alerts.send(
-        f"{emoji} <b>Settlement ({source})</b>\n"
-        f"Markt: {market_name}\n"
-        f"Seite: {side} | Einsatz: ${amount:.2f}\n"
-        f"Ergebnis: {pnl_str}"
-    )
-
-
-def _parse_date_from_question(question, reference_date):
-    """
-    Try to extract a date from market question text.
-    Handles: "March 12", "March 12, 2026", "3/12", "3/12/2026"
-    Returns datetime or None.
-    """
-    if not question:
-        return None
-
-    month_names = {
-        "january": 1, "february": 2, "march": 3, "april": 4,
-        "may": 5, "june": 6, "july": 7, "august": 8,
-        "september": 9, "october": 10, "november": 11, "december": 12,
-    }
-
-    # "March 12" or "March 12, 2026"
-    month_pattern = (
-        r"\b(" + "|".join(month_names.keys()) + r")\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b"
-    )
-    match = re.search(month_pattern, question.lower())
-    if match:
-        month = month_names[match.group(1)]
-        day = int(match.group(2))
-        year = int(match.group(3)) if match.group(3) else reference_date.year
-        try:
-            return datetime(year, month, day, 23, 59, 59)
-        except ValueError:
-            pass
-
-    # "3/12" or "3/12/2026"
-    match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b", question)
-    if match:
-        month = int(match.group(1))
-        day = int(match.group(2))
-        year = int(match.group(3)) if match.group(3) else reference_date.year
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            try:
-                return datetime(year, month, day, 23, 59, 59)
-            except ValueError:
-                pass
-
-    return None
-
-
-
-def _update_circuit_breaker_from_settlements(config: AppConfig):
-    """Recalculate circuit breaker state based on recent trade results."""
-    try:
-        from db import engine
-
-        # Get last N trades with results, ordered by execution time
-        recent = engine.query(
-            "SELECT result FROM trades WHERE result IS NOT NULL "
-            "ORDER BY executed_at DESC LIMIT 10"
-        )
-
-        if not recent:
-            return
-
-        # Count consecutive losses from the most recent trade
-        consecutive_losses = 0
-        for trade in recent:
-            if trade["result"] == "loss":
-                consecutive_losses += 1
-            else:
-                break
-
-        platform_cfg = load_platform_config()
-        cb_cfg = platform_cfg.get("circuit_breaker", {})
-        max_losses = cb_cfg.get("max_consecutive_losses", 3)
-        pause_hours = cb_cfg.get("pause_hours", 24)
-
-        if consecutive_losses >= max_losses:
-            from datetime import timedelta
-            paused_until = (datetime.utcnow() + timedelta(hours=pause_hours)).isoformat()
-            engine.execute(
-                "INSERT OR REPLACE INTO circuit_breaker (id, consecutive_losses, paused_until) "
-                "VALUES (1, ?, ?)",
-                (consecutive_losses, paused_until),
-            )
-
-            from services.telegram_alerts import get_alerts
-            alerts = get_alerts(config)
-            alerts.alert_circuit_breaker(consecutive_losses, paused_until)
-            logger.warning(f"Circuit breaker ACTIVATED: {consecutive_losses} consecutive losses")
-        else:
-            # Reset circuit breaker if not triggered
-            engine.execute(
-                "INSERT OR REPLACE INTO circuit_breaker (id, consecutive_losses, paused_until) "
-                "VALUES (1, ?, NULL)",
-                (consecutive_losses,),
-            )
-
-    except Exception as e:
-        logger.error(f"Circuit breaker update failed: {e}")
-
-
-def _job_sync_positions(config: AppConfig):
-    """
-    Sync real on-chain positions from Polymarket Data API into the DB.
-    Creates trade records for positions that aren't tracked yet,
-    and updates entry prices from actual trade data.
-    """
-    try:
-        from db import engine
-        from services.polymarket_client import PolymarketService
-
-        funder = config.polymarket_funder
-        if not funder:
-            return
-
-        service = PolymarketService(config)
-        positions = service.get_user_positions(funder)
-
-        if not positions:
-            logger.debug("Position sync: no on-chain positions found")
-            return
-
-        synced = 0
-        for pos in positions:
-            # Data API returns: market, asset (token_id), size (shares),
-            # avgPrice, curPrice, value, pnl, etc.
-            market_slug = pos.get("market", {}).get("slug", "") if isinstance(pos.get("market"), dict) else ""
-            condition_id = pos.get("conditionId", pos.get("market", {}).get("conditionId", "")) if isinstance(pos.get("market"), dict) else pos.get("conditionId", "")
-            token_id = pos.get("asset", pos.get("tokenId", ""))
-            shares = float(pos.get("size", 0) or 0)
-            avg_price = float(pos.get("avgPrice", 0) or 0)
-            cur_price = float(pos.get("curPrice", 0) or 0)
-
-            if shares <= 0 or not condition_id:
-                continue
-
-            amount_usd = round(shares * avg_price, 4)
-
-            # Determine side (YES/NO) by matching token_id to market
-            market_row = engine.query_one(
-                "SELECT id, yes_token_id, no_token_id, question FROM markets WHERE id = ?",
-                (condition_id,),
-            )
-            if not market_row:
-                # Try to find by token ID
-                market_row = engine.query_one(
-                    "SELECT id, yes_token_id, no_token_id, question FROM markets "
-                    "WHERE yes_token_id = ? OR no_token_id = ?",
-                    (token_id, token_id),
-                )
-            if not market_row:
-                continue
-
-            side = "YES" if token_id == market_row.get("yes_token_id") else "NO"
-            market_id = market_row["id"]
-            question = market_row.get("question", "")
-
-            # Check if we already have ANY trade for this market+side (active or closed)
-            existing = engine.query_one(
-                "SELECT id, price, result FROM trades WHERE market_id = ? AND side = ? "
-                "AND status = 'executed' AND (result IS NULL OR result = 'open')",
-                (market_id, side),
-            )
-
-            # Also check if market was recently traded (avoid re-creating after cashout)
-            any_trade = engine.query_one(
-                "SELECT id FROM trades WHERE market_id = ? AND status = 'executed'",
-                (market_id,),
-            )
-
-            if existing:
-                # Update price if missing
-                if not existing.get("price") or existing["price"] <= 0:
-                    engine.execute(
-                        "UPDATE trades SET price = ?, amount_usd = ? WHERE id = ?",
-                        (avg_price, amount_usd, existing["id"]),
-                    )
-                    synced += 1
-                    logger.info(f"Position sync: updated price for trade {existing['id']} "
-                                f"({side} {question[:40]}): ${avg_price:.4f}")
-            elif any_trade:
-                # Market was already traded — don't re-import (avoids cashout loop)
-                logger.debug(f"Position sync: skipping {question[:40]} — already traded")
-            else:
-                # Truly new position — import it
-                engine.execute(
-                    """INSERT INTO trades
-                       (market_id, market_question, side, amount_usd, price, status,
-                        agent_id, user_cmd, created_at, executed_at)
-                       VALUES (?, ?, ?, ?, ?, 'executed', 'sync', 'position_sync', ?, ?)""",
-                    (market_id, question, side, amount_usd, avg_price,
-                     datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-                )
-                synced += 1
-                logger.info(f"Position sync: imported {side} position in "
-                            f"'{question[:40]}' (${amount_usd:.2f} @ {avg_price:.4f})")
-
-        if synced > 0:
-            logger.info(f"Position sync: {synced} positions synced from Data API")
-
-    except Exception as e:
-        logger.error(f"Position sync failed: {e}")
+# Settlement and position sync removed — handled by PositionManager
 
 
 def _job_portfolio_snapshot(config: AppConfig):
@@ -1908,6 +1470,11 @@ def _job_arbitrage_scan(config: AppConfig):
         for opp in opportunities:
             opp_dict = opp.to_dict()
 
+            # Blocklist check: skip if any market is blocklisted
+            if any(_is_market_blocklisted(m.get("question", "")) for m in opp.markets):
+                logger.info(f"Arb blocklist: skipping {opp.description[:60]}")
+                continue
+
             # Log all opportunities
             logger.info(
                 f"Arbitrage [{opp.arb_type}]: {opp.description} "
@@ -1950,15 +1517,20 @@ def _job_arbitrage_scan(config: AppConfig):
                             "arb_profit": opp.profit_usd,
                         }
 
-                        # Dedup check
+                        # Dedup check (any status in last 24h)
                         existing = engine.query_one(
-                            "SELECT id FROM suggestions WHERE type = 'trade' "
-                            "AND status IN ('pending', 'auto_approved', 'approved') "
-                            "AND payload LIKE ? "
+                            "SELECT id, status FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
                             "AND created_at > datetime('now', '-24 hours')",
-                            (f'%"market_id": "{mkt["market_id"]}"%',),
+                            (mkt["market_id"],),
                         )
                         if existing:
+                            logger.info(f"Arb dedup: skip {mkt['market_id']} - suggestion exists (status={existing.get('status', '?')})")
+                            continue
+
+                        # Pre-flight check
+                        pf_ok, pf_reason = _preflight(mkt["market_id"], mkt["side"], trade_payload.get("edge", 0), trade_payload.get("amount_usd", 0))
+                        if not pf_ok:
+                            logger.debug(f"Arb preflight reject: {pf_reason}")
                             continue
 
                         engine.execute(
@@ -1976,6 +1548,22 @@ def _job_arbitrage_scan(config: AppConfig):
                         )
                 else:
                     # For multi-outcome or other types, create info suggestion
+                    # Dedup: check if any market in this arb was suggested in last 24h
+                    _skip_multi = False
+                    for _m in opp.markets:
+                        _mid = _m.get("market_id", "")
+                        if _mid:
+                            _ex = engine.query_one(
+                                "SELECT id FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                                "AND created_at > datetime('now', '-24 hours')",
+                                (_mid,),
+                            )
+                            if _ex:
+                                logger.info(f"Arb dedup (multi): skip - market {_mid} already suggested")
+                                _skip_multi = True
+                                break
+                    if _skip_multi:
+                        continue
                     engine.execute(
                         """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -1990,14 +1578,8 @@ def _job_arbitrage_scan(config: AppConfig):
                         ),
                     )
 
-                # Telegram alert for significant opportunities
-                alerts.send(
-                    f"\U0001f4b0 <b>Arbitrage gefunden!</b>\n"
-                    f"Typ: {opp.arb_type}\n"
-                    f"{opp.description}\n"
-                    f"Garantierter Profit: <b>${opp.profit_usd:.2f}</b>\n"
-                    f"Konfidenz: {opp.confidence:.0%}"
-                )
+                # Telegram alert removed — alerts only at trade execution in trader.py
+                logger.info(f"Arbitrage suggestion created: {opp.arb_type} ${opp.profit_usd:.2f}")
 
         logger.info(
             f"Arbitrage scan: {len(opportunities)} opportunities found, "
@@ -2006,3 +1588,47 @@ def _job_arbitrage_scan(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Arbitrage scan failed: {e}")
+
+
+def _job_edge_sources(config):
+    """Run all external edge data sources."""
+    try:
+        from services.edge_sources import run_all_edge_sources
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        summary = run_all_edge_sources(platform_cfg)
+        logger.info(f"Edge sources completed: {summary}")
+    except Exception as e:
+        logger.error(f"Edge sources scan failed: {e}")
+
+
+def _job_health_monitor(config):
+    """Check all strategy heartbeats and alert on issues."""
+    try:
+        from services.health_monitor import run_health_monitor
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        report = run_health_monitor(platform_cfg)
+
+        ok = len(report.get("ok", []))
+        warn = len(report.get("warning", []))
+        crit = len(report.get("critical", []))
+        logger.info(f"Health Monitor: {ok} OK, {warn} warnings, {crit} critical")
+    except Exception as e:
+        logger.error(f"Health monitor failed: {e}")
+
+
+def _job_live_sports_edge(config):
+    """Scan live games for sports trading edges."""
+    try:
+        from services.live_sports_edge import run_live_sports_edge
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        results = run_live_sports_edge(platform_cfg)
+        if results:
+            logger.info(f"Live Sports: {len(results)} edges found")
+    except Exception as e:
+        logger.error(f"Live sports edge scan failed: {e}")

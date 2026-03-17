@@ -1,26 +1,15 @@
-# ============================================
-# Polymarket Dashboard - Platform Configuration
-# ============================================
-# This file controls the entire platform behavior.
-# OpenClaw can modify this file to change settings.
-# Changes take effect on next scheduler cycle or page refresh.
-
 platform:
-  name: "Polymarket Agent Dashboard"
-  version: "1.0.0"
+  name: Polymarket Agent Dashboard
+  version: 1.0.0
   refresh_interval_minutes: 30
-  log_level: "info"                    # debug | info | warn | error
+  log_level: info
   max_log_retention_days: 30
-
-# --- Budget & Cost Control ---
 budgets:
-  monthly_total_usd: 50.00
-  daily_limit_usd: 5.00
-  per_agent_daily_usd: 1.00
-  alert_threshold_percent: 80          # Alert when 80% of budget used
-  auto_pause_on_budget_exceeded: true  # Pause agents when budget exceeded
-
-# --- Telegram Alerts to YOU ---
+  monthly_total_usd: 50.0
+  daily_limit_usd: 5.0
+  per_agent_daily_usd: 1.0
+  alert_threshold_percent: 80
+  auto_pause_on_budget_exceeded: true
 alerts:
   enabled: true
   on_budget_warning: true
@@ -30,83 +19,86 @@ alerts:
   on_trade_settled: true
   on_agent_error: true
   on_daily_summary: true
-  daily_summary_hour: 20               # 20:00 UTC
-
-# --- Circuit Breaker ---
+  daily_summary_hour: 20
 circuit_breaker:
   max_consecutive_losses: 3
   pause_hours: 24
-  auto_reset: true                     # Reset after pause_hours
-
-# --- Model Routing (cost optimization) ---
+  auto_reset: true
 model_routing:
-  analysis: "claude-sonnet"            # Complex analysis
-  parsing: "gemini-flash"              # Cheap data parsing
-  sentiment: "haiku"                   # Cheap sentiment scoring
-  summarization: "haiku"               # Cheap summarization
-  default: "claude-sonnet"
-
-# --- Response Cache ---
+  analysis: claude-opus-4-6
+  parsing: gemini-flash
+  sentiment: haiku
+  summarization: haiku
+  default: claude-sonnet
 cache:
   enabled: true
-  ttl_minutes: 30                      # Same question within 30 min -> cache hit
+  ttl_minutes: 30
   max_entries: 1000
-
-# --- Trading Configuration ---
-# Controls how the bot executes trades.
 trading:
   market_filters:
-    min_price: 0.03          # Dont buy tokens under 3 cents
-    max_price: 0.95          # Dont buy tokens over 95 cents (no upside)
-    min_volume_24h: 1000     # At least k volume in last 24h
-    min_liquidity: 5000      # At least k liquidity (order book depth)
-    min_orderbook_depth: 0   # At least 3 bids in orderbook
-  mode: "full-auto"                       # paper | semi-auto | full-auto
-  capital_usd: 1000.00                   # Total trading capital available
+    min_price: 0.05
+    max_price: 0.9
+    min_volume_24h: 5000
+    min_liquidity: 5000
+    min_orderbook_depth: 0
+  mode: full-auto
+  capital_usd: 1400
   limits:
-    max_position_pct: 5                  # Max 5% of capital per trade
-    max_daily_loss_usd: 50.00            # Stop trading after $50 daily loss
-    min_edge: 0.03                       # Only trade with >3% edge
-    min_trade_usd: 1.00                  # Minimum trade amount
-  category_blacklist: []                 # Categories to never trade (e.g. ["adult"])
+    max_position_pct: 3
+    max_daily_loss_usd: 20.0
+    min_edge: 0.05
+    min_trade_usd: 1.0
+  category_blacklist: []
   deduplication:
     enabled: true
-    cooldown_hours: 24                   # No retry for same market within this window
-    max_attempts_per_market: 3           # Max trade attempts per market (all time)
-    check_pending_suggestions: true      # Skip if pending suggestion exists for market
-  rebuy_cooldown_days: 7                  # Wait 7 days before re-buying closed market
-  weather_min_edge: 0.15                   # 15% min edge for weather market trades
+    cooldown_hours: 72
+    max_attempts_per_market: 1
+    check_pending_suggestions: true
+  rebuy_cooldown_days: 14
+  weather_min_edge: 0.15
   analyst_suggestions:
-    min_edge: 0.20                           # 20% min edge for AI analyst suggestions (conservative)
-    min_liquidity: 50000                     # Only suggest markets with >$50k liquidity
-    max_amount_usd: 3.00                     # Max $3 per AI-suggested trade
+    min_edge: 0.08
+    min_liquidity: 5000
+    max_amount_usd: 5.0
   hedging:
-    enabled: false                         # Disabled — cashout handles profit-taking
+    enabled: false
     profit_threshold_pct: 15
     hedge_amount_pct: 50
-    min_profit_usd: 1.00
+    min_profit_usd: 1.0
     cooldown_minutes: 60
   cashout:
-    enabled: true                        # Auto-sell when profit target reached
-    sell_pct: 100                         # Sell 100% of position
-    min_profit_pct: 10                   # Minimum 10% profit before selling
-    min_profit_usd: 0.50                 # Minimum $0.50 profit
-    max_hold_hours: 168                  # Force-sell after 7 days at lower threshold
-    force_sell_profit_pct: 3             # Lower threshold for old positions (>7 days)
-    cooldown_minutes: 30                 # Check interval per market
-
-# --- Polymarket Settings ---
+    enabled: true
+    sell_pct: 100
+    min_profit_pct: 5
+    min_profit_usd: 0.05
+    max_hold_hours: 120
+    force_sell_profit_pct: 2
+    cooldown_minutes: 15
+    tiered_targets:
+    - price_range:
+      - 0.05
+      - 0.2
+      profit_target: 12
+    - price_range:
+      - 0.2
+      - 0.5
+      profit_target: 6
+    - price_range:
+      - 0.5
+      - 0.9
+      profit_target: 3
 polymarket:
-  markets_limit: 50                    # Max markets to track
-  min_volume_usd: 1000                 # Only track markets with this min volume
-  min_liquidity_usd: 500
-  categories:                          # Categories to watch (empty = all)
-    - "politics"
-    - "crypto"
-    - "sports"
-    - "science"
-
-# --- Scheduler Jobs ---
+  markets_limit: 100
+  min_volume_usd: 5000
+  min_liquidity_usd: 3000
+  categories:
+  - politics
+  - crypto
+  - sports
+  - science
+  - economics
+  - weather
+  - entertainment
 scheduler:
   market_refresh:
     enabled: true
@@ -120,79 +112,89 @@ scheduler:
   agent_health_check:
     enabled: true
     interval_minutes: 15
-  chief_analysis_hour: 19               # 1x/day at 19:00 UTC (before daily summary)
-  analyst_hour: 8                        # 1x/day at 08:00 UTC
+  chief_analysis_hour: 19
+  analyst_hour: 8
   ml_retrain:
-    enabled: true                      # Auto-skips if <20 completed trades
+    enabled: true
     interval_days: 1
   strategy_evaluation:
     enabled: true
-    interval_minutes: 15               # Evaluate active strategies every 15 min
+    interval_minutes: 15
   trader_cycle:
     enabled: true
-    interval_minutes: 5                # Check for approved trades every 5 min
+    interval_minutes: 2
   daily_summary:
     enabled: true
-    hour: 20                           # 20:00 UTC
-  pattern_scanner_hour: 9               # Daily at 09:00 UTC (after analyst at 08:00)
+    hour: 20
+  pattern_scanner_hour: 9
   settlement:
     enabled: true
-    interval_minutes: 30               # Check for resolved markets every 30 min
+    interval_minutes: 30
   weather_edge:
     enabled: true
-    interval_minutes: 30                 # Weather forecast edge analysis
+    interval_minutes: 30
   snapshot_cleanup:
     enabled: true
     interval_hours: 24
-
-# --- Strategy Discovery ---
 strategy:
-  max_active_strategies: 10
-  min_confidence_score: 0.5            # Min backtest confidence to validate
-  retire_after_trades: 50              # Retire after 50 live trades
-  retire_on_drawdown_pct: 20           # Retire if >20% drawdown
-
-# --- Gamma API Settings ---
+  max_active_strategies: 6
+  min_confidence_score: 0.5
+  retire_after_trades: 50
+  retire_on_drawdown_pct: 15
 gamma_api:
-  base_url: "https://gamma-api.polymarket.com"
+  base_url: https://gamma-api.polymarket.com
   markets_limit: 100
-  min_volume_usd: 1000
-  min_liquidity_usd: 500
+  min_volume_usd: 5000
+  min_liquidity_usd: 3000
   timeout_seconds: 30
-  tag_slugs:                             # Additional market discovery by tag
-    - "weather"                          # Daily temperature, climate markets
-    - "climate"                          # Global temperature records
-
-# --- MCP Server ---
+  tag_slugs:
+  - weather
+  - climate
 mcp:
   enabled: true
-  bot_api_internal_url: "http://polymarket-bot:8000"
-
-# --- Risk Management (Stop-Loss) ---
+  bot_api_internal_url: http://polymarket-bot:8000
 risk_management:
-  stop_loss_pct: -50             # sell at -50% loss
-  max_hold_days_losing: 14       # sell losing positions after 14 days
-  dead_market_bid: 0.002         # bid below this = dead market
-  dead_market_hours: 48          # close after 48h of dead market
-
-# --- Portfolio Diversification ---
+  stop_loss_pct: -25
+  max_hold_days_losing: 7
+  dead_market_bid: 0.005
+  dead_market_hours: 24
 diversification:
-  max_positions_per_category: 3        # max 3 positions in same category
-  max_positions_total: 15              # max 15 open positions total
-  max_exposure_per_category_pct: 30    # max 30% of capital in one category
-  preferred_categories:                # categories to focus on
-    - "Politics"
-    - "Sports"
-    - "Crypto"
-    - "Science & Tech"
-    - "Economics"
-    - "Weather"
-
-# --- Arbitrage Scanner Settings ---
+  max_positions_per_category: 30
+  max_positions_total: 150
+  max_exposure_per_category_pct: 25
+  preferred_categories:
+  - Weather
+  - Sports
+  - Crypto
+  - Politics
+  - Science & Tech
+  - Economics
 arbitrage:
-  min_profit_pct: 5.0            # minimum 5% return on investment
-  max_settlement_days: 30        # only events settling within 30 days
-  max_outcomes: 20               # skip events with too many outcomes
-  min_absolute_profit: 1.00      # at least  profit after fees
-  max_investment: 25.0           # max 5 per arbitrage opportunity
-  exclude_from_stoploss: true    # don't apply stop-loss to arb positions
+  min_profit_pct: 5.0
+  max_settlement_days: 30
+  max_outcomes: 20
+  min_absolute_profit: 1.0
+  max_investment: 25.0
+  exclude_from_stoploss: true
+edge_sources:
+  sports_odds:
+    enabled: true
+    min_edge: 0.05
+    max_amount: 5
+  crypto_prob:
+    enabled: true
+    min_edge: 0.05
+    max_amount: 5
+  fedwatch:
+    enabled: true
+    min_edge: 0.05
+    max_amount: 5
+  cross_platform:
+    enabled: true
+    min_edge: 0.05
+    max_amount: 5
+weather_sniper:
+  breakeven_enabled: true
+  breakeven_trigger_pct: 66
+  breakeven_sl_pct: 1
+  max_entry_price: 0.93

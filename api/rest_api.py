@@ -315,10 +315,15 @@ def create_app(config: AppConfig) -> FastAPI:
                     "AND (result IS NULL OR result = 'open') ORDER BY created_at LIMIT 1",
                     (condition_id,),
                 ) if condition_id else None
+                shares = float(p.get("size", 0) or 0)
+                redeemable = bool(p.get("redeemable", False))
+                # Skip dust positions
+                if shares < 0.01:
+                    continue
                 live_positions.append({
                     "title": p.get("title", "?")[:60],
                     "outcome": p.get("outcome", "?"),
-                    "shares": float(p.get("size", 0) or 0),
+                    "shares": shares,
                     "avg_price": float(p.get("avgPrice", 0) or 0),
                     "cur_price": float(p.get("curPrice", 0) or 0),
                     "cost": round(float(p.get("initialValue", 0) or 0), 2),
@@ -328,6 +333,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     "realized_pnl": round(float(p.get("realizedPnl", 0) or 0), 2),
                     "trade_id": db_trade["id"] if db_trade else None,
                     "market_id": condition_id,
+                    "redeemable": redeemable,
                 })
         else:
             # Fallback: latest portfolio snapshot
@@ -355,10 +361,10 @@ def create_app(config: AppConfig) -> FastAPI:
         market_stats = engine.query("""
             SELECT market_id,
                    MIN(CASE WHEN amount_usd > 0 THEN market_question END) as name,
-                   SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) as open_count,
+                   SUM(CASE WHEN status = 'executed' AND (result IS NULL OR result = 'open') THEN 1 ELSE 0 END) as open_count,
                    COUNT(*) as trade_count
             FROM trades
-            WHERE status = 'executed'
+            WHERE status IN ('executed', 'closed')
             GROUP BY market_id
         """)
 
@@ -373,7 +379,7 @@ def create_app(config: AppConfig) -> FastAPI:
             # Check for real settlement (market resolved on-chain)
             settled_row = engine.query_one(
                 "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
-                "AND result IN ('win', 'loss', 'settled')",
+                "AND result IN ('win', 'loss', 'settled', 'settlement_win', 'stop_loss', 'take_profit', 'penny_cleanup')",
                 (m["market_id"],),
             )
             has_settlement = (settled_row.get("cnt", 0) if settled_row else 0) > 0
@@ -385,7 +391,7 @@ def create_app(config: AppConfig) -> FastAPI:
                 # Market resolved on-chain
                 win_row = engine.query_one(
                     "SELECT COUNT(*) as cnt FROM trades WHERE market_id = ? "
-                    "AND result IN ('win', 'settled')",
+                    "AND result IN ('win', 'settled', 'settlement_win', 'take_profit')",
                     (m["market_id"],),
                 )
                 is_win = (win_row.get("cnt", 0) if win_row else 0) > 0
@@ -395,22 +401,37 @@ def create_app(config: AppConfig) -> FastAPI:
                     losses += 1
                 settle_pnl_row = engine.query_one(
                     "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE market_id = ? "
-                    "AND result IN ('win', 'loss')",
+                    "AND result IS NOT NULL",
                     (m["market_id"],),
                 )
                 settle_pnl = float(settle_pnl_row["total_pnl"]) if settle_pnl_row else 0
+                # Get detailed trade data for display
+                detail = engine.query_one(
+                    "SELECT AVG(price) as avg_entry, SUM(amount_usd) as total_cost, "
+                    "MAX(executed_at) as closed_at "
+                    "FROM trades WHERE market_id = ? AND status IN ('executed', 'closed')",
+                    (m["market_id"],),
+                )
+                avg_entry = float(detail["avg_entry"]) if detail and detail.get("avg_entry") else 0
+                total_cost_d = float(detail["total_cost"]) if detail and detail.get("total_cost") else 0
+                closed_at = detail.get("closed_at", "") if detail else ""
+                pnl_pct = (settle_pnl / total_cost_d * 100) if total_cost_d > 0 else 0
                 closed_markets.append({
                     "market_id": m["market_id"],
                     "name": market_name[:60],
                     "result": "win" if is_win else "loss",
                     "pnl": round(settle_pnl, 2),
+                    "pnl_pct": round(pnl_pct, 1),
+                    "avg_entry": round(avg_entry, 4),
+                    "total_cost": round(total_cost_d, 2),
                     "trade_count": m.get("trade_count", 0),
+                    "closed_at": str(closed_at)[:16] if closed_at else "",
                 })
             else:
                 # All trades closed (cashout/loss/phantom) — count by total PnL
                 pnl_row = engine.query_one(
                     "SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE market_id = ? "
-                    "AND result IN ('cashout', 'loss', 'phantom')",
+                    "AND result IN ('cashout', 'loss', 'phantom', 'stop_loss', 'settlement_win', 'take_profit', 'penny_cleanup')",
                     (m["market_id"],),
                 )
                 total_pnl = float(pnl_row["total_pnl"]) if pnl_row else 0
@@ -419,12 +440,26 @@ def create_app(config: AppConfig) -> FastAPI:
                     wins += 1
                 else:
                     losses += 1
+                detail2 = engine.query_one(
+                    "SELECT AVG(price) as avg_entry, SUM(amount_usd) as total_cost, "
+                    "MAX(executed_at) as closed_at "
+                    "FROM trades WHERE market_id = ?",
+                    (m["market_id"],),
+                )
+                avg_entry2 = float(detail2["avg_entry"]) if detail2 and detail2.get("avg_entry") else 0
+                total_cost2 = float(detail2["total_cost"]) if detail2 and detail2.get("total_cost") else 0
+                closed_at2 = detail2.get("closed_at", "") if detail2 else ""
+                pnl_pct2 = (total_pnl / total_cost2 * 100) if total_cost2 > 0 else 0
                 closed_markets.append({
                     "market_id": m["market_id"],
                     "name": market_name[:60],
                     "result": "win" if is_win else "loss",
                     "pnl": round(total_pnl, 2),
+                    "pnl_pct": round(pnl_pct2, 1),
+                    "avg_entry": round(avg_entry2, 4),
+                    "total_cost": round(total_cost2, 2),
                     "trade_count": m.get("trade_count", 0),
+                    "closed_at": str(closed_at2)[:16] if closed_at2 else "",
                 })
 
         return {
@@ -1050,13 +1085,36 @@ def create_app(config: AppConfig) -> FastAPI:
 
         entry_price = trade["price"] or 0
         current_price = market.get("yes_price") if trade["side"] == "YES" else market.get("no_price")
-        shares = (trade["amount_usd"] / entry_price) if entry_price > 0 else 0
-        profit_usd = (current_price - entry_price) * shares if entry_price > 0 else 0
+        db_shares = (trade["amount_usd"] / entry_price) if entry_price > 0 else 0
+        profit_usd = (current_price - entry_price) * db_shares if entry_price > 0 else 0
         profit_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
 
+        # Get actual on-chain balance for full sell
+        actual_shares = None
         try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             from services.polymarket_client import PolymarketService
             service = PolymarketService(config)
+            _bal_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            _bal_resp = service._auth_client.get_balance_allowance(_bal_params)
+            if _bal_resp and isinstance(_bal_resp, dict):
+                raw_bal = int(_bal_resp.get("balance", "0"))
+                actual_shares = raw_bal / 1e6
+        except Exception:
+            pass
+
+        # Use on-chain balance (full amount), fall back to DB
+        shares = round(actual_shares, 2) if actual_shares and actual_shares > 0 else round(db_shares, 2)
+
+        # If balance is dust, just close the DB record
+        if shares < 0.5:
+            engine.execute(
+                "UPDATE trades SET result = 'cashout', pnl = ? WHERE id = ?",
+                (round(profit_usd, 4), trade["id"]),
+            )
+            return {"ok": True, "message": f"Dust position closed (shares={shares:.4f})", "profit_usd": round(profit_usd, 4)}
+
+        try:
             result = service.place_sell_order(token_id=token_id, amount=shares)
 
             sell_value_usd = round(shares * current_price, 2) if current_price else trade["amount_usd"]
@@ -1103,12 +1161,12 @@ def create_app(config: AppConfig) -> FastAPI:
         """Import an on-chain position into the DB so the bot can manage it."""
         # Check if already tracked
         existing = engine.query_one(
-            "SELECT id FROM trades WHERE market_id = ? AND status = 'executed' "
-            "AND (result IS NULL OR result = 'open')",
+            "SELECT id, status, result FROM trades WHERE market_id = ? "
+            "AND status IN ('executed', 'closed') ORDER BY created_at DESC LIMIT 1",
             (body.market_id,),
         )
         if existing:
-            return {"ok": False, "error": "Position already tracked", "trade_id": existing["id"]}
+            return {"ok": False, "error": "Position already tracked or previously closed", "trade_id": existing["id"]}
 
         side = body.outcome.upper() if body.outcome else "YES"
         engine.execute(
@@ -1232,6 +1290,45 @@ def create_app(config: AppConfig) -> FastAPI:
         return BotActionResponse(ok=True, message="Log event created")
 
     # ------------------------------------------------------------------
+    # Health Monitor
+    # ------------------------------------------------------------------
+
+    @app.get("/api/health/monitor")
+    async def health_monitor_report():
+        """Get health status of all strategy sources."""
+        try:
+            from services.health_monitor import get_health_report
+            from config import load_platform_config
+            config = load_platform_config()
+            return get_health_report(config)
+        except Exception as e:
+            return {"error": str(e)}
+
+    # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+    # Edge Tracking
+    # ------------------------------------------------------------------
+
+    @app.get("/api/edge/statistics")
+    async def edge_statistics(days: int = 30):
+        """Get edge tracking statistics."""
+        try:
+            from services.edge_tracker import get_edge_statistics
+            from db import engine
+            return get_edge_statistics(engine, days)
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.get("/api/edge/market/{market_id}")
+    async def edge_market_history(market_id: str):
+        """Get edge history for a specific market."""
+        try:
+            from services.edge_tracker import get_market_edge_history
+            from db import engine
+            return get_market_edge_history(engine, market_id)
+        except Exception as e:
+            return {"error": str(e)}
+
     # Self-Modification (code change proposals by AI agents)
     # ------------------------------------------------------------------
 

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from agents.base_agent import BaseAgent
 from config import AppConfig, load_platform_config
 from db import engine
+from services.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,12 @@ class TraderAgent(BaseAgent):
             if mode == "full-auto":
                 executed = self._process_auto_approved()
                 executed += self._process_user_approved()
-                self._check_and_execute_cashouts()
-                self._check_stop_losses()
+                # Position management (TP, SL, breakeven, resolution) via on-chain data
+                try:
+                    pm = PositionManager(AppConfig.from_env())
+                    pm.run_cycle()
+                except Exception as e:
+                    self.log("error", f"PositionManager cycle failed: {e}")
                 self._check_and_execute_hedges()
             elif mode == "semi-auto":
                 executed = self._process_user_approved()
@@ -75,6 +80,16 @@ class TraderAgent(BaseAgent):
         count = 0
         seen_markets = set()  # prevent same-batch duplicates
         for s in suggestions:
+            # Atomic claim: mark as processing before executing
+            engine.execute(
+                "UPDATE suggestions SET status = 'processing' WHERE id = ? AND status = 'auto_approved'",
+                (s["id"],),
+            )
+            verify = engine.query_one("SELECT status FROM suggestions WHERE id = ?", (s["id"],))
+            if not verify or verify["status"] != "processing":
+                logger.info(f"Suggestion {s['id']} already claimed by another instance, skipping")
+                continue
+
             payload = json.loads(s.get("payload") or "{}")
             market_id = payload.get("market_id", "")
 
@@ -94,10 +109,10 @@ class TraderAgent(BaseAgent):
                 )
                 count += 1
             else:
-                # Mark as failed so it doesn't retry forever
+                # Mark as failed with reason so we can debug
                 engine.execute(
-                    "UPDATE suggestions SET status = 'failed', resolved_at = ? WHERE id = ?",
-                    (datetime.utcnow().isoformat(), s["id"]),
+                    "UPDATE suggestions SET status = 'failed', resolved_at = ?, user_response = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), "FAIL: trade execution returned False", s["id"]),
                 )
         return count
 
@@ -108,6 +123,14 @@ class TraderAgent(BaseAgent):
         )
         count = 0
         for s in suggestions:
+            # Atomic claim: mark as processing to prevent double execution
+            rows = engine.execute(
+                "UPDATE suggestions SET status = 'processing' WHERE id = ? AND status = 'approved'",
+                (s["id"],),
+            )
+            if not rows:
+                continue  # Another worker already claimed it
+
             payload = json.loads(s.get("payload") or "{}")
             if self._execute_trade(payload, source=f"suggestion:{s['id']}"):
                 engine.execute(
@@ -115,6 +138,12 @@ class TraderAgent(BaseAgent):
                     (datetime.utcnow().isoformat(), s["id"]),
                 )
                 count += 1
+            else:
+                # Trade failed — revert to approved so user can retry
+                engine.execute(
+                    "UPDATE suggestions SET status = 'approved' WHERE id = ? AND status = 'processing'",
+                    (s["id"],),
+                )
         return count
 
     def _process_paper_trades(self) -> int:
@@ -370,6 +399,25 @@ class TraderAgent(BaseAgent):
                 self.log("error", f"Kein CLOB Token-ID für {market_id[:30]} (side={side})")
                 return False
 
+            # Pre-check: verify orderbook exists (with retry)
+            book = None
+            for _ob_attempt in range(2):
+                try:
+                    book = service.get_order_book(token_id)
+                    break
+                except Exception as e:
+                    if _ob_attempt == 0:
+                        self.log("warn", f"Orderbook fetch failed (attempt 1), retrying: {e}")
+                        import time; time.sleep(1)
+                    else:
+                        self._finalize_trade(trade_id, "failed", payload, error=f"Orderbook check failed after retry: {e}")
+                        self.log("warn", f"Orderbook check failed after retry for {token_id[:16]}... - {e}")
+                        return False
+            if not book or not getattr(book, "bids", None):
+                self._finalize_trade(trade_id, "failed", payload, error="No orderbook/bids for token")
+                self.log("warn", f"No orderbook/bids for token {token_id[:16]}... - skipping gracefully")
+                return False
+
             result = service.place_market_order(
                 token_id=token_id,
                 amount=amount,
@@ -377,14 +425,61 @@ class TraderAgent(BaseAgent):
             )
 
             if result.get("ok"):
-                self._finalize_trade(trade_id, "executed", payload)
+                # Log CLOB response for debugging
+                self.log("debug", f"CLOB order response: {str(result.get('result', ''))[:200]}")
+
+                # --- Get ACTUAL fill price from on-chain balance ---
+                actual_entry_price = None
+                try:
+                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                    import time as _time
+                    _time.sleep(1)  # brief wait for on-chain settlement
+                    _bal_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+                    _bal_resp = service._auth_client.get_balance_allowance(_bal_params)
+                    if _bal_resp and isinstance(_bal_resp, dict):
+                        raw_bal = int(_bal_resp.get("balance", "0"))
+                        actual_shares = raw_bal / 1e6  # Polymarket uses 6 decimals
+                        if actual_shares > 0:
+                            actual_entry_price = round(amount / actual_shares, 6)
+                            # Sanity check: Polymarket prices are always 0-1
+                            if actual_entry_price > 1.0 or actual_entry_price < 0.01:
+                                self.log("warning", f"Invalid calc price {actual_entry_price:.4f} from {amount:.2f}/{actual_shares:.4f} - using suggestion price")
+                                actual_entry_price = None
+                            else:
+                                self.log("info", f"Actual fill: {actual_shares:.2f} shares @ ${actual_entry_price:.4f} (on-chain)")
+                except Exception as _e:
+                    self.log("debug", f"Could not get on-chain balance for fill price: {_e}")
+
+                # Finalize trade with actual price
+                self._finalize_trade(trade_id, "executed", payload, actual_price=actual_entry_price)
                 self.log("info", f"Trade ausgeführt: {side} ${amount:.2f} auf '{question[:50]}'")
 
-                # Alert
+                # Alert with full sniper details
                 try:
+                    import html as _html
                     from services.telegram_alerts import get_alerts
                     alerts = get_alerts(config)
-                    alerts.alert_trade_executed(question[:60], side, amount)
+                    _confidence = payload.get("confidence", 0)
+                    _edge = payload.get("edge", 0)
+                    _source = payload.get("source", payload.get("data_source", source))
+                    _detail = payload.get("detail", "")
+                    # Use actual fill price, fallback to payload price
+                    _price = actual_entry_price
+                    if not _price or _price <= 0:
+                        _price = payload.get("yes_price") if side == "YES" else payload.get("no_price")
+                    if not _price or _price <= 0:
+                        _price = payload.get("price", 0)
+                    _price = _price or 0
+                    msg = (
+                        f"\u26a1 <b>Trade Executed</b>\n"
+                        f"Markt: {_html.escape(question[:80])}\n"
+                        f"Seite: {side} @ {_price:.4f}\n"
+                        f"Betrag: ${amount:.2f}\n"
+                        f"Confidence: {_confidence:.0%} | Edge: {_edge:+.1%}\n"
+                        f"Quelle: {_html.escape(str(_source))}\n"
+                        f"Detail: {_html.escape(str(_detail)[:120])}"
+                    )
+                    alerts.send(msg)
                 except Exception:
                     pass
 
@@ -422,12 +517,43 @@ class TraderAgent(BaseAgent):
         )
         self.log("info", f"[PAPER] Trade: {side} ${amount:.2f} auf '{question[:50]}'")
 
-    def _finalize_trade(self, trade_id: int, status: str, payload: dict, error: str = None) -> None:
+    def _finalize_trade(self, trade_id: int, status: str, payload: dict, error: str = None, actual_price: float = None) -> None:
         """Update trade record with final status."""
-        engine.execute(
-            "UPDATE trades SET status = ?, executed_at = ? WHERE id = ?",
-            (status, datetime.utcnow().isoformat(), trade_id),
-        )
+        if error:
+            engine.execute(
+                "UPDATE trades SET status = ?, executed_at = ?, result = ? WHERE id = ?",
+                (status, datetime.utcnow().isoformat(), f"error: {error[:200]}", trade_id),
+            )
+        else:
+            engine.execute(
+                "UPDATE trades SET status = ?, executed_at = ? WHERE id = ?",
+                (status, datetime.utcnow().isoformat(), trade_id),
+            )
+        # Update price: prefer actual fill price > payload price > market price
+        if status == "executed":
+            trade = engine.query_one("SELECT price, market_id, side FROM trades WHERE id = ?", (trade_id,))
+            if trade:
+                side = trade.get("side", "YES")
+                # Priority 1: actual fill price from on-chain balance
+                price = actual_price if actual_price and actual_price > 0 else None
+                # Priority 2: existing DB price (only if no actual price available)
+                if not price or price <= 0:
+                    existing = trade.get("price")
+                    if existing and existing > 0:
+                        price = existing
+                # Priority 3: payload price
+                if not price or price <= 0:
+                    price = payload.get("yes_price") if side == "YES" else payload.get("no_price")
+                # Priority 4: fallback from markets table
+                if not price or price <= 0:
+                    market = engine.query_one(
+                        "SELECT yes_price, no_price FROM markets WHERE id = ?",
+                        (trade.get("market_id"),),
+                    )
+                    if market:
+                        price = market.get("yes_price") if side == "YES" else market.get("no_price")
+                if price and price > 0:
+                    engine.execute("UPDATE trades SET price = ? WHERE id = ?", (price, trade_id))
 
     # ------------------------------------------------------------------
     # Profit Hedging
@@ -526,7 +652,9 @@ class TraderAgent(BaseAgent):
                     continue
 
                 from services.polymarket_client import PolymarketService
-                service = PolymarketService(config)
+                if not hasattr(self, "_hedge_svc") or self._hedge_svc is None:
+                    self._hedge_svc = PolymarketService(config)
+                service = self._hedge_svc
                 result = service.place_sell_order(token_id=token_id, amount=sell_amount)
 
                 if result.get("ok"):
@@ -566,506 +694,6 @@ class TraderAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Auto-Cashout (sell 100% when in profit)
     # ------------------------------------------------------------------
-
-    def _check_and_execute_cashouts(self) -> int:
-        """Auto-sell positions when profit target is reached.
-
-        Two modes:
-        - Normal: sell at min_profit_pct (default 10%) and min_profit_usd
-        - Aged positions: after max_hold_hours (default 7 days), sell at force_sell_profit_pct (default 3%)
-        """
-        trading_cfg = self._get_trading_config()
-        cashout_cfg = trading_cfg.get("cashout", {})
-        if not cashout_cfg.get("enabled", False):
-            return 0
-
-        sell_pct = cashout_cfg.get("sell_pct", 100) / 100
-        min_profit_pct = cashout_cfg.get("min_profit_pct", 10)
-        min_profit_usd = cashout_cfg.get("min_profit_usd", 0.50)
-        max_hold_hours = cashout_cfg.get("max_hold_hours", 168)
-        force_sell_profit_pct = cashout_cfg.get("force_sell_profit_pct", 3)
-        cooldown_min = cashout_cfg.get("cooldown_minutes", 30)
-
-        # Get open positions with a recorded entry price
-        positions = engine.query(
-            "SELECT id, market_id, market_question, side, amount_usd, price, executed_at "
-            "FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL) "
-            "AND price IS NOT NULL AND price > 0 ORDER BY executed_at"
-        )
-        if not positions:
-            return 0
-
-        cashed_out = 0
-        for pos in positions:
-            market_id = pos["market_id"]
-            entry_price = pos["price"]
-
-            # Cooldown: skip if we recently tried to cashout THIS specific position
-            pos_id = pos["id"]
-            recent = engine.query_one(
-                "SELECT id FROM trades WHERE user_cmd = ? AND executed_at > ?",
-                (f"cashout:{pos_id}", (datetime.utcnow() - timedelta(minutes=cooldown_min)).isoformat()),
-            )
-            if recent:
-                continue
-
-            # Get current market price (prefer live CLOB bid over possibly stale DB)
-            market = engine.query_one(
-                "SELECT yes_price, no_price, yes_token_id, no_token_id "
-                "FROM markets WHERE id = ?",
-                (market_id,),
-            )
-            if not market:
-                continue
-
-            current_price = market.get("yes_price") if pos["side"] == "YES" else market.get("no_price")
-
-            # Fetch live best-bid from CLOB order book for accurate cashout decisions
-            token_id_for_price = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
-            if token_id_for_price:
-                try:
-                    from config import AppConfig as _AC
-                    from services.polymarket_client import PolymarketService
-                    _svc = PolymarketService(_AC.from_env())
-                    _book = _svc.get_order_book(token_id_for_price)
-                    # Handle both dict and OrderBookSummary object
-                    bids = _book.get("bids", []) if isinstance(_book, dict) else getattr(_book, "bids", []) or []
-                    if bids:
-                        bids = sorted(bids, key=lambda b: float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0)), reverse=True)  # CLOB returns ascending
-                        bid0 = bids[0]
-                        best_bid = float(bid0.get("price", 0) if isinstance(bid0, dict) else getattr(bid0, "price", 0))
-                        if best_bid > 0:
-                            self.log("debug", f"Live bid for {market_id[:20]}: {best_bid} (DB: {current_price})")
-                            current_price = best_bid
-                except Exception:
-                    pass  # fallback to DB price
-
-            if not current_price or current_price <= 0:
-                continue
-
-            # Calculate profit for the portion being sold
-            profit_pct = ((current_price - entry_price) / entry_price) * 100
-            shares = pos["amount_usd"] / entry_price
-            sold_shares = shares * sell_pct
-            profit_usd = (current_price - entry_price) * sold_shares
-
-            # Determine threshold: lower for aged positions
-            threshold_pct = min_profit_pct
-            if pos.get("executed_at"):
-                try:
-                    age_hours = (datetime.utcnow() - datetime.fromisoformat(pos["executed_at"])).total_seconds() / 3600
-                    if age_hours > max_hold_hours:
-                        threshold_pct = force_sell_profit_pct
-                except (ValueError, TypeError):
-                    pass
-
-            if profit_pct < threshold_pct or profit_usd < min_profit_usd:
-                continue
-
-            # Execute cashout: sell shares (CLOB API expects token count, not USD)
-            sell_shares = round(shares * sell_pct, 2)
-            token_id = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
-            if not token_id:
-                continue
-
-            # Cap sell_shares to actual on-chain balance to avoid "not enough balance" errors
-            try:
-                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                _bal_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-                _bal_resp = service_for_balance._auth_client.get_balance_allowance(_bal_params) if "service_for_balance" in dir() else None
-            except Exception:
-                _bal_resp = None
-            if _bal_resp is None:
-                try:
-                    from config import AppConfig as _AC2
-                    from services.polymarket_client import PolymarketService as _PS2
-                    _svc2 = _PS2(_AC2.from_env())
-                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                    _bal_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-                    _bal_resp = _svc2._auth_client.get_balance_allowance(_bal_params)
-                except Exception:
-                    _bal_resp = None
-            if _bal_resp and isinstance(_bal_resp, dict):
-                raw_bal = int(_bal_resp.get("balance", "0"))
-                actual_shares = raw_bal / 1e6  # Polymarket uses 6 decimals for token amounts
-                if actual_shares > 0 and sell_shares > actual_shares:
-                    self.log("info", f"Capping sell from {sell_shares:.2f} to {actual_shares:.2f} (on-chain balance)")
-                    sell_shares = round(actual_shares * 0.99, 2)  # 1% buffer for rounding
-
-            sell_value_usd = round(sell_shares * current_price, 2)
-
-            self.log("info",
-                f"CASHOUT: {pos['side']} Position in {market_id[:30]}... "
-                f"Profit: {profit_pct:.1f}% (${profit_usd:.2f}), selling {sell_shares:.1f} shares (${sell_value_usd:.2f})")
-
-            try:
-                config = AppConfig.from_env()
-                if not config.polymarket_private_key:
-                    self.log("info", f"[PAPER-CASHOUT] Would sell {sell_shares:.1f} shares")
-                    continue
-
-                from services.polymarket_client import PolymarketService
-                service = PolymarketService(config)
-                result = service.place_sell_order(token_id=token_id, amount=sell_shares)
-
-                if result.get("ok"):
-                    # Record cashout trade
-                    engine.execute(
-                        """INSERT INTO trades
-                           (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
-                           VALUES (?, ?, ?, ?, ?, 'executed', ?, ?, ?, ?, 'cashout', ?)""",
-                        (market_id, f"CASHOUT: {pos.get('market_question', '')[:50]}",
-                         pos["side"], -sell_value_usd, current_price,
-                         self.id, f"cashout:{pos['id']}",
-                         datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
-                         round(profit_usd, 4)),
-                    )
-
-                    # Mark original trade as cashed out (NOT 'win' — only Settlement sets win/loss)
-                    if sell_pct >= 1.0:
-                        engine.execute(
-                            "UPDATE trades SET result = 'cashout', pnl = ? WHERE id = ?",
-                            (round(profit_usd, 4), pos["id"]),
-                        )
-
-                    self.log("info", f"Cashout done: SELL {sell_shares:.1f} shares @ ${current_price:.4f} (Profit: +${profit_usd:.2f})")
-
-                    # Only send Telegram for full cashout (not partial sells)
-                    if sell_pct >= 1.0:
-                        try:
-                            from services.telegram_alerts import get_alerts
-                            alerts = get_alerts(config)
-                            alerts.send(
-                                f"💰 <b>Cashout abgeschlossen!</b>\n"
-                                f"Markt: {pos.get('market_question', market_id)[:60]}\n"
-                                f"Seite: {pos['side']} | Entry: {entry_price:.4f} → Sell: {current_price:.4f}\n"
-                                f"Anteile: {shares:.1f} | Profit: +${profit_usd:.2f} ({profit_pct:.1f}%)"
-                            )
-                        except Exception:
-                            pass
-
-                    cashed_out += 1
-                else:
-                    self.log("warn", f"Cashout failed: {result.get('error', '?')}")
-
-            except Exception as e:
-                self.log("error", f"Cashout Exception: {e}")
-
-        return cashed_out
-
-
-    # ------------------------------------------------------------------
-    # Stop-Loss Management
-    # ------------------------------------------------------------------
-
-    def _check_stop_losses(self) -> int:
-        """Check all open positions for stop-loss conditions.
-
-        Three triggers:
-        1. Percentage stop-loss: PnL <= stop_loss_pct (default -50%)
-        2. Time-based: position older than max_hold_days_losing AND losing
-        3. Dead market: bid <= dead_market_bid for > dead_market_hours
-        """
-        from config import AppConfig as _AC, load_platform_config
-
-        platform_cfg = load_platform_config()
-        rm_cfg = platform_cfg.get("risk_management", {})
-        stop_loss_pct = rm_cfg.get("stop_loss_pct", -50)
-        max_hold_days_losing = rm_cfg.get("max_hold_days_losing", 14)
-        dead_market_bid = rm_cfg.get("dead_market_bid", 0.002)
-        dead_market_hours = rm_cfg.get("dead_market_hours", 48)
-
-        positions = engine.query(
-            "SELECT id, market_id, market_question, side, amount_usd, price, executed_at, agent_id "
-            "FROM trades WHERE status = 'executed' AND (result = 'open' OR result IS NULL) "
-            "AND price IS NOT NULL AND price > 0 ORDER BY executed_at"
-        )
-        if not positions:
-            return 0
-
-        # Load stop-loss exclusions from config
-        _sl_exclude_agents = set()
-        try:
-            _sl_arb_cfg = platform_cfg.get("arbitrage", {})
-            if _sl_arb_cfg.get("exclude_from_stoploss", True):
-                _sl_exclude_agents.add("arb_v2")
-                _sl_exclude_agents.add("arbitrage-scanner")
-        except Exception:
-            _sl_exclude_agents = {"arb_v2", "arbitrage-scanner"}
-
-        stopped = 0
-        for pos in positions:
-            # Skip arbitrage positions — these are long-term holds until settlement
-            pos_agent = pos.get("agent_id", "") or ""
-            if pos_agent in _sl_exclude_agents:
-                continue
-            market_id = pos["market_id"]
-            entry_price = pos["price"]
-            pos_id = pos["id"]
-
-            # Cooldown: skip if ANY failed stop-loss attempt within 24h
-            # This catches DEAD-MARKET, STOP-LOSS-ATTEMPT, and any other failed stoploss
-            _failed_sl_check = engine.query_one(
-                "SELECT id FROM trades WHERE user_cmd = ? AND status = 'failed' AND executed_at > ?",
-                (f"stoploss:{pos_id}", (datetime.utcnow() - timedelta(hours=24)).isoformat()),
-            )
-            if _failed_sl_check:
-                continue
-
-            # Skip penny positions (entry price <= $0.01) - essentially dead/worthless
-            if entry_price <= 0.01:
-                self.log("info", f"Skipping penny position (entry={entry_price}): {pos.get('market_question', '')[:50]}")
-                continue
-
-            # Get market data
-            market = engine.query_one(
-                "SELECT yes_price, no_price, yes_token_id, no_token_id "
-                "FROM markets WHERE id = ?",
-                (market_id,),
-            )
-            if not market:
-                continue
-
-            token_id = market.get("yes_token_id") if pos["side"] == "YES" else market.get("no_token_id")
-            current_price = market.get("yes_price") if pos["side"] == "YES" else market.get("no_price")
-
-            # Fetch live best-bid from CLOB
-            best_bid = None
-            if token_id:
-                try:
-                    from services.polymarket_client import PolymarketService
-                    _svc = PolymarketService(_AC.from_env())
-                    _book = _svc.get_order_book(token_id)
-                    bids = _book.get("bids", []) if isinstance(_book, dict) else getattr(_book, "bids", []) or []
-                    if bids:
-                        bids = sorted(bids, key=lambda b: float(b.get("price", 0) if isinstance(b, dict) else getattr(b, "price", 0)), reverse=True)  # CLOB returns ascending
-                        bid0 = bids[0]
-                        best_bid = float(bid0.get("price", 0) if isinstance(bid0, dict) else getattr(bid0, "price", 0))
-                        if best_bid > 0:
-                            current_price = best_bid
-                except Exception:
-                    pass
-
-            if not current_price or current_price <= 0:
-                continue
-
-            # If best_bid is None (CLOB error) and current_price is very low,
-            # treat as dead market to prevent spam
-            if best_bid is None and current_price <= 0.01:
-                best_bid = 0.0  # Force dead market detection
-
-            # Calculate PnL
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-            shares = pos["amount_usd"] / entry_price
-            pnl_usd = (current_price - entry_price) * shares
-
-            # Calculate position age
-            age_days = 0
-            if pos.get("executed_at"):
-                try:
-                    age_days = (datetime.utcnow() - datetime.fromisoformat(pos["executed_at"])).total_seconds() / 86400
-                except (ValueError, TypeError):
-                    pass
-
-            trigger = None
-            telegram_msg = None
-            market_name = pos.get("market_question", market_id)[:60]
-
-            # --- Trigger 1: Percentage stop-loss ---
-            if pnl_pct <= stop_loss_pct:
-                trigger = "pct_stop"
-                self.log("warn", f"STOP-LOSS (PCT): {market_name} PnL={pnl_pct:.1f}% <= {stop_loss_pct}%")
-                telegram_msg = (
-                    "\U0001f6d1 <b>Stop-Loss ausgeloest!</b>\n"
-                    f"Markt: {market_name}\n"
-                    f"Entry: {entry_price:.4f} \u2192 Bid: {current_price:.4f}\n"
-                    f"PnL: {pnl_pct:.1f}% (${pnl_usd:.2f})"
-                )
-
-            # --- Trigger 2: Time-based stop-loss ---
-            elif age_days > max_hold_days_losing and pnl_pct < 0:
-                trigger = "time_stop"
-                self.log("warn", f"STOP-LOSS (TIME): {market_name} age={age_days:.0f}d, PnL={pnl_pct:.1f}%")
-                telegram_msg = (
-                    "\u23f0 <b>Zeit-Stop-Loss!</b>\n"
-                    f"Markt: {market_name}\n"
-                    f"Alter: {age_days:.0f} Tage | PnL: {pnl_pct:.1f}% (${pnl_usd:.2f})\n"
-                    f"Entry: {entry_price:.4f} \u2192 Bid: {current_price:.4f}"
-                )
-
-            # --- Trigger 3: Dead market detection ---
-            elif best_bid is not None and best_bid <= dead_market_bid:
-                # Check if bid has been dead for > dead_market_hours
-                # Use position age as proxy (if bid is dead now AND position is old enough)
-                if age_days * 24 > dead_market_hours:
-                    trigger = "dead_market"
-                    self.log("warn", f"DEAD MARKET: {market_name} bid={best_bid}, age={age_days:.0f}d")
-                    telegram_msg = (
-                        "\U0001f480 <b>Dead Market!</b>\n"
-                        f"Markt: {market_name}\n"
-                        f"Kein Kaeufer seit >48h (bid={best_bid})\n"
-                        f"Position als Verlust markiert (${pnl_usd:.2f})"
-                    )
-
-            if not trigger:
-                continue
-
-            # --- Redirect to dead-market handling if bid is too low ---
-            # Even if pct_stop or time_stop triggered, if bid <= dead_market_bid
-            # there is no point trying to sell. Use dead_market path with 24h cooldown.
-            _is_dead = best_bid is not None and best_bid <= dead_market_bid
-            if _is_dead and trigger != "dead_market":
-                trigger = "dead_market"
-                self.log("info", f"Redirecting {trigger} to dead_market handler (bid={best_bid})")
-                telegram_msg = (
-                    "\U0001f480 <b>Dead Market (Stop-Loss)!</b>\n"
-                    f"Markt: {market_name}\n"
-                    f"Bid={best_bid} zu niedrig zum Verkaufen\n"
-                    f"Entry: {entry_price:.4f} | PnL: {pnl_pct:.1f}% (${pnl_usd:.2f})\n"
-                    f"<i>Naechste Pruefung in 24h</i>"
-                )
-            config = _AC.from_env()
-
-            if trigger == "dead_market":
-                # Can not sell - no buyers. Don't close in DB (shares still exist on Polymarket).
-                # Write a 24h cooldown record so we don't spam every cycle.
-                engine.execute(
-                    """INSERT INTO trades
-                       (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
-                       VALUES (?, ?, ?, 0, 0, 'failed', ?, ?, ?, ?, 'failed', 0)""",
-                    (market_id, f"DEAD-MARKET: {pos.get('market_question', '')[:40]}",
-                     pos["side"], self.id, f"stoploss:{pos_id}",
-                     datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-                )
-                self.log("info", f"Dead market cooldown set (24h): {market_name} bid={best_bid}")
-                stopped += 1
-
-            else:
-                # Try to sell
-                if not token_id:
-                    self.log("warn", f"No token_id for stop-loss sell: {market_name}")
-                    continue
-
-                # Do not try to sell if bid is too low (0.001 minimum)
-                if best_bid is not None and best_bid <= 0.001:
-                    self.log("warn", f"Bid too low to sell ({best_bid}), setting 24h cooldown: {market_name}")
-                    # Don't close in DB - shares still exist on Polymarket. Set 24h cooldown.
-                    engine.execute(
-                        """INSERT INTO trades
-                           (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
-                           VALUES (?, ?, ?, 0, 0, 'failed', ?, ?, ?, ?, 'failed', 0)""",
-                        (market_id, f"DEAD-MARKET: {pos.get('market_question', '')[:40]}",
-                         pos["side"], self.id, f"stoploss:{pos_id}",
-                         datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-                    )
-                    stopped += 1
-                    # Send telegram notification before continuing
-                    if telegram_msg:
-                        try:
-                            from services.telegram_alerts import get_alerts
-                            alerts = get_alerts(config)
-                            alerts.send(telegram_msg + "\n<i>(Bid zu niedrig, als Verlust markiert)</i>")
-                        except Exception:
-                            pass
-                    continue
-
-                sell_shares = round(shares, 2)
-                sell_value_usd = round(sell_shares * current_price, 2)
-
-                try:
-                    if not config.polymarket_private_key:
-                        self.log("info", f"[PAPER-STOPLOSS] Would sell {sell_shares:.1f} shares of {market_name}")
-                        continue
-
-                    from services.polymarket_client import PolymarketService
-                    service = PolymarketService(config)
-                    result = service.place_sell_order(token_id=token_id, amount=sell_shares)
-
-                    if result.get("ok"):
-                        # Record stop-loss trade
-                        engine.execute(
-                            """INSERT INTO trades
-                               (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
-                               VALUES (?, ?, ?, ?, ?, 'executed', ?, ?, ?, ?, 'cashout', ?)""",
-                            (market_id, f"STOP-LOSS ({trigger}): {pos.get('market_question', '')[:40]}",
-                             pos["side"], -sell_value_usd, current_price,
-                             self.id, f"stoploss:{pos_id}",
-                             datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
-                             round(pnl_usd, 4)),
-                        )
-                        # Mark original as cashed out (stop-loss is a type of cashout)
-                        engine.execute(
-                            "UPDATE trades SET result = 'cashout', pnl = ? WHERE id = ?",
-                            (round(pnl_usd, 4), pos_id),
-                        )
-                        self.log("info", f"Stop-loss executed: SELL {sell_shares:.1f} shares @ ${current_price:.4f} (PnL: ${pnl_usd:.2f})")
-                        stopped += 1
-                    else:
-                        self.log("warn", f"Stop-loss sell failed: {result.get('error', '?')}")
-                        # Write cooldown record so we don't spam every 5 min
-                        engine.execute(
-                            """INSERT INTO trades
-                               (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
-                               VALUES (?, ?, ?, 0, 0, 'failed', ?, ?, ?, ?, 'failed', 0)""",
-                            (market_id, f"STOP-LOSS-ATTEMPT: {pos.get('market_question', '')[:40]}",
-                             pos["side"], self.id, f"stoploss:{pos_id}",
-                             datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-                        )
-
-                except Exception as e:
-                    self.log("error", f"Stop-loss Exception: {e}")
-                    # Write cooldown record on exception too
-                    try:
-                        engine.execute(
-                            """INSERT INTO trades
-                               (market_id, market_question, side, amount_usd, price, status, agent_id, user_cmd, created_at, executed_at, result, pnl)
-                               VALUES (?, ?, ?, 0, 0, 'failed', ?, ?, ?, ?, 'failed', 0)""",
-                            (market_id, f"STOP-LOSS-ATTEMPT: {pos.get('market_question', '')[:40]}",
-                             pos["side"], self.id, f"stoploss:{pos_id}",
-                             datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-                        )
-                    except Exception:
-                        pass
-                    continue
-
-            # Send Telegram notification
-            if telegram_msg:
-                try:
-                    from services.telegram_alerts import get_alerts
-                    alerts = get_alerts(config)
-                    alerts.send(telegram_msg)
-                except Exception:
-                    pass
-
-        if stopped > 0:
-            self.log("info", f"Stop-loss: {stopped} position(s) closed")
-        return stopped
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _calculate_position_size(self, market: dict) -> float:
-        """Calculate appropriate position size based on edge and capital."""
-        trading_cfg = self._get_trading_config()
-        limits = trading_cfg.get("limits", {})
-        capital = trading_cfg.get("capital_usd", 100)
-        max_pct = limits.get("max_position_pct", 5) / 100
-        edge = market.get("calculated_edge", 0) or 0
-
-        if edge <= 0:
-            return 0
-
-        # Simple Kelly fraction (capped)
-        kelly_fraction = min(edge, max_pct)
-        amount = capital * kelly_fraction
-
-        # Minimum trade size
-        min_trade = limits.get("min_trade_usd", 1.0)
-        if amount < min_trade:
-            return 0
-
-        return round(amount, 2)
 
     def _get_trading_config(self) -> dict:
         """Get trading section from platform config."""
