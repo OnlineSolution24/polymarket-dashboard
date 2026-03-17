@@ -189,6 +189,17 @@ class PositionManager:
                         (market["id"], side))
 
                 if not db_trade:
+                    # Check if this position was already settled (closed with result)
+                    # Prevents duplicate auto-imports for redeemable-but-not-yet-redeemed positions
+                    already_settled = engine.query_one(
+                        """SELECT id FROM trades WHERE market_id = ? AND side = ?
+                           AND status = 'closed' AND result IS NOT NULL
+                           ORDER BY created_at DESC LIMIT 1""",
+                        (market["id"], side))
+                    if already_settled:
+                        logger.debug(f"Skip already-settled position: {market['id'][:30]} {side}")
+                        continue
+
                     # Auto-import: create DB record from on-chain data so TP/SL rules apply
                     avg_price = float(raw.get("avgPrice") or raw.get("curPrice") or 0)
                     if avg_price > 0 and size > 0.01:
