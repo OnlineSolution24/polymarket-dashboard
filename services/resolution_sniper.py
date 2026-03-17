@@ -643,45 +643,100 @@ def _find_sport_markets(engine) -> list:
 
 
 def _fetch_live_scores() -> list:
-    """Fetch live and recent scores from TheSportsDB (free, no key needed).
+    """Fetch live and recent scores. Primary: ESPN (free, no auth). Fallback: TheSportsDB.
 
     Returns list of dicts with: home_team, away_team, home_score, away_score, status, sport
     """
     games = []
 
-    # TheSportsDB free livescore endpoints
-    endpoints = [
-        "https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=Soccer",
-        "https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=Basketball",
-        "https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=Ice_Hockey",
-    ]
+    # PRIMARY: ESPN public scoreboards (more reliable, no auth needed)
+    espn_endpoints = {
+        "basketball": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+        "hockey": "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard",
+        "soccer": "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard",
+        "champions_league": "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard",
+    }
 
-    for url in endpoints:
+    for sport, url in espn_endpoints.items():
         try:
             resp = httpx.get(url, timeout=10)
             if resp.status_code != 200:
                 continue
 
             data = resp.json()
-            events = data.get("events") or []
+            events = data.get("events", [])
 
-            for ev in events:
-                game = {
-                    "home_team": ev.get("strHomeTeam", ""),
-                    "away_team": ev.get("strAwayTeam", ""),
-                    "home_score": ev.get("intHomeScore", ""),
-                    "away_score": ev.get("intAwayScore", ""),
-                    "status": ev.get("strStatus", ""),
-                    "sport": ev.get("strSport", ""),
-                    "league": ev.get("strLeague", ""),
-                    "event_name": ev.get("strEvent", ""),
-                    "date": ev.get("dateEvent", ""),
-                }
-                games.append(game)
+            for event in events:
+                for comp in event.get("competitions", []):
+                    competitors = comp.get("competitors", [])
+                    if len(competitors) < 2:
+                        continue
+
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+
+                    status_obj = comp.get("status", {}) or event.get("status", {})
+                    status_type = status_obj.get("type", {})
+                    status_name = status_type.get("name", "")
+
+                    if status_name == "STATUS_FINAL":
+                        game_status = "FT"
+                    elif status_name == "STATUS_IN_PROGRESS":
+                        game_status = "LIVE"
+                    else:
+                        game_status = status_type.get("description", status_name)
+
+                    game = {
+                        "home_team": home.get("team", {}).get("displayName", ""),
+                        "away_team": away.get("team", {}).get("displayName", ""),
+                        "home_score": home.get("score", ""),
+                        "away_score": away.get("score", ""),
+                        "status": game_status,
+                        "sport": sport,
+                        "league": event.get("season", {}).get("type", {}).get("name", sport),
+                        "event_name": event.get("name", ""),
+                        "date": event.get("date", ""),
+                    }
+                    games.append(game)
 
         except Exception as e:
-            logger.warning(f"TheSportsDB error for {url}: {e}")
+            logger.warning(f"ESPN {sport} error: {e}")
 
+    # FALLBACK: TheSportsDB if ESPN returned nothing
+    if not games:
+        thesportsdb_endpoints = [
+            "https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=Soccer",
+            "https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=Basketball",
+            "https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=Ice_Hockey",
+        ]
+
+        for url in thesportsdb_endpoints:
+            try:
+                resp = httpx.get(url, timeout=10)
+                if resp.status_code != 200:
+                    continue
+
+                data = resp.json()
+                events = data.get("events") or []
+
+                for ev in events:
+                    game = {
+                        "home_team": ev.get("strHomeTeam", ""),
+                        "away_team": ev.get("strAwayTeam", ""),
+                        "home_score": ev.get("intHomeScore", ""),
+                        "away_score": ev.get("intAwayScore", ""),
+                        "status": ev.get("strStatus", ""),
+                        "sport": ev.get("strSport", ""),
+                        "league": ev.get("strLeague", ""),
+                        "event_name": ev.get("strEvent", ""),
+                        "date": ev.get("dateEvent", ""),
+                    }
+                    games.append(game)
+
+            except Exception as e:
+                logger.warning(f"TheSportsDB error for {url}: {e}")
+
+    logger.info(f"Live scores: {len(games)} games fetched")
     return games
 
 

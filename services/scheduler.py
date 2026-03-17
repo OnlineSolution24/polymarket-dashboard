@@ -248,8 +248,12 @@ def start_scheduler(config: AppConfig) -> None:
                 id="arbitrage_scan", replace_existing=True, args=[config],
             )
             logger.info("Scheduled: arbitrage_scan every 30min")
-            # Edge Sources (every 20 min)
-            # DISABLED: edge_sources (zero results, unnecessary load)
+            # Edge Sources (every 20 min) — crypto, cross-platform, weather ensemble
+            _scheduler.add_job(
+                _job_edge_sources, "interval", minutes=20,
+                id="edge_sources", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: edge_sources every 20min")
 
             # Health Monitor (every 2 hours)
             _scheduler.add_job(
@@ -1443,6 +1447,18 @@ def _job_sport_sniper(config: AppConfig):
             logger.info(f"Sport sniper: {count} snipe suggestions created")
     except Exception as e:
         logger.error(f"Sport sniper job failed: {e}")
+
+
+def _job_edge_sources(config: AppConfig):
+    """Run all edge sources: crypto (Binance), cross-platform (Manifold), weather ensemble."""
+    try:
+        from services.edge_sources import run_all_edge_sources
+        results = run_all_edge_sources(config)
+        total = sum(results.values())
+        if total > 0:
+            logger.info(f"Edge sources: {total} markets updated | {results}")
+    except Exception as e:
+        logger.error(f"Edge sources job failed: {e}")
 
 
 def _job_arbitrage_scan(config: AppConfig):
