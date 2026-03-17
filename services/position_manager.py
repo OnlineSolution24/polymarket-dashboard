@@ -141,7 +141,23 @@ class PositionManager:
                         (token_id, token_id))
 
                 if not market:
-                    continue  # Unknown market, skip
+                    # Auto-import market from on-chain data
+                    title = raw.get("title") or raw.get("question") or ""
+                    if condition_id and token_id:
+                        # Determine which token is YES/NO based on outcome
+                        yes_tok = token_id if outcome.upper() in ("YES", "Y", "") else ""
+                        no_tok = token_id if outcome.upper() in ("NO", "N") else ""
+                        engine.execute(
+                            """INSERT OR IGNORE INTO markets (id, question, yes_token_id, no_token_id, active, created_at)
+                               VALUES (?, ?, ?, ?, 1, datetime('now'))""",
+                            (condition_id, title, yes_tok, no_tok))
+                        market = engine.query_one(
+                            "SELECT id, question, yes_token_id, no_token_id, category FROM markets WHERE id = ?",
+                            (condition_id,))
+                        if market:
+                            logger.info(f"Auto-imported market: {condition_id[:30]} '{title[:50]}'")
+                    if not market:
+                        continue
 
                 # Determine side: prefer outcome field, fallback to token_id comparison
                 side = "YES"
@@ -164,15 +180,29 @@ class PositionManager:
                     (market["id"], side))
 
                 if not db_trade:
-                    # Fallback: check any executed trade (even settled/closed) for reference
+                    # Fallback: check any executed trade for reference
                     db_trade = engine.query_one(
                         """SELECT id, price, amount_usd, created_at, user_cmd
                            FROM trades WHERE market_id = ? AND side = ?
                            AND status = 'executed'
                            ORDER BY created_at DESC LIMIT 1""",
                         (market["id"], side))
-                    if not db_trade:
-                        logger.warning(f"On-chain position with no DB trade: {market['id']} side={side} shares={size}")
+
+                if not db_trade:
+                    # Auto-import: create DB record from on-chain data so TP/SL rules apply
+                    avg_price = float(raw.get("avgPrice") or raw.get("curPrice") or 0)
+                    if avg_price > 0 and size > 0.01:
+                        cost = round(avg_price * size, 4)
+                        engine.execute(
+                            """INSERT INTO trades (market_id, market_question, side, amount_usd, price,
+                               status, agent_id, user_cmd, created_at)
+                               VALUES (?, ?, ?, ?, ?, 'executed', 'auto-import', 'external', datetime('now'))""",
+                            (market["id"], market["question"] or "", side, cost, avg_price))
+                        new_id = engine.query_one("SELECT last_insert_rowid() as id")["id"]
+                        db_trade = {"id": new_id, "price": avg_price, "amount_usd": cost,
+                                    "created_at": datetime.utcnow().isoformat(), "user_cmd": "external"}
+                        logger.info(f"Auto-imported external position: {market['id'][:30]} {side} "
+                                    f"{size:.2f} shares @ {avg_price:.4f}")
 
                 positions.append({
                     "condition_id": market["id"],
