@@ -69,13 +69,17 @@ def scan_smart_money_consensus(
 
         logger.info(f"Smart money consensus: scanning {len(wallets)} wallets")
 
-        # Check if historical blockchain data is available
-        has_historical = False
+        # Batch-load historical win rates (ONE query instead of per-wallet)
+        bc_win_rates = {}
         try:
-            from services.historical_analytics import _has_data, get_wallet_win_rate_historical
-            has_historical = _has_data()
+            from services.historical_analytics import batch_wallet_win_rates, _has_data
+            if _has_data():
+                addrs = [w["address"] for w in wallets]
+                bc_win_rates = batch_wallet_win_rates(addrs)
         except ImportError:
             pass
+        except Exception as e:
+            logger.warning(f"Batch win rate load failed: {e}")
 
         # Phase 2: Fetch positions for each wallet
         market_positions: dict[str, list[dict]] = {}
@@ -85,15 +89,11 @@ def scan_smart_money_consensus(
                 time.sleep(0.15)
                 continue
 
-            # Enrich with historical win rate if available
+            # Enrich with historical win rate if available (pre-loaded)
             win_rate = wallet.get("win_rate", 0)
-            if has_historical:
-                try:
-                    hist = get_wallet_win_rate_historical(wallet["address"])
-                    if hist and hist.get("total_round_trips", 0) > 5:
-                        win_rate = hist["estimated_win_rate"]
-                except Exception:
-                    pass
+            hist = bc_win_rates.get(wallet["address"].lower())
+            if hist and hist.get("total_round_trips", 0) > 5:
+                win_rate = hist["estimated_win_rate"]
 
             for pos in positions:
                 size = float(pos.get("size", 0) or 0)

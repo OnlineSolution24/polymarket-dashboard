@@ -365,19 +365,43 @@ class AlphaScannerService:
         if progress_callback:
             progress_callback(20, 100, f"{len(unique_addresses)} Wallets gefunden. Anreichern...")
 
-        # Phase 2: Enrich each wallet
+        # Phase 2: Batch-load blockchain data (ONE query instead of 200+)
+        blockchain_pnl = {}
+        blockchain_wr = {}
+        try:
+            from services.historical_analytics import (
+                batch_enrich_wallets,
+                batch_wallet_win_rates,
+                _has_data,
+            )
+            if _has_data():
+                if progress_callback:
+                    progress_callback(22, 100, "Blockchain-Daten laden (Batch)...")
+                blockchain_pnl = batch_enrich_wallets(unique_addresses)
+                blockchain_wr = batch_wallet_win_rates(unique_addresses)
+                logger.info(f"Batch blockchain enrichment: {len(blockchain_pnl)} wallets loaded")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Batch blockchain enrichment failed: {e}")
+
+        # Enrich each wallet (API data + pre-loaded blockchain data)
         enriched: list[WalletData] = []
         total = len(unique_addresses)
         for i, addr in enumerate(unique_addresses):
             lb_data = raw_wallets[addr]
             try:
-                wallet = self._enrich_wallet(addr, lb_data)
+                wallet = self._enrich_wallet(
+                    addr, lb_data,
+                    bc_pnl=blockchain_pnl.get(addr.lower()),
+                    bc_wr=blockchain_wr.get(addr.lower()),
+                )
                 enriched.append(wallet)
             except Exception as e:
                 logger.debug(f"Enrichment failed for {addr[:12]}: {e}")
 
             if progress_callback and (i % 5 == 0 or i == total - 1):
-                pct = 20 + int(70 * (i + 1) / total)
+                pct = 25 + int(65 * (i + 1) / total)
                 progress_callback(pct, 100, f"Wallet {i+1}/{total} anreichern...")
 
             time.sleep(0.2)
@@ -486,7 +510,9 @@ class AlphaScannerService:
     # Phase 2: Enrich a single wallet
     # ------------------------------------------------------------------
 
-    def _enrich_wallet(self, address: str, lb_data: dict) -> WalletData:
+    def _enrich_wallet(self, address: str, lb_data: dict,
+                       bc_pnl: dict | None = None,
+                       bc_wr: dict | None = None) -> WalletData:
         """Fetch profile, positions, activity and build WalletData."""
         wallet = WalletData(
             address=address,
@@ -543,46 +569,24 @@ class AlphaScannerService:
                         pass
             wallet.consistency_days = len(trade_days)
 
-        # Historical blockchain data enrichment (if available)
-        # When blockchain data exists, it's far more accurate than 7-day API data:
-        # - Full trade history (months/years vs 7 days)
-        # - Exact entry/exit prices with fees
-        # - True win rate from actual round-trip trades
-        try:
-            from services.historical_analytics import (
-                get_wallet_pnl_estimate,
-                get_wallet_win_rate_historical,
-                get_wallet_trade_count,
-                _has_data,
-            )
-            if _has_data():
-                hist_pnl = get_wallet_pnl_estimate(address)
-                if hist_pnl and hist_pnl.get("total_trades", 0) > 10:
-                    # Override volume with historical total (more accurate)
-                    hist_vol = hist_pnl.get("total_bought_usdc", 0)
-                    if hist_vol > wallet.volume:
-                        wallet.volume = hist_vol
+        # Historical blockchain data enrichment (pre-loaded via batch query)
+        if bc_pnl and bc_pnl.get("total_trades", 0) > 10:
+            hist_vol = bc_pnl.get("total_bought_usdc", 0)
+            if hist_vol > wallet.volume:
+                wallet.volume = hist_vol
 
-                    # Override PnL with net flow (covers full history)
-                    net_flow = hist_pnl.get("net_flow_usdc", 0)
-                    if abs(net_flow) > abs(wallet.pnl_30d):
-                        wallet.pnl_30d = net_flow
+            net_flow = bc_pnl.get("net_flow_usdc", 0)
+            if abs(net_flow) > abs(wallet.pnl_30d):
+                wallet.pnl_30d = net_flow
 
-                    # Historical win rate (much more data points)
-                    hist_wr = get_wallet_win_rate_historical(address)
-                    if hist_wr and hist_wr.get("total_round_trips", 0) > 5:
-                        wallet.win_rate = hist_wr["estimated_win_rate"]
+            total_trades = bc_pnl.get("total_trades", 0)
+            if total_trades > 0 and wallet.wallet_age_days > 0:
+                wallet.trades_per_day = round(
+                    total_trades / max(wallet.wallet_age_days, 1), 2
+                )
 
-                    # Trade count for trades_per_day (based on all history)
-                    total_trades = hist_pnl.get("total_trades", 0)
-                    if total_trades > 0 and wallet.wallet_age_days > 0:
-                        wallet.trades_per_day = round(
-                            total_trades / max(wallet.wallet_age_days, 1), 2
-                        )
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        if bc_wr and bc_wr.get("total_round_trips", 0) > 5:
+            wallet.win_rate = bc_wr["estimated_win_rate"]
 
         return wallet
 
