@@ -28,10 +28,15 @@ def render():
     equity_curve = perf.get("equity_curve", [])
     total_closed = len(perf.get("closed_markets", []))
 
-    # Calculated values
-    cash_available = max(total_deposited - positions_cost + realized_pnl, 0)
-    portfolio_total = positions_value + cash_available
-    total_pnl = unrealized_pnl + realized_pnl
+    # Real cash balance from Polygon blockchain (USDC.e)
+    real_cash = perf.get("cash_balance")
+    if real_cash is not None:
+        cash_available = real_cash
+        portfolio_total = positions_value + real_cash
+    else:
+        cash_available = max(total_deposited - positions_cost + realized_pnl, 0)
+        portfolio_total = positions_value + cash_available
+    total_pnl = portfolio_total - total_deposited
     total_pnl_pct = (total_pnl / total_deposited * 100) if total_deposited > 0 else 0
     wr = (wins / total_closed * 100) if total_closed > 0 else 0
 
@@ -46,9 +51,9 @@ def render():
     # --- Card 1: Portfolio ---
     with c1:
         with st.container(border=True):
-            st.caption("Portfolio")
+            st.caption(f"Portfolio (${total_deposited:,.0f} eingezahlt)")
             st.markdown(f"### ${portfolio_total:,.2f}")
-            st.markdown(f"Verfuegbar: **${cash_available:,.2f}**")
+            st.markdown(f"Bargeld: **${cash_available:,.2f}**")
             _today_color = "green" if today_pnl >= 0 else "red"
             _sign = "+" if today_pnl >= 0 else ""
             _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0

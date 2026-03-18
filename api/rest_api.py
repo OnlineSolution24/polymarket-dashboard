@@ -284,8 +284,25 @@ def create_app(config: AppConfig) -> FastAPI:
         dep_row = engine.query_one("SELECT value FROM settings WHERE key = 'total_deposited'")
         total_deposited = float(dep_row["value"]) if dep_row else trading_cfg.get("total_deposited", 0)
 
-        # ---- Live data from Polymarket Data API ----
+        # ---- Real USDC balance from Polygon blockchain ----
         funder = config.polymarket_funder if hasattr(config, 'polymarket_funder') else ""
+        real_cash_balance = None
+        if funder:
+            try:
+                usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+                padded_addr = funder[2:].lower().zfill(64)
+                calldata = "0x70a08231" + padded_addr
+                rpc_resp = httpx.post("https://polygon.drpc.org", json={
+                    "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                    "params": [{"to": usdc_contract, "data": calldata}, "latest"],
+                }, timeout=10)
+                rpc_data = rpc_resp.json()
+                if "result" in rpc_data and not rpc_data.get("error"):
+                    real_cash_balance = int(rpc_data["result"], 16) / 1e6
+            except Exception:
+                pass
+
+        # ---- Live data from Polymarket Data API ----
         positions_data = []
         if funder:
             try:
@@ -464,6 +481,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
         return {
             "total_deposited": total_deposited,
+            "cash_balance": round(real_cash_balance, 2) if real_cash_balance is not None else None,
             "positions_value": round(total_value, 2),
             "positions_cost": round(total_cost, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
