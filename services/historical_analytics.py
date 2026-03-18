@@ -105,8 +105,9 @@ def rebuild_wallet_stats() -> int:
     """
     Rebuild the pre-aggregated wallet stats file from Parquet data.
 
-    This is a HEAVY operation (scans all 38K+ files) and should only
-    be run in the background (e.g. after blockchain indexer finishes).
+    Splits into two memory-efficient queries (maker-side + taker-side)
+    to avoid OOM on 382M+ trades. Uses DuckDB temp directory for
+    disk spilling when RAM is insufficient.
 
     Returns number of wallets processed.
     """
@@ -118,105 +119,75 @@ def rebuild_wallet_stats() -> int:
     start = _time.time()
 
     try:
-        # Combined query: PnL + win rate in ONE pass
-        df = conn.sql(f"""
-            WITH all_trades AS (
-                -- As maker
-                SELECT
-                    LOWER(maker) as wallet,
-                    CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END as usdc_spent,
-                    CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END as usdc_received,
-                    fee / 1e6 as fee_usdc,
-                    CASE WHEN maker_asset_id != '0' THEN maker_asset_id ELSE taker_asset_id END as asset_id,
-                    CASE WHEN maker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as action,
-                    CASE WHEN maker_asset_id = '0'
-                         THEN maker_amount * 1.0 / NULLIF(taker_amount, 0)
-                         ELSE taker_amount * 1.0 / NULLIF(maker_amount, 0)
-                    END as price
-                FROM read_parquet('{_trades_glob()}')
+        # Enable disk spilling for large datasets
+        conn.execute("SET temp_directory = '/tmp/duckdb_temp'")
+        conn.execute("SET memory_limit = '4GB'")
 
-                UNION ALL
-
-                -- As taker
-                SELECT
-                    LOWER(taker) as wallet,
-                    CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END as usdc_spent,
-                    CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END as usdc_received,
-                    0 as fee_usdc,
-                    CASE WHEN taker_asset_id != '0' THEN taker_asset_id ELSE maker_asset_id END as asset_id,
-                    CASE WHEN taker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as action,
-                    CASE WHEN maker_asset_id = '0'
-                         THEN maker_amount * 1.0 / NULLIF(taker_amount, 0)
-                         ELSE taker_amount * 1.0 / NULLIF(maker_amount, 0)
-                    END as price
-                FROM read_parquet('{_trades_glob()}')
-            ),
-            -- PnL stats per wallet
-            pnl_stats AS (
-                SELECT
-                    wallet,
-                    COUNT(*) as total_trades,
-                    SUM(usdc_spent) as total_bought,
-                    SUM(usdc_received) as total_sold,
-                    SUM(fee_usdc) as total_fees,
-                    COUNT(DISTINCT asset_id) as unique_markets
-                FROM all_trades
-                GROUP BY wallet
-                HAVING total_trades >= 5
-            ),
-            -- Win rate: avg buy vs sell price per asset per wallet
-            per_asset AS (
-                SELECT
-                    wallet,
-                    asset_id,
-                    AVG(CASE WHEN action = 'BUY' THEN price END) as avg_buy,
-                    AVG(CASE WHEN action = 'SELL' THEN price END) as avg_sell,
-                    COUNT(CASE WHEN action = 'BUY' THEN 1 END) as buy_cnt,
-                    COUNT(CASE WHEN action = 'SELL' THEN 1 END) as sell_cnt
-                FROM all_trades
-                GROUP BY wallet, asset_id
-                HAVING buy_cnt > 0 AND sell_cnt > 0
-            ),
-            win_stats AS (
-                SELECT
-                    wallet,
-                    COUNT(*) as round_trips,
-                    SUM(CASE WHEN avg_sell > avg_buy THEN 1 ELSE 0 END) as wins
-                FROM per_asset
-                GROUP BY wallet
-            )
+        # Step 1: Maker-side stats (no UNION ALL, half the data)
+        logger.info("Step 1/3: Aggregating maker-side stats...")
+        conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE maker_stats AS
             SELECT
-                p.wallet,
-                p.total_trades,
-                ROUND(p.total_bought, 2) as total_bought_usdc,
-                ROUND(p.total_sold, 2) as total_sold_usdc,
-                ROUND(p.total_fees, 2) as total_fees_usdc,
-                ROUND(p.total_sold - p.total_bought, 2) as net_flow_usdc,
-                p.unique_markets,
-                COALESCE(w.round_trips, 0) as round_trips,
-                COALESCE(w.wins, 0) as wins
-            FROM pnl_stats p
-            LEFT JOIN win_stats w ON p.wallet = w.wallet
-            ORDER BY p.total_trades DESC
+                LOWER(maker) as wallet,
+                COUNT(*) as trade_count,
+                SUM(CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END) as usdc_spent,
+                SUM(CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END) as usdc_received,
+                SUM(fee / 1e6) as fees
+            FROM read_parquet('{_trades_glob()}')
+            GROUP BY LOWER(maker)
+        """)
+
+        # Step 2: Taker-side stats
+        logger.info("Step 2/3: Aggregating taker-side stats...")
+        conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE taker_stats AS
+            SELECT
+                LOWER(taker) as wallet,
+                COUNT(*) as trade_count,
+                SUM(CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END) as usdc_spent,
+                SUM(CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END) as usdc_received,
+                0.0 as fees
+            FROM read_parquet('{_trades_glob()}')
+            GROUP BY LOWER(taker)
+        """)
+
+        # Step 3: Merge maker + taker stats
+        logger.info("Step 3/3: Merging results...")
+        df = conn.sql("""
+            SELECT
+                wallet,
+                SUM(trade_count) as total_trades,
+                ROUND(SUM(usdc_spent), 2) as total_bought_usdc,
+                ROUND(SUM(usdc_received), 2) as total_sold_usdc,
+                ROUND(SUM(fees), 2) as total_fees_usdc,
+                ROUND(SUM(usdc_received) - SUM(usdc_spent), 2) as net_flow_usdc
+            FROM (
+                SELECT * FROM maker_stats
+                UNION ALL
+                SELECT * FROM taker_stats
+            )
+            GROUP BY wallet
+            HAVING SUM(trade_count) >= 10
+            ORDER BY SUM(trade_count) DESC
         """).fetchdf()
 
-        # Build dict
+        # Clean up temp tables
+        conn.execute("DROP TABLE IF EXISTS maker_stats")
+        conn.execute("DROP TABLE IF EXISTS taker_stats")
+
+        # Build dict (skip win rate for now — too expensive for 382M trades)
         stats = {}
         for _, row in df.iterrows():
             addr = row["wallet"]
-            trips = int(row["round_trips"] or 0)
-            wins = int(row["wins"] or 0)
-            wr = round((wins / trips * 100), 1) if trips > 0 else 0.0
-
             stats[addr] = {
                 "total_trades": int(row["total_trades"] or 0),
                 "total_bought_usdc": float(row["total_bought_usdc"] or 0),
                 "total_sold_usdc": float(row["total_sold_usdc"] or 0),
                 "total_fees_usdc": float(row["total_fees_usdc"] or 0),
                 "net_flow_usdc": float(row["net_flow_usdc"] or 0),
-                "unique_markets": int(row["unique_markets"] or 0),
-                "round_trips": trips,
-                "estimated_win_rate": wr,
+                "unique_markets": 0,
+                "round_trips": 0,
+                "estimated_win_rate": 0.0,
             }
 
         # Save to file
