@@ -748,6 +748,19 @@ def _match_market_to_game(question: str, finished_games: list) -> Optional[dict]
     """
     q_lower = question.lower()
 
+    # SAFETY: Skip season/tournament/championship markets — these are NOT single-game outcomes
+    season_keywords = [
+        "stanley cup", "super bowl", "world series", "nba champion", "nba finals",
+        "championship", "playoffs", "win the 202", "win the nhl", "win the nba",
+        "win the nfl", "win the mlb", "win the mls", "premier league",
+        "la liga", "bundesliga", "serie a", "champions league", "world cup",
+        "mvp", "ballon d'or", "most valuable", "scoring leader", "top scorer",
+        "rookie of the year", "coach of the year", "make the playoffs",
+        "reach the final", "qualify for", "relegated", "promotion",
+    ]
+    if any(kw in q_lower for kw in season_keywords):
+        return None
+
     for game in finished_games:
         home = game["home_team"]
         away = game["away_team"]

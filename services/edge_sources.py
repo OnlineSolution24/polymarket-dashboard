@@ -395,7 +395,11 @@ def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
                 "daily": "temperature_2m_max,temperature_2m_min",
                 "timezone": "auto",
                 "forecast_days": 7,
-                "models": "icon_seamless,gfs_seamless,ecmwf_ifs025",
+                "models": ",".join([
+                    "icon_seamless", "gfs_seamless", "ecmwf_ifs025",
+                    "ecmwf_aifs025", "gfs05", "gem_global",
+                    "bom_access_global_ensemble", "ukmo_global_ensemble",
+                ]),
             },
             timeout=15,
         )
@@ -421,11 +425,18 @@ def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
             min_vals = [v for v in min_vals if v is not None]
 
             if max_vals and min_vals:
+                max_mean = sum(max_vals) / len(max_vals)
+                min_mean = sum(min_vals) / len(min_vals)
+                # Use standard deviation for better probability estimation (more accurate than spread)
+                max_std = (sum((v - max_mean) ** 2 for v in max_vals) / len(max_vals)) ** 0.5 if len(max_vals) > 1 else 1.5
+                min_std = (sum((v - min_mean) ** 2 for v in min_vals) / len(min_vals)) ** 0.5 if len(min_vals) > 1 else 1.5
                 result[date_str] = {
-                    "temp_max_mean": sum(max_vals) / len(max_vals),
-                    "temp_max_spread": max(max_vals) - min(max_vals) if len(max_vals) > 1 else 1.5,
-                    "temp_min_mean": sum(min_vals) / len(min_vals),
-                    "temp_min_spread": max(min_vals) - min(min_vals) if len(min_vals) > 1 else 1.5,
+                    "temp_max_mean": max_mean,
+                    "temp_max_spread": max_std if max_std > 0.1 else 1.5,
+                    "temp_min_mean": min_mean,
+                    "temp_min_spread": min_std if min_std > 0.1 else 1.5,
+                    "temp_max_members": len(max_vals),
+                    "temp_min_members": len(min_vals),
                 }
 
         return result
