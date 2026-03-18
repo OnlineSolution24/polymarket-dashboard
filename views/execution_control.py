@@ -233,13 +233,14 @@ def render():
                 st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
 
         # Summary bar
+        _sum_color = "#00c853" if unrealized_pnl >= 0 else "#ff1744"
         st.markdown(
             f"<div style='background:#111827;padding:10px 16px;border-radius:8px;margin-top:12px;"
             f"font-size:0.95rem;color:#8892A0'>"
             f"<b>{len(filtered)}</b> Positionen | "
             f"Einsatz <b>${positions_cost:.2f}</b> | "
             f"Wert <b>${positions_value:.2f}</b> | "
-            f"PnL <span style='color:{\"#00c853\" if unrealized_pnl >= 0 else \"#ff1744\"}'>"
+            f"PnL <span style='color:{_sum_color}'>"
             f"<b>${unrealized_pnl:+.2f}</b></span></div>",
             unsafe_allow_html=True,
         )
