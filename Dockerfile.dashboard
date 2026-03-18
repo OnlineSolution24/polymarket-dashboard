@@ -12,6 +12,8 @@ COPY .streamlit/ .streamlit/
 COPY components/ components/
 COPY views/ views/
 COPY services/ services/
+COPY backtesting/ backtesting/
+COPY db/ db/
 
 EXPOSE 8501
 

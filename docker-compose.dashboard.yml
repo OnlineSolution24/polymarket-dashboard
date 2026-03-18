@@ -13,6 +13,8 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     ports:
       - "8501:8501"
+    volumes:
+      - ./data:/app/data
     networks:
       - bot-net
     healthcheck:

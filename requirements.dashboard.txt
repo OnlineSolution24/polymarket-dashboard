@@ -19,3 +19,4 @@ bcrypt>=4.0.0
 # === Data ===
 pandas>=2.2.0
 numpy>=1.26.0
+duckdb>=1.0.0
