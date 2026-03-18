@@ -115,7 +115,7 @@ scheduler:
     enabled: true
     interval_hours: 24
   blockchain_indexer:
-    enabled: false
+    enabled: true
     interval_hours: 6
     max_chunks_per_run: 50000
 strategy:
