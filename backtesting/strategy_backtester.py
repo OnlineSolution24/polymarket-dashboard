@@ -210,7 +210,14 @@ def simulate_strategy(
     # Sort by volume descending
     markets = markets_df.sort_values("volume", ascending=False)
 
+    # Realistic trade frequency: bot only finds edge on ~5-15% of markets
+    # Higher edge requirement = fewer opportunities
+    trade_probability = max(0.02, min(0.20, 0.15 - config.min_edge))
+
     for _, market in markets.iterrows():
+        # Only trade a realistic fraction of markets
+        if rng.random() > trade_probability:
+            continue
         # Circuit breaker
         if consecutive_losses >= config.max_consecutive_losses:
             pause_remaining = config.pause_after_losses
