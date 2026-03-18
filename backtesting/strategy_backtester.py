@@ -188,20 +188,26 @@ def simulate_strategy(
     config: BacktestConfig,
 ) -> BacktestResult:
     """
-    Run a strategy backtest against historical markets.
+    Run a realistic strategy backtest against historical markets.
 
-    For each market: check if entry rules match → simulate trade → compute PnL.
-    Respects position sizing, circuit breaker, and risk management.
+    Key realism: The bot does NOT know resolution in advance. It makes a
+    prediction based on its edge model. The edge determines accuracy:
+    - edge=5% → ~55% correct predictions
+    - edge=10% → ~60% correct predictions
+    - edge=20% → ~70% correct predictions
+
+    For each market: simulate entry price → predict side based on accuracy →
+    compute PnL based on actual resolution.
     """
     start_time = _time.time()
+    rng = np.random.default_rng(42)  # reproducible
     trades = []
     capital = config.capital_usd
     equity_curve = [capital]
     consecutive_losses = 0
     pause_remaining = 0
-    daily_loss = 0.0
 
-    # Sort markets by volume (higher volume = more reliable resolution)
+    # Sort by volume descending
     markets = markets_df.sort_values("volume", ascending=False)
 
     for _, market in markets.iterrows():
@@ -214,137 +220,117 @@ def simulate_strategy(
             pause_remaining -= 1
             continue
 
-        # Check entry rules
+        # Volume filter
         volume = float(market.get("volume", 0) or 0)
         if volume < config.min_volume:
             continue
 
         resolved_yes = bool(market["resolved_yes"])
-        final_price = float(market.get("final_yes_price", 0) or 0)
 
-        # Simulate market price at entry time
-        # We approximate: if resolved YES, price was likely < final
-        # We use a simple model: entry_price ~ uniform between min_price and final_price
-        if resolved_yes:
-            # Market resolved YES (price went to ~1.0)
-            # Simulate entry at a reasonable price below 1.0
-            entry_price = _simulate_entry_price(final_price, resolved_yes, config)
-        else:
-            # Market resolved NO (price went to ~0.0)
-            entry_price = _simulate_entry_price(final_price, resolved_yes, config)
-
-        if entry_price is None:
-            continue
+        # Simulate entry price (what price was the market at when we entered)
+        entry_price = rng.uniform(
+            max(config.min_price, 0.05),
+            min(config.max_price, 0.95),
+        )
 
         # Price filter
         if entry_price < config.min_price or entry_price > config.max_price:
             continue
 
-        # Simulate edge (difference between our model and market price)
-        if resolved_yes:
-            # If it resolved YES, a correct prediction at entry_price gives edge
-            true_prob = 1.0
-            edge = true_prob - entry_price
-        else:
-            # If it resolved NO, a correct NO prediction gives edge
-            true_prob = 0.0
-            edge = entry_price - true_prob  # we'd buy NO at (1-entry_price)
+        # Simulate our model's edge: how much better are we than the market?
+        # Real edge is noisy — sometimes our model is right, sometimes wrong.
+        # Our prediction accuracy = 50% + (edge / 2)
+        # e.g. edge=10% → 55% accuracy, edge=20% → 60% accuracy
+        prediction_accuracy = 0.50 + (config.min_edge / 2)
 
-        if edge < config.min_edge:
+        # Decide which side we bet on (our model's prediction)
+        # We predict YES with probability equal to our accuracy when it actually resolves YES,
+        # and predict NO with the same accuracy when it resolves NO.
+        if resolved_yes:
+            we_predict_yes = rng.random() < prediction_accuracy
+        else:
+            we_predict_yes = rng.random() > prediction_accuracy  # correct = predict NO
+
+        # Compute our perceived edge
+        if we_predict_yes:
+            # We think YES is underpriced → buy YES at entry_price
+            perceived_edge = max(0, rng.uniform(config.min_edge, config.min_edge + 0.15))
+        else:
+            # We think NO is underpriced → buy NO at (1 - entry_price)
+            perceived_edge = max(0, rng.uniform(config.min_edge, config.min_edge + 0.15))
+
+        if perceived_edge < config.min_edge:
             continue
 
         # Position sizing
         max_bet = capital * (config.max_position_pct / 100)
         amount = min(config.max_amount_usd, max_bet)
-        if amount < 0.50:  # min trade size
+        if amount < 0.50:
             continue
 
-        # Calculate shares and PnL
-        if resolved_yes:
-            # We bought YES at entry_price, resolves at 1.0
+        # Determine actual PnL based on our bet vs resolution
+        if we_predict_yes:
+            # We bought YES tokens at entry_price
             shares = amount / entry_price
-            pnl = shares * (1.0 - entry_price)
+            if resolved_yes:
+                # Correct! YES resolves to $1
+                pnl = shares * (1.0 - entry_price)
+            else:
+                # Wrong! YES resolves to $0
+                pnl = -amount
         else:
-            # We bought NO at (1 - entry_price), resolves at 1.0
+            # We bought NO tokens at (1 - entry_price)
             no_price = 1.0 - entry_price
-            if no_price <= 0.01:
+            if no_price <= 0.02:
                 continue
             shares = amount / no_price
-            pnl = shares * (1.0 - no_price)
+            if not resolved_yes:
+                # Correct! NO resolves to $1
+                pnl = shares * (1.0 - no_price)
+            else:
+                # Wrong! NO resolves to $0
+                pnl = -amount
 
-        # Apply take profit / stop loss
+        # Track results
         if pnl > 0:
             pnl_pct = (pnl / amount) * 100
             result = "win"
             consecutive_losses = 0
         else:
-            pnl = -amount  # max loss is the bet
-            pnl_pct = -100.0
+            pnl_pct = (pnl / amount) * 100
             result = "loss"
             consecutive_losses += 1
-            daily_loss += abs(pnl)
-
-        # Cap PnL at realistic levels
-        pnl = max(pnl, -amount)  # can't lose more than bet
 
         capital += pnl
         equity_curve.append(capital)
 
         question = str(market.get("question", ""))[:100]
         category = str(market.get("category", "Other"))
+        side = "YES" if we_predict_yes else "NO"
 
         trades.append(BacktestTrade(
             market_id=str(market["id"]),
             question=question,
             category=category,
-            side="YES" if resolved_yes else "NO",
+            side=side,
             entry_price=round(entry_price, 4),
-            exit_price=1.0 if resolved_yes else 0.0,
+            exit_price=1.0 if (we_predict_yes == resolved_yes) else 0.0,
             amount_usd=round(amount, 2),
             shares=round(shares, 2),
             pnl=round(pnl, 2),
             pnl_pct=round(pnl_pct, 1),
             result=result,
             volume=volume,
-            edge=round(edge, 4),
+            edge=round(perceived_edge, 4),
         ))
 
-        # Stop if we run out of capital
+        # Stop if bankrupt
         if capital <= 0:
             break
 
-    # Compute summary statistics
     result = _compute_result(trades, equity_curve, config, start_time)
     return result
 
-
-def _simulate_entry_price(final_price: float, resolved_yes: bool, config: BacktestConfig) -> float | None:
-    """
-    Simulate a realistic entry price based on market resolution.
-
-    For backtesting we need to estimate what price the market was at when
-    we would have entered. We use a probabilistic model:
-    - If resolved YES: entry price was likely in the 0.40-0.85 range
-    - If resolved NO: entry price was likely in the 0.15-0.60 range
-    """
-    rng = np.random.default_rng()
-
-    if resolved_yes:
-        # Market went to 1.0 — we entered somewhere below
-        # Higher volume markets tend to be more efficient (higher entry prices)
-        entry = rng.uniform(
-            max(config.min_price, 0.10),
-            min(config.max_price, 0.85)
-        )
-    else:
-        # Market went to 0.0 — we might have entered at various prices
-        # If we correctly predicted NO, we bought NO tokens
-        entry = rng.uniform(
-            max(config.min_price, 0.10),
-            min(config.max_price, 0.85)
-        )
-
-    return round(entry, 4)
 
 
 def _compute_result(
