@@ -33,6 +33,12 @@ class BacktestConfig:
     max_position_pct: float = 3.0  # % of capital per trade
     max_amount_usd: float = 5.0
 
+    # Sizing mode: "fixed", "percent_equity", "kelly"
+    #   fixed          = always bet max_amount_usd (capped by max_position_pct of initial capital)
+    #   percent_equity = bet max_position_pct of CURRENT equity (compounding)
+    #   kelly          = Kelly fraction of current equity based on edge & odds
+    sizing_mode: str = "fixed"
+
     # Entry filters
     min_edge: float = 0.05
     min_volume: float = 5000.0
@@ -269,9 +275,27 @@ def simulate_strategy(
         if perceived_edge < config.min_edge:
             continue
 
-        # Position sizing
-        max_bet = capital * (config.max_position_pct / 100)
-        amount = min(config.max_amount_usd, max_bet)
+        # Position sizing based on mode
+        if config.sizing_mode == "percent_equity":
+            # Bet X% of current equity (compounding: grows with wins, shrinks with losses)
+            amount = capital * (config.max_position_pct / 100)
+            amount = min(amount, config.max_amount_usd) if config.max_amount_usd > 0 else amount
+        elif config.sizing_mode == "kelly":
+            # Kelly Criterion: f* = (p*b - q) / b where p=win prob, b=odds, q=1-p
+            win_prob = prediction_accuracy
+            if we_predict_yes:
+                odds = (1.0 - entry_price) / entry_price  # payout ratio for YES
+            else:
+                odds = entry_price / (1.0 - entry_price)  # payout ratio for NO
+            kelly_f = (win_prob * odds - (1 - win_prob)) / odds if odds > 0 else 0
+            kelly_f = max(0, min(kelly_f, 0.25))  # cap at 25% to avoid ruin
+            amount = capital * kelly_f
+            amount = min(amount, config.max_amount_usd) if config.max_amount_usd > 0 else amount
+        else:
+            # Fixed amount mode (default)
+            max_bet = capital * (config.max_position_pct / 100)
+            amount = min(config.max_amount_usd, max_bet)
+
         if amount < 0.50:
             continue
 
@@ -442,6 +466,7 @@ def optimize_parameters(
         # Random parameter variations
         config = BacktestConfig(
             capital_usd=base_config.capital_usd,
+            sizing_mode=base_config.sizing_mode,
             max_position_pct=float(rng.choice([1.0, 2.0, 3.0, 5.0, 7.0, 10.0])),
             max_amount_usd=float(rng.choice([2.0, 3.0, 5.0, 7.0, 10.0, 15.0])),
             min_edge=float(rng.choice([0.03, 0.05, 0.08, 0.10, 0.15, 0.20])),
@@ -552,6 +577,7 @@ def _save_result(result: BacktestResult, suffix: str = ""):
             "capital_usd": result.config.capital_usd,
             "max_position_pct": result.config.max_position_pct,
             "max_amount_usd": result.config.max_amount_usd,
+            "sizing_mode": result.config.sizing_mode,
             "min_edge": result.config.min_edge,
             "min_volume": result.config.min_volume,
             "min_price": result.config.min_price,

@@ -17,9 +17,14 @@ CHART_LAYOUT = dict(template="plotly_dark", margin=dict(l=40, r=20, t=40, b=40),
 RESULTS_FILE = Path("data/backtest_results/strategy_backtest.json")
 OPT_RESULTS_FILE = Path("data/backtest_results/strategy_backtest_optimized.json")
 OPT_LOG_FILE = Path("data/backtest_results/optimization_log.json")
-WEATHER_RESULTS_FILE = Path("data/backtest_results/weather_backtest.json")
 
 ALL_CATEGORIES = ["Weather", "Crypto", "Sports", "Politics", "Economics", "Other"]
+
+SIZING_MODES = {
+    "fixed": "Fester Betrag — immer gleicher $-Betrag pro Trade",
+    "percent_equity": "% vom Kapital — Einsatz wachst/schrumpft mit Equity (Compounding)",
+    "kelly": "Kelly Criterion — optimale Wettgrosse basierend auf Edge & Odds",
+}
 
 
 def render():
@@ -49,26 +54,75 @@ def _render_strategy_backtest():
     """Main backtest tab with parameter controls and results."""
 
     st.subheader("Parameter einstellen")
-    st.caption("Stelle deine Strategie-Parameter ein und starte den Backtest gegen 408K historische Markte.")
+    st.caption("Stelle deine Strategie-Parameter ein und starte den Backtest gegen 408K historische Markte (Sep 2022 – Jun 2025).")
 
-    # Parameter controls
-    with st.expander("Trading Parameter", expanded=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            capital = st.number_input("Startkapital ($)", value=1400.0, step=100.0, key="bt_capital")
-            min_edge = st.slider("Min Edge (%)", 1, 30, 5, key="bt_edge") / 100
-            min_price = st.slider("Min Price", 0.01, 0.30, 0.05, step=0.01, key="bt_minp")
-        with c2:
-            max_pos_pct = st.slider("Max Position (%)", 1, 15, 3, key="bt_pos")
-            max_amount = st.number_input("Max Amount ($)", value=5.0, step=1.0, key="bt_amt")
-            max_price = st.slider("Max Price", 0.50, 0.99, 0.90, step=0.01, key="bt_maxp")
-        with c3:
-            min_volume = st.select_slider("Min Volume ($)", options=[1000, 3000, 5000, 10000, 25000, 50000], value=5000, key="bt_vol")
-            stop_loss = st.slider("Stop Loss (%)", 5, 50, 25, key="bt_sl")
-            max_losses = st.slider("Circuit Breaker (Verluste)", 1, 10, 3, key="bt_cb")
+    # --- Position Sizing Section ---
+    st.markdown("##### Position Sizing")
 
-    # Category filter
-    categories = st.multiselect("Kategorien (leer = alle)", ALL_CATEGORIES, default=[], key="bt_cats")
+    sizing_mode = st.radio(
+        "Sizing Modus",
+        options=list(SIZING_MODES.keys()),
+        format_func=lambda x: SIZING_MODES[x],
+        index=0,
+        key="bt_sizing_mode",
+        horizontal=True,
+    )
+
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        capital = st.number_input("Startkapital ($)", value=1400.0, step=100.0, key="bt_capital")
+    with sc2:
+        if sizing_mode == "fixed":
+            max_amount = st.number_input("Betrag pro Trade ($)", value=7.0, step=1.0, key="bt_amt",
+                                         help="Fester $-Betrag pro Trade")
+        else:
+            max_amount = st.number_input("Max Betrag ($)", value=50.0, step=5.0, key="bt_amt",
+                                         help="Obere Grenze pro Trade (0 = kein Limit)")
+    with sc3:
+        if sizing_mode == "fixed":
+            max_pos_pct = st.slider("Max Position (% vom Kapital)", 1, 15, 1, key="bt_pos",
+                                    help="Begrenzt den Trade auf X% des Startkapitals")
+        elif sizing_mode == "percent_equity":
+            max_pos_pct = st.slider("Einsatz (% vom Equity)", 1, 15, 3, key="bt_pos",
+                                    help="Jeder Trade = X% deines aktuellen Kapitals")
+        else:  # kelly
+            max_pos_pct = st.slider("Max Kelly (%)", 1, 25, 10, key="bt_pos",
+                                    help="Kelly wird auf max X% gedeckelt")
+
+    # Sizing mode explanation
+    if sizing_mode == "percent_equity":
+        st.info("**Compounding aktiv:** Gewinnst du, werden deine Einsatze grosser. Verlierst du, werden sie kleiner. "
+                "Beschleunigt Wachstum, aber auch Drawdowns.")
+    elif sizing_mode == "kelly":
+        st.info("**Kelly Criterion:** Berechnet die mathematisch optimale Wettgrosse aus Edge und Quoten. "
+                "Maximiert langfristiges Wachstum, kann aber volatile sein.")
+
+    # --- Entry Filters ---
+    st.markdown("##### Entry Filters")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        min_edge = st.slider("Min Edge (%)", 1, 30, 15, key="bt_edge") / 100
+    with c2:
+        min_volume = st.select_slider("Min Volume ($)", options=[1000, 3000, 5000, 10000, 25000, 50000], value=10000, key="bt_vol")
+    with c3:
+        categories = st.multiselect("Kategorien (leer = alle)", ALL_CATEGORIES, default=[], key="bt_cats")
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        min_price = st.slider("Min Price", 0.01, 0.30, 0.05, step=0.01, key="bt_minp")
+    with c5:
+        max_price = st.slider("Max Price", 0.50, 0.99, 0.85, step=0.01, key="bt_maxp")
+    with c6:
+        stop_loss = st.slider("Stop Loss (%)", 5, 50, 25, key="bt_sl")
+
+    # --- Risk Management ---
+    st.markdown("##### Risk Management")
+    r1, r2 = st.columns(2)
+    with r1:
+        max_losses = st.slider("Circuit Breaker (Verluste in Folge)", 1, 10, 3, key="bt_cb")
+    with r2:
+        pause_trades = st.slider("Pause nach Circuit Breaker (Trades)", 0, 50, 10, key="bt_pause",
+                                  help="Wie viele Trades werden nach dem Circuit Breaker uebersprungen")
 
     # Run button
     col_run, col_status = st.columns([1, 3])
@@ -83,12 +137,14 @@ def _render_strategy_backtest():
                     capital_usd=capital,
                     max_position_pct=max_pos_pct,
                     max_amount_usd=max_amount,
+                    sizing_mode=sizing_mode,
                     min_edge=min_edge,
                     min_volume=min_volume,
                     min_price=min_price,
                     max_price=max_price,
                     stop_loss_pct=stop_loss,
                     max_consecutive_losses=max_losses,
+                    pause_after_losses=pause_trades,
                     categories=categories,
                     strategy_name="manual",
                 )
@@ -122,8 +178,11 @@ def _show_backtest_results(results_file: Path):
     st.divider()
 
     # Config summary
+    sizing = config.get("sizing_mode", "fixed")
+    sizing_label = {"fixed": "Fest", "percent_equity": "% Equity", "kelly": "Kelly"}.get(sizing, sizing)
     st.caption(
         f"Kapital: ${config.get('capital_usd', 0):,.0f} | "
+        f"Sizing: **{sizing_label}** | "
         f"Max Position: {config.get('max_position_pct', 0)}% | "
         f"Max Amount: ${config.get('max_amount_usd', 0)} | "
         f"Min Edge: {config.get('min_edge', 0):.0%} | "
@@ -159,7 +218,10 @@ def _show_backtest_results(results_file: Path):
     with kc2[2]:
         st.metric("Max Loss", f"${summary.get('max_loss', 0):.2f}")
     with kc2[3]:
-        st.metric("Max DD ($)", f"${summary.get('max_drawdown_usd', 0):.2f}")
+        # ROI
+        cap = config.get("capital_usd", 1400)
+        roi = (pnl / cap * 100) if cap > 0 else 0
+        st.metric("ROI", f"{roi:+.1f}%")
 
     st.divider()
 
@@ -250,23 +312,29 @@ def _render_optimizer():
     st.subheader("Parameter Optimizer")
     st.caption("Testet automatisch verschiedene Parameter-Kombinationen und findet die profitabelsten Einstellungen.")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         opt_metric = st.selectbox("Optimieren fuer", [
             "sharpe_ratio", "total_pnl", "win_rate", "profit_factor",
         ], index=0, key="opt_metric")
     with c2:
         n_iter = st.slider("Iterationen", 20, 200, 50, step=10, key="opt_iter")
+    with c3:
+        opt_sizing = st.selectbox("Sizing Modus", list(SIZING_MODES.keys()),
+                                   format_func=lambda x: x.replace("_", " ").title(),
+                                   index=0, key="opt_sizing")
 
-    categories = st.multiselect("Kategorien (leer = alle)", ALL_CATEGORIES, default=[], key="opt_cats")
-
-    capital = st.number_input("Startkapital ($)", value=1400.0, step=100.0, key="opt_capital")
+    c4, c5 = st.columns(2)
+    with c4:
+        categories = st.multiselect("Kategorien (leer = alle)", ALL_CATEGORIES, default=[], key="opt_cats")
+    with c5:
+        capital = st.number_input("Startkapital ($)", value=1400.0, step=100.0, key="opt_capital")
 
     if st.button("Optimierung starten", type="primary", key="opt_run"):
         with st.spinner(f"Optimiere {opt_metric} uber {n_iter} Iterationen..."):
             try:
                 from backtesting.strategy_backtester import BacktestConfig, run_optimization
-                base = BacktestConfig(capital_usd=capital, categories=categories)
+                base = BacktestConfig(capital_usd=capital, categories=categories, sizing_mode=opt_sizing)
                 best_config, log, best_result = run_optimization(base, opt_metric, n_iter)
                 st.success(
                     f"Beste Parameter gefunden! "
