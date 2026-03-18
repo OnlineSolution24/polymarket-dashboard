@@ -1,6 +1,6 @@
 """
-Backtesting Module — Runs backtests on trade data from the Bot API.
-Monte-Carlo, Walk-Forward, Drawdown analysis, and Historical Blockchain Backtests.
+Backtesting Module — Strategy Backtester with parameter tuning & optimizer.
+Replays strategies against 408K historical markets from 384M trade database.
 """
 
 import json
@@ -14,190 +14,352 @@ from pathlib import Path
 from services.bot_api_client import get_bot_client
 
 CHART_LAYOUT = dict(template="plotly_dark", margin=dict(l=40, r=20, t=40, b=40), font=dict(size=12))
-RESULTS_FILE = Path("data/backtest_results/weather_backtest.json")
+RESULTS_FILE = Path("data/backtest_results/strategy_backtest.json")
+OPT_RESULTS_FILE = Path("data/backtest_results/strategy_backtest_optimized.json")
+OPT_LOG_FILE = Path("data/backtest_results/optimization_log.json")
+WEATHER_RESULTS_FILE = Path("data/backtest_results/weather_backtest.json")
+
+ALL_CATEGORIES = ["Weather", "Crypto", "Sports", "Politics", "Economics", "Other"]
 
 
 def render():
     st.header("Backtesting")
 
-    tab_bot, tab_weather = st.tabs(["Bot Trades", "Historical Weather (384M Trades)"])
+    tab_strat, tab_opt, tab_bot = st.tabs([
+        "Strategy Backtest",
+        "Parameter Optimizer",
+        "Bot Trades (Monte Carlo)",
+    ])
+
+    with tab_strat:
+        _render_strategy_backtest()
+
+    with tab_opt:
+        _render_optimizer()
 
     with tab_bot:
         _render_bot_backtest()
 
-    with tab_weather:
-        _render_weather_backtest()
 
+# =====================================================================
+# TAB 1: Strategy Backtest
+# =====================================================================
 
-def _render_weather_backtest():
-    """Render weather strategy backtest results from the 384M trade history."""
+def _render_strategy_backtest():
+    """Main backtest tab with parameter controls and results."""
 
-    # Check if results exist
-    if not RESULTS_FILE.exists():
-        st.info("Noch keine Weather-Backtest-Ergebnisse vorhanden.")
-        if st.button("Weather Backtest jetzt starten", type="primary"):
-            with st.spinner("Analysiere 8.900+ Weather-Markte aus 384M Trade-Datenbank..."):
-                try:
-                    from backtesting.weather_backtest import run_weather_backtest
-                    result = run_weather_backtest()
-                    st.success(f"Backtest abgeschlossen! {result.total_weather_markets} Markte analysiert.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Fehler: {e}")
+    st.subheader("Parameter einstellen")
+    st.caption("Stelle deine Strategie-Parameter ein und starte den Backtest gegen 408K historische Markte.")
+
+    # Parameter controls
+    with st.expander("Trading Parameter", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            capital = st.number_input("Startkapital ($)", value=1400.0, step=100.0, key="bt_capital")
+            min_edge = st.slider("Min Edge (%)", 1, 30, 5, key="bt_edge") / 100
+            min_price = st.slider("Min Price", 0.01, 0.30, 0.05, step=0.01, key="bt_minp")
+        with c2:
+            max_pos_pct = st.slider("Max Position (%)", 1, 15, 3, key="bt_pos")
+            max_amount = st.number_input("Max Amount ($)", value=5.0, step=1.0, key="bt_amt")
+            max_price = st.slider("Max Price", 0.50, 0.99, 0.90, step=0.01, key="bt_maxp")
+        with c3:
+            min_volume = st.select_slider("Min Volume ($)", options=[1000, 3000, 5000, 10000, 25000, 50000], value=5000, key="bt_vol")
+            stop_loss = st.slider("Stop Loss (%)", 5, 50, 25, key="bt_sl")
+            max_losses = st.slider("Circuit Breaker (Verluste)", 1, 10, 3, key="bt_cb")
+
+    # Category filter
+    categories = st.multiselect("Kategorien (leer = alle)", ALL_CATEGORIES, default=[], key="bt_cats")
+
+    # Run button
+    col_run, col_status = st.columns([1, 3])
+    with col_run:
+        run_bt = st.button("Backtest starten", type="primary", key="bt_run")
+
+    if run_bt:
+        with st.spinner("Backtest lauft... (408K Markte werden analysiert)"):
+            try:
+                from backtesting.strategy_backtester import BacktestConfig, run_backtest
+                config = BacktestConfig(
+                    capital_usd=capital,
+                    max_position_pct=max_pos_pct,
+                    max_amount_usd=max_amount,
+                    min_edge=min_edge,
+                    min_volume=min_volume,
+                    min_price=min_price,
+                    max_price=max_price,
+                    stop_loss_pct=stop_loss,
+                    max_consecutive_losses=max_losses,
+                    categories=categories,
+                    strategy_name="manual",
+                )
+                result = run_backtest(config)
+                st.success(f"Backtest fertig! {result.total_trades} Trades in {result.duration_seconds:.1f}s")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Fehler: {e}")
+                import traceback
+                st.code(traceback.format_exc())
         return
 
-    # Load results
+    # Show results if available
+    if RESULTS_FILE.exists():
+        _show_backtest_results(RESULTS_FILE)
+    else:
+        st.info("Noch kein Backtest durchgefuhrt. Stelle Parameter ein und klicke 'Backtest starten'.")
+
+
+def _show_backtest_results(results_file: Path):
+    """Display comprehensive backtest results."""
     try:
-        data = json.loads(RESULTS_FILE.read_text())
+        data = json.loads(results_file.read_text())
     except Exception as e:
         st.error(f"Fehler beim Laden: {e}")
         return
 
-    # Header stats
-    st.markdown(f"*Letzte Analyse: {data.get('timestamp', 'unbekannt')[:19]}*")
-
-    kc = st.columns(4)
-    with kc[0]:
-        st.metric("Weather-Markte", f"{data.get('total_weather_markets', 0):,}")
-    with kc[1]:
-        st.metric("Mit Trade-Daten", f"{data.get('markets_with_trades', 0):,}")
-    with kc[2]:
-        st.metric("Trades analysiert", f"{data.get('total_trades_analyzed', 0):,}")
-    with kc[3]:
-        total_pnl = sum(s.get("total_pnl", 0) for s in data.get("strategies", []))
-        color = "#00c853" if total_pnl > 0 else "#ff1744"
-        st.metric("Gesamt PnL (sim.)", f"${total_pnl:+,.2f}")
+    summary = data.get("summary", {})
+    config = data.get("config", {})
 
     st.divider()
 
-    # Strategy comparison
-    st.subheader("Strategie-Vergleich")
-    strategies = data.get("strategies", [])
+    # Config summary
+    st.caption(
+        f"Kapital: ${config.get('capital_usd', 0):,.0f} | "
+        f"Max Position: {config.get('max_position_pct', 0)}% | "
+        f"Max Amount: ${config.get('max_amount_usd', 0)} | "
+        f"Min Edge: {config.get('min_edge', 0):.0%} | "
+        f"Min Volume: ${config.get('min_volume', 0):,.0f}"
+    )
 
-    if strategies:
-        # Strategy table
-        strat_rows = []
-        for s in strategies:
-            wr = s.get("win_rate", 0)
-            pnl = s.get("total_pnl", 0)
-            strat_rows.append({
-                "Strategie": s["name"],
-                "Trades": s.get("total_trades", 0),
-                "Win Rate": f"{wr:.1%}",
-                "PnL": f"${pnl:+.2f}",
-                "Avg Return": f"${s.get('avg_return', 0):+.2f}",
-                "Max Win": f"${s.get('max_win', 0):.2f}",
-                "Max Loss": f"${s.get('max_loss', 0):.2f}",
-                "Sharpe": f"{s.get('sharpe', 0):.2f}",
-            })
+    # KPI Row
+    st.subheader("Ergebnis")
+    kc = st.columns(6)
+    with kc[0]:
+        st.metric("Trades", summary.get("total_trades", 0))
+    with kc[1]:
+        wr = summary.get("win_rate", 0)
+        st.metric("Win Rate", f"{wr:.1f}%")
+    with kc[2]:
+        pnl = summary.get("total_pnl", 0)
+        st.metric("PnL", f"${pnl:+,.2f}")
+    with kc[3]:
+        st.metric("Sharpe", f"{summary.get('sharpe_ratio', 0):.2f}")
+    with kc[4]:
+        st.metric("Max Drawdown", f"{summary.get('max_drawdown_pct', 0):.1f}%")
+    with kc[5]:
+        pf = summary.get("profit_factor", 0)
+        pf_str = f"{pf:.2f}" if pf != float("inf") else "Inf"
+        st.metric("Profit Factor", pf_str)
 
-        st.dataframe(pd.DataFrame(strat_rows), use_container_width=True, hide_index=True)
+    # Second KPI row
+    kc2 = st.columns(4)
+    with kc2[0]:
+        st.metric("Avg PnL/Trade", f"${summary.get('avg_pnl', 0):+.2f}")
+    with kc2[1]:
+        st.metric("Max Win", f"${summary.get('max_win', 0):+.2f}")
+    with kc2[2]:
+        st.metric("Max Loss", f"${summary.get('max_loss', 0):.2f}")
+    with kc2[3]:
+        st.metric("Max DD ($)", f"${summary.get('max_drawdown_usd', 0):.2f}")
 
-        # Bar chart: PnL per strategy
-        fig = go.Figure()
-        names = [s["name"] for s in strategies]
-        pnls = [s.get("total_pnl", 0) for s in strategies]
-        colors = ["#00c853" if p > 0 else "#ff1744" for p in pnls]
-        fig.add_trace(go.Bar(x=names, y=pnls, marker_color=colors))
-        fig.update_layout(**CHART_LAYOUT, height=350, title="PnL pro Strategie (simuliert)")
+    st.divider()
+
+    # Equity Curve + Drawdown
+    equity = data.get("equity_curve", [])
+    dd_curve = data.get("drawdown_curve", [])
+
+    if equity:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3],
+            subplot_titles=["Equity Curve", "Drawdown (%)"],
+            vertical_spacing=0.08,
+        )
+        fig.add_trace(go.Scatter(
+            y=equity, mode="lines", name="Equity",
+            line=dict(color="#1f77b4", width=2),
+        ), row=1, col=1)
+        # Add start capital line
+        fig.add_hline(y=config.get("capital_usd", 1400), line_dash="dash",
+                      line_color="gray", row=1, col=1)
+
+        if dd_curve:
+            fig.add_trace(go.Scatter(
+                y=[-d for d in dd_curve], mode="lines", name="Drawdown",
+                fill="tozeroy", line=dict(color="#d62728", width=1),
+            ), row=2, col=1)
+
+        fig.update_layout(**CHART_LAYOUT, height=500, showlegend=False)
+        fig.update_yaxes(title_text="$", row=1, col=1)
+        fig.update_yaxes(title_text="%", row=2, col=1)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Win rate comparison
-        fig_wr = go.Figure()
-        win_rates = [s.get("win_rate", 0) * 100 for s in strategies]
-        fig_wr.add_trace(go.Bar(x=names, y=win_rates, marker_color="#1f77b4"))
-        fig_wr.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="Break-even")
-        fig_wr.update_layout(**CHART_LAYOUT, height=300, title="Win Rate (%)", yaxis_range=[0, 100])
-        st.plotly_chart(fig_wr, use_container_width=True)
-
-    st.divider()
-
-    # Category breakdown
-    st.subheader("Kategorien")
+    # Category Breakdown
     cat_stats = data.get("category_stats", {})
     if cat_stats:
+        st.subheader("Performance pro Kategorie")
         cat_rows = []
-        for cat, stats in sorted(cat_stats.items(), key=lambda x: x[1].get("total_volume", 0), reverse=True):
+        for cat, s in sorted(cat_stats.items(), key=lambda x: x[1].get("pnl", 0), reverse=True):
             cat_rows.append({
-                "Kategorie": cat.replace("_", " ").title(),
-                "Markte": stats.get("total_markets", 0),
-                "Geschlossen": stats.get("closed_markets", 0),
-                "Volume": f"${stats.get('total_volume', 0):,.0f}",
-                "Avg Volume": f"${stats.get('avg_volume', 0):,.0f}",
+                "Kategorie": cat,
+                "Trades": s.get("trades", 0),
+                "Win Rate": f"{s.get('win_rate', 0):.1f}%",
+                "PnL": f"${s.get('pnl', 0):+.2f}",
             })
         st.dataframe(pd.DataFrame(cat_rows), use_container_width=True, hide_index=True)
 
-    st.divider()
+        # Category PnL bar chart
+        fig_cat = go.Figure()
+        cats = [r["Kategorie"] for r in cat_rows]
+        cat_pnls = [cat_stats[c].get("pnl", 0) for c in cats]
+        colors = ["#00c853" if p > 0 else "#ff1744" for p in cat_pnls]
+        fig_cat.add_trace(go.Bar(x=cats, y=cat_pnls, marker_color=colors))
+        fig_cat.update_layout(**CHART_LAYOUT, height=300, title="PnL pro Kategorie")
+        st.plotly_chart(fig_cat, use_container_width=True)
 
-    # Trading patterns
-    patterns = data.get("trading_patterns", [])
-    if patterns:
-        st.subheader(f"Trading Patterns (Top {len(patterns)} Markte)")
+    # PnL Distribution
+    trades_data = data.get("trades", [])
+    if trades_data:
+        st.subheader("Trade-Verteilung")
+        trade_pnls = [t.get("pnl", 0) for t in trades_data]
+        win_pnls = [p for p in trade_pnls if p > 0]
+        loss_pnls = [p for p in trade_pnls if p <= 0]
 
-        # Price trend distribution
-        trends = [p.get("trend", "FLAT") for p in patterns]
-        up = trends.count("UP")
-        down = trends.count("DOWN")
-        flat = trends.count("FLAT")
+        fig_dist = go.Figure()
+        if win_pnls:
+            fig_dist.add_trace(go.Histogram(x=win_pnls, name="Wins", marker_color="#2ca02c", nbinsx=30))
+        if loss_pnls:
+            fig_dist.add_trace(go.Histogram(x=loss_pnls, name="Losses", marker_color="#d62728", nbinsx=30))
+        fig_dist.update_layout(**CHART_LAYOUT, height=300, title="PnL-Verteilung", barmode="overlay")
+        fig_dist.update_traces(opacity=0.7)
+        st.plotly_chart(fig_dist, use_container_width=True)
 
-        tc = st.columns(3)
-        with tc[0]:
-            st.metric("Trend UP", up)
-        with tc[1]:
-            st.metric("Trend DOWN", down)
-        with tc[2]:
-            st.metric("Trend FLAT", flat)
+        # Trade table
+        with st.expander(f"Alle Trades ({len(trades_data)})", expanded=False):
+            df_trades = pd.DataFrame(trades_data)
+            if not df_trades.empty:
+                display_cols = ["question", "category", "side", "entry_price", "amount_usd", "pnl", "pnl_pct", "result", "edge"]
+                available = [c for c in display_cols if c in df_trades.columns]
+                st.dataframe(df_trades[available], use_container_width=True, hide_index=True)
 
-        # Pattern details
-        with st.expander("Market-Details", expanded=False):
-            for p in patterns[:20]:
-                resolved = "YES" if p.get("resolved_yes") else "NO"
-                trend_icon = {"UP": "+", "DOWN": "-", "FLAT": "="}[p.get("trend", "FLAT")]
-                st.markdown(
-                    f"**{p.get('question', '?')[:80]}**  \n"
-                    f"Vol: ${p.get('volume', 0):,.0f} | "
-                    f"Trend: {trend_icon} | "
-                    f"Resolved: {resolved} | "
-                    f"Prices: {p.get('q1_price', 0):.2f} -> {p.get('mid_price', 0):.2f} -> {p.get('final_price', 0):.2f}"
-                )
 
-    st.divider()
+# =====================================================================
+# TAB 2: Parameter Optimizer
+# =====================================================================
 
-    # Key findings
-    findings = data.get("key_findings", [])
-    if findings:
-        st.subheader("Erkenntnisse")
-        for f in findings:
-            st.markdown(f"- {f}")
+def _render_optimizer():
+    """Auto-optimizer that finds the best parameters."""
+    st.subheader("Parameter Optimizer")
+    st.caption("Testet automatisch verschiedene Parameter-Kombinationen und findet die profitabelsten Einstellungen.")
 
-    # Re-run button
-    st.divider()
-    if st.button("Backtest neu starten", type="secondary"):
-        with st.spinner("Analysiere Weather-Markte..."):
+    c1, c2 = st.columns(2)
+    with c1:
+        opt_metric = st.selectbox("Optimieren fuer", [
+            "sharpe_ratio", "total_pnl", "win_rate", "profit_factor",
+        ], index=0, key="opt_metric")
+    with c2:
+        n_iter = st.slider("Iterationen", 20, 200, 50, step=10, key="opt_iter")
+
+    categories = st.multiselect("Kategorien (leer = alle)", ALL_CATEGORIES, default=[], key="opt_cats")
+
+    capital = st.number_input("Startkapital ($)", value=1400.0, step=100.0, key="opt_capital")
+
+    if st.button("Optimierung starten", type="primary", key="opt_run"):
+        with st.spinner(f"Optimiere {opt_metric} uber {n_iter} Iterationen..."):
             try:
-                from backtesting.weather_backtest import run_weather_backtest
-                run_weather_backtest()
-                st.success("Fertig!")
+                from backtesting.strategy_backtester import BacktestConfig, run_optimization
+                base = BacktestConfig(capital_usd=capital, categories=categories)
+                best_config, log, best_result = run_optimization(base, opt_metric, n_iter)
+                st.success(
+                    f"Beste Parameter gefunden! "
+                    f"Edge={best_config.min_edge:.0%}, "
+                    f"Amount=${best_config.max_amount_usd}, "
+                    f"Position={best_config.max_position_pct}% "
+                    f"-> {opt_metric}={getattr(best_result, opt_metric, 0)}"
+                )
                 st.rerun()
             except Exception as e:
                 st.error(f"Fehler: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+        return
 
+    # Show optimization results
+    if OPT_LOG_FILE.exists():
+        _show_optimization_results()
+
+    if OPT_RESULTS_FILE.exists():
+        st.divider()
+        st.subheader("Beste Parameter - Backtest Ergebnis")
+        _show_backtest_results(OPT_RESULTS_FILE)
+
+
+def _show_optimization_results():
+    """Show optimization log with parameter comparison."""
+    try:
+        log = json.loads(OPT_LOG_FILE.read_text())
+    except Exception:
+        return
+
+    if not log:
+        return
+
+    st.subheader("Optimierungs-Ergebnisse")
+
+    # Best parameters
+    best = log[0]  # sorted by score
+    st.markdown("**Beste Parameter:**")
+    bc = st.columns(4)
+    with bc[0]:
+        st.metric("Min Edge", f"{best.get('min_edge', 0):.0%}")
+    with bc[1]:
+        st.metric("Max Amount", f"${best.get('max_amount_usd', 0)}")
+    with bc[2]:
+        st.metric("Max Position", f"{best.get('max_position_pct', 0)}%")
+    with bc[3]:
+        st.metric("Min Volume", f"${best.get('min_volume', 0):,.0f}")
+
+    # Results table
+    df_log = pd.DataFrame(log[:20])  # top 20
+    display_cols = ["min_edge", "max_amount_usd", "max_position_pct", "min_volume",
+                    "min_price", "max_price", "total_trades", "win_rate", "total_pnl",
+                    "sharpe_ratio", "max_drawdown_pct", "profit_factor", "score"]
+    available = [c for c in display_cols if c in df_log.columns]
+    st.dataframe(df_log[available], use_container_width=True, hide_index=True)
+
+    # Scatter: edge vs PnL
+    if len(log) > 5:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=[r.get("min_edge", 0) for r in log],
+            y=[r.get("total_pnl", 0) for r in log],
+            mode="markers",
+            marker=dict(
+                size=8,
+                color=[r.get("sharpe_ratio", 0) for r in log],
+                colorscale="RdYlGn",
+                showscale=True,
+                colorbar=dict(title="Sharpe"),
+            ),
+            text=[f"WR={r.get('win_rate', 0)}% Trades={r.get('total_trades', 0)}" for r in log],
+        ))
+        fig.update_layout(**CHART_LAYOUT, height=400, title="Edge vs PnL (Farbe = Sharpe)",
+                          xaxis_title="Min Edge", yaxis_title="Total PnL ($)")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# =====================================================================
+# TAB 3: Bot Trades (Monte Carlo) - original
+# =====================================================================
 
 def _render_bot_backtest():
-    """Original bot trades backtest."""
+    """Original bot trades backtest with Monte Carlo."""
     client = get_bot_client()
-
-    # --- Load trade data from API ---
     trades = client.get_trades(limit=500)
     completed = [t for t in trades if t.get("result") is not None and t.get("pnl") is not None]
 
     st.markdown(f"**Abgeschlossene Trades vom Bot:** {len(completed)}")
 
     if len(completed) < 5:
-        st.info("Zu wenig abgeschlossene Trades fur ein Backtesting. Mindestens 5 notig.")
-        st.caption("Der Bot muss erst Trades ausfuhren und abschliessen, bevor ein Backtesting moglich ist.")
-
-        # Offer synthetic data option
+        st.info("Zu wenig abgeschlossene Trades. Mindestens 5 notig.")
         st.divider()
         st.subheader("Synthetische Daten")
         n_synthetic = st.slider("Anzahl synthetischer Trades", 50, 500, 200, step=50)
@@ -206,7 +368,6 @@ def _render_bot_backtest():
             _run_full_backtest(trades_df, 1000.0, 0.05, 1000)
         return
 
-    # --- Parameters ---
     with st.expander("Parameter", expanded=True):
         p1, p2, p3 = st.columns(3)
         with p1:
@@ -216,23 +377,19 @@ def _render_bot_backtest():
         with p3:
             n_simulations = st.slider("Monte Carlo Runs", 100, 5000, 1000, step=100)
 
-    if st.button("Backtest starten", type="primary"):
+    if st.button("Backtest starten", type="primary", key="mc_run"):
         trades_df = pd.DataFrame(completed)
         trades_df["pnl"] = trades_df["pnl"].astype(float)
         _run_full_backtest(trades_df, initial_capital, max_position, n_simulations)
 
 
 def _generate_synthetic_trades(n_trades: int) -> pd.DataFrame:
-    """Generate synthetic trade data for backtesting."""
     np.random.seed(42)
     win_rate = 0.55
     wins = np.random.random(n_trades) < win_rate
     pnls = []
     for w in wins:
-        if w:
-            pnls.append(np.random.uniform(2, 50))
-        else:
-            pnls.append(-np.random.uniform(2, 40))
+        pnls.append(np.random.uniform(2, 50) if w else -np.random.uniform(2, 40))
     return pd.DataFrame({
         "pnl": pnls,
         "result": ["win" if w else "loss" for w in wins],
@@ -241,28 +398,23 @@ def _generate_synthetic_trades(n_trades: int) -> pd.DataFrame:
 
 
 def _run_full_backtest(trades_df: pd.DataFrame, capital: float, max_pos: float, n_mc: int):
-    """Run backtest analysis on trade data."""
-    progress = st.progress(0, text="Backtest läuft...")
+    progress = st.progress(0, text="Backtest lauft...")
 
     pnls = trades_df["pnl"].values.astype(float)
     n_trades = len(pnls)
     wins = sum(1 for p in pnls if p > 0)
-    losses = n_trades - wins
     win_rate = wins / n_trades if n_trades else 0
     total_pnl = float(pnls.sum())
 
-    # Equity curve
     equity = [capital]
     for p in pnls:
         equity.append(equity[-1] + p)
     equity = np.array(equity)
 
-    # Drawdown
     peak = np.maximum.accumulate(equity)
     dd = (equity - peak) / peak
     max_dd = float(abs(dd.min())) if len(dd) > 0 else 0
 
-    # Sharpe ratio
     if len(pnls) > 1 and np.std(pnls) > 0:
         sharpe = float(np.mean(pnls) / np.std(pnls) * np.sqrt(252))
     else:
@@ -270,7 +422,6 @@ def _run_full_backtest(trades_df: pd.DataFrame, capital: float, max_pos: float, 
 
     progress.progress(25, text="Monte Carlo...")
 
-    # --- Results ---
     st.subheader("Backtest Ergebnis")
     kc = st.columns(5)
     with kc[0]:
@@ -284,7 +435,6 @@ def _run_full_backtest(trades_df: pd.DataFrame, capital: float, max_pos: float, 
     with kc[4]:
         st.metric("Max DD", f"{max_dd:.1%}")
 
-    # Equity + Drawdown chart
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3],
                         subplot_titles=["Equity Curve", "Drawdown"])
     fig.add_trace(go.Scatter(y=equity.tolist(), mode="lines", name="Equity",
@@ -294,7 +444,6 @@ def _run_full_backtest(trades_df: pd.DataFrame, capital: float, max_pos: float, 
     fig.update_layout(**CHART_LAYOUT, height=500, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # PnL distribution
     fig_dist = go.Figure()
     fig_dist.add_trace(go.Histogram(x=pnls[pnls > 0], name="Wins", marker_color="#2ca02c", nbinsx=30))
     fig_dist.add_trace(go.Histogram(x=pnls[pnls < 0], name="Losses", marker_color="#d62728", nbinsx=30))
@@ -304,7 +453,6 @@ def _run_full_backtest(trades_df: pd.DataFrame, capital: float, max_pos: float, 
 
     st.divider()
 
-    # --- Monte Carlo ---
     st.subheader("Monte Carlo Simulation")
     progress.progress(50, text="Monte Carlo Simulation...")
 
@@ -344,7 +492,6 @@ def _run_full_backtest(trades_df: pd.DataFrame, capital: float, max_pos: float, 
     fig_mc.update_layout(**CHART_LAYOUT, height=400, title=f"Monte Carlo ({n_mc} Runs)")
     st.plotly_chart(fig_mc, use_container_width=True)
 
-    # Final capital histogram
     fig_hist = go.Figure(go.Histogram(x=mc_finals.tolist(), nbinsx=50, marker_color="#1f77b4"))
     fig_hist.add_vline(x=capital, line_dash="dash", line_color="red", annotation_text="Start")
     fig_hist.update_layout(**CHART_LAYOUT, height=300, title="Verteilung Endkapital")
