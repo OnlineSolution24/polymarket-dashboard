@@ -37,16 +37,16 @@ cache:
 trading:
   market_filters:
     min_price: 0.05
-    max_price: 0.9
-    min_volume_24h: 5000
+    max_price: 0.85
+    min_volume_24h: 10000
     min_liquidity: 5000
     min_orderbook_depth: 0
   mode: full-auto
   capital_usd: 1400
   limits:
-    max_position_pct: 3
+    max_position_pct: 1
     max_daily_loss_usd: 20.0
-    min_edge: 0.05
+    min_edge: 0.15
     min_trade_usd: 1.0
   category_blacklist: []
   keyword_blacklist:
@@ -60,9 +60,9 @@ trading:
   rebuy_cooldown_days: 14
   weather_min_edge: 0.15
   analyst_suggestions:
-    min_edge: 0.08
+    min_edge: 0.15
     min_liquidity: 5000
-    max_amount_usd: 5.0
+    max_amount_usd: 7.0
   hedging:
     enabled: false
     profit_threshold_pct: 15
