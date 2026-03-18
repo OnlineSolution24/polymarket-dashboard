@@ -179,20 +179,31 @@ def run_incremental(max_chunks: int = 50000) -> dict:
             fetched_at = datetime.now(timezone.utc).isoformat()
 
             for name, address, contract in contracts:
-                try:
-                    logs = w3.eth.get_logs({
-                        "address": Web3.to_checksum_address(address),
-                        "topics": [ORDER_FILLED_TOPIC],
-                        "fromBlock": block,
-                        "toBlock": chunk_end,
-                    })
-                except Exception as e:
-                    if "too large" in str(e).lower():
-                        # Block range too large — skip this chunk, will retry with smaller range
-                        logger.warning(f"Block range too large {block}-{chunk_end}, skipping")
+                logs = None
+                for attempt in range(5):
+                    try:
+                        logs = w3.eth.get_logs({
+                            "address": Web3.to_checksum_address(address),
+                            "topics": [ORDER_FILLED_TOPIC],
+                            "fromBlock": block,
+                            "toBlock": chunk_end,
+                        })
                         break
-                    logger.error(f"RPC error fetching {block}-{chunk_end}: {e}")
-                    time.sleep(2)
+                    except Exception as e:
+                        err_str = str(e).lower()
+                        if "too large" in err_str:
+                            logger.warning(f"Block range too large {block}-{chunk_end}, skipping")
+                            break
+                        if "429" in str(e) or "rate" in err_str or "limit" in err_str:
+                            wait = 2 ** (attempt + 1)  # 2, 4, 8, 16, 32 sec
+                            logger.warning(f"Rate limited (attempt {attempt+1}/5), waiting {wait}s")
+                            time.sleep(wait)
+                            continue
+                        logger.error(f"RPC error fetching {block}-{chunk_end}: {e}")
+                        time.sleep(2)
+                        break
+
+                if logs is None:
                     continue
 
                 for log in logs:
@@ -230,8 +241,16 @@ def run_incremental(max_chunks: int = 50000) -> dict:
             block = chunk_end + 1
             chunks_processed += 1
 
-            # Rate limiting (Alchemy Free Tier: ~330 req/sec, be conservative)
-            time.sleep(0.25)
+            # Progress logging every 1000 chunks
+            if chunks_processed % 1000 == 0 and chunks_processed > 0:
+                pct = (block - from_block) / max(total_blocks, 1) * 100
+                logger.info(
+                    f"Progress: {pct:.1f}% | block {block:,} | "
+                    f"{chunks_processed} chunks | {total_saved + len(all_trades)} trades"
+                )
+
+            # Rate limiting (Alchemy Free Tier: ~5 req/sec limit)
+            time.sleep(0.5)
 
     except KeyboardInterrupt:
         logger.info("Blockchain indexer interrupted, progress saved")
