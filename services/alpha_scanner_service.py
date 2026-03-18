@@ -365,25 +365,24 @@ class AlphaScannerService:
         if progress_callback:
             progress_callback(20, 100, f"{len(unique_addresses)} Wallets gefunden. Anreichern...")
 
-        # Phase 2: Batch-load blockchain data (ONE query instead of 200+)
+        # Phase 2: Load pre-aggregated blockchain stats (instant from JSON file)
         blockchain_pnl = {}
         blockchain_wr = {}
         try:
             from services.historical_analytics import (
                 batch_enrich_wallets,
                 batch_wallet_win_rates,
-                _has_data,
             )
-            if _has_data():
-                if progress_callback:
-                    progress_callback(22, 100, "Blockchain-Daten laden (Batch)...")
-                blockchain_pnl = batch_enrich_wallets(unique_addresses)
-                blockchain_wr = batch_wallet_win_rates(unique_addresses)
-                logger.info(f"Batch blockchain enrichment: {len(blockchain_pnl)} wallets loaded")
+            if progress_callback:
+                progress_callback(22, 100, "Blockchain-Daten laden...")
+            blockchain_pnl = batch_enrich_wallets(unique_addresses)
+            blockchain_wr = batch_wallet_win_rates(unique_addresses)
+            if blockchain_pnl:
+                logger.info(f"Blockchain enrichment: {len(blockchain_pnl)} wallets loaded")
         except ImportError:
             pass
         except Exception as e:
-            logger.warning(f"Batch blockchain enrichment failed: {e}")
+            logger.warning(f"Blockchain enrichment failed: {e}")
 
         # Enrich each wallet (API data + pre-loaded blockchain data)
         enriched: list[WalletData] = []

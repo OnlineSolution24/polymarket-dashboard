@@ -270,6 +270,15 @@ def run_incremental(max_chunks: int = 50000) -> dict:
         f"{chunks_processed} chunks processed"
     )
 
+    # Rebuild pre-aggregated wallet stats after indexing
+    if total_saved > 0:
+        try:
+            from services.historical_analytics import rebuild_wallet_stats
+            n = rebuild_wallet_stats()
+            logger.info(f"Wallet stats rebuilt: {n} wallets")
+        except Exception as e:
+            logger.warning(f"Failed to rebuild wallet stats: {e}")
+
     return {
         "ok": True,
         "trades_fetched": total_saved,

@@ -5,9 +5,14 @@ Provides deep wallet analysis and market flow data using the full
 historical trade dataset collected by the blockchain indexer.
 
 All queries run on Parquet files via DuckDB — no separate database needed.
-Uses a persistent DuckDB connection and batch queries for performance.
+
+Performance strategy:
+- Pre-aggregated wallet stats file (rebuilt periodically in background)
+- Alpha Scanner reads from the summary file (instant) instead of scanning 38K files
+- Heavy DuckDB queries only run during background refresh
 """
 
+import json
 import logging
 import time as _time
 from datetime import datetime, timezone
@@ -16,9 +21,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 TRADES_DIR = Path("data/blockchain/trades")
+WALLET_STATS_FILE = Path("data/blockchain/wallet_stats.json")
 
 # -----------------------------------------------------------------------
-# Connection pool — reuse DuckDB connection instead of re-opening per query
+# Connection pool — reuse DuckDB connection
 # -----------------------------------------------------------------------
 _duckdb_conn = None
 
@@ -39,7 +45,7 @@ def _get_duckdb():
 
 
 def _get_conn():
-    """Get a persistent DuckDB connection (much faster than re-creating per query)."""
+    """Get a persistent DuckDB connection."""
     global _duckdb_conn
     duckdb = _get_duckdb()
     if not duckdb:
@@ -62,7 +68,6 @@ CACHE_TTL = 3600  # 1 hour
 
 
 def _cached(key: str):
-    """Get value from cache if still valid."""
     if key in _cache:
         ts, val = _cache[key]
         if _time.time() - ts < CACHE_TTL:
@@ -71,35 +76,199 @@ def _cached(key: str):
 
 
 def _set_cache(key: str, val: object):
-    """Store value in cache."""
     _cache[key] = (_time.time(), val)
 
 
 # -----------------------------------------------------------------------
-# Batch wallet enrichment — ONE query for all wallets at once
+# Pre-aggregated wallet stats (instant lookups for Alpha Scanner)
 # -----------------------------------------------------------------------
+
+def _load_wallet_stats() -> dict[str, dict]:
+    """Load pre-aggregated wallet stats from JSON file."""
+    cached = _cached("wallet_stats_file")
+    if cached is not None:
+        return cached
+
+    if not WALLET_STATS_FILE.exists():
+        return {}
+
+    try:
+        data = json.loads(WALLET_STATS_FILE.read_text())
+        _set_cache("wallet_stats_file", data)
+        return data
+    except Exception as e:
+        logger.error(f"Error loading wallet stats: {e}")
+        return {}
+
+
+def rebuild_wallet_stats() -> int:
+    """
+    Rebuild the pre-aggregated wallet stats file from Parquet data.
+
+    This is a HEAVY operation (scans all 38K+ files) and should only
+    be run in the background (e.g. after blockchain indexer finishes).
+
+    Returns number of wallets processed.
+    """
+    conn = _get_conn()
+    if not conn or not _has_data():
+        return 0
+
+    logger.info("Rebuilding wallet stats from blockchain data...")
+    start = _time.time()
+
+    try:
+        # Combined query: PnL + win rate in ONE pass
+        df = conn.sql(f"""
+            WITH all_trades AS (
+                -- As maker
+                SELECT
+                    LOWER(maker) as wallet,
+                    CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END as usdc_spent,
+                    CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END as usdc_received,
+                    fee / 1e6 as fee_usdc,
+                    CASE WHEN maker_asset_id != '0' THEN maker_asset_id ELSE taker_asset_id END as asset_id,
+                    CASE WHEN maker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as action,
+                    CASE WHEN maker_asset_id = '0'
+                         THEN maker_amount * 1.0 / NULLIF(taker_amount, 0)
+                         ELSE taker_amount * 1.0 / NULLIF(maker_amount, 0)
+                    END as price
+                FROM read_parquet('{_trades_glob()}')
+
+                UNION ALL
+
+                -- As taker
+                SELECT
+                    LOWER(taker) as wallet,
+                    CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END as usdc_spent,
+                    CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END as usdc_received,
+                    0 as fee_usdc,
+                    CASE WHEN taker_asset_id != '0' THEN taker_asset_id ELSE maker_asset_id END as asset_id,
+                    CASE WHEN taker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as action,
+                    CASE WHEN maker_asset_id = '0'
+                         THEN maker_amount * 1.0 / NULLIF(taker_amount, 0)
+                         ELSE taker_amount * 1.0 / NULLIF(maker_amount, 0)
+                    END as price
+                FROM read_parquet('{_trades_glob()}')
+            ),
+            -- PnL stats per wallet
+            pnl_stats AS (
+                SELECT
+                    wallet,
+                    COUNT(*) as total_trades,
+                    SUM(usdc_spent) as total_bought,
+                    SUM(usdc_received) as total_sold,
+                    SUM(fee_usdc) as total_fees,
+                    COUNT(DISTINCT asset_id) as unique_markets
+                FROM all_trades
+                GROUP BY wallet
+                HAVING total_trades >= 5
+            ),
+            -- Win rate: avg buy vs sell price per asset per wallet
+            per_asset AS (
+                SELECT
+                    wallet,
+                    asset_id,
+                    AVG(CASE WHEN action = 'BUY' THEN price END) as avg_buy,
+                    AVG(CASE WHEN action = 'SELL' THEN price END) as avg_sell,
+                    COUNT(CASE WHEN action = 'BUY' THEN 1 END) as buy_cnt,
+                    COUNT(CASE WHEN action = 'SELL' THEN 1 END) as sell_cnt
+                FROM all_trades
+                GROUP BY wallet, asset_id
+                HAVING buy_cnt > 0 AND sell_cnt > 0
+            ),
+            win_stats AS (
+                SELECT
+                    wallet,
+                    COUNT(*) as round_trips,
+                    SUM(CASE WHEN avg_sell > avg_buy THEN 1 ELSE 0 END) as wins
+                FROM per_asset
+                GROUP BY wallet
+            )
+            SELECT
+                p.wallet,
+                p.total_trades,
+                ROUND(p.total_bought, 2) as total_bought_usdc,
+                ROUND(p.total_sold, 2) as total_sold_usdc,
+                ROUND(p.total_fees, 2) as total_fees_usdc,
+                ROUND(p.total_sold - p.total_bought, 2) as net_flow_usdc,
+                p.unique_markets,
+                COALESCE(w.round_trips, 0) as round_trips,
+                COALESCE(w.wins, 0) as wins
+            FROM pnl_stats p
+            LEFT JOIN win_stats w ON p.wallet = w.wallet
+            ORDER BY p.total_trades DESC
+        """).fetchdf()
+
+        # Build dict
+        stats = {}
+        for _, row in df.iterrows():
+            addr = row["wallet"]
+            trips = int(row["round_trips"] or 0)
+            wins = int(row["wins"] or 0)
+            wr = round((wins / trips * 100), 1) if trips > 0 else 0.0
+
+            stats[addr] = {
+                "total_trades": int(row["total_trades"] or 0),
+                "total_bought_usdc": float(row["total_bought_usdc"] or 0),
+                "total_sold_usdc": float(row["total_sold_usdc"] or 0),
+                "total_fees_usdc": float(row["total_fees_usdc"] or 0),
+                "net_flow_usdc": float(row["net_flow_usdc"] or 0),
+                "unique_markets": int(row["unique_markets"] or 0),
+                "round_trips": trips,
+                "estimated_win_rate": wr,
+            }
+
+        # Save to file
+        WALLET_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        WALLET_STATS_FILE.write_text(json.dumps(stats))
+
+        # Update in-memory cache
+        _set_cache("wallet_stats_file", stats)
+
+        duration = _time.time() - start
+        logger.info(f"Wallet stats rebuilt: {len(stats)} wallets in {duration:.1f}s")
+        return len(stats)
+
+    except Exception as e:
+        logger.error(f"Error rebuilding wallet stats: {e}")
+        return 0
+
 
 def batch_enrich_wallets(addresses: list[str]) -> dict[str, dict]:
     """
-    Enrich multiple wallets in a single DuckDB query.
+    Enrich multiple wallets using pre-aggregated stats (instant).
 
-    Returns dict keyed by lowercase address with:
-    {total_trades, total_bought_usdc, total_sold_usdc, total_fees_usdc,
-     net_flow_usdc, unique_markets}
-
-    This replaces calling get_wallet_pnl_estimate() per wallet.
+    Falls back to direct DuckDB query if stats file doesn't exist.
     """
     if not addresses:
         return {}
 
-    cache_key = "batch_enrich_" + str(sorted(set(a.lower() for a in addresses)))
-    cached = _cached(cache_key)
-    if cached is not None:
-        return cached
+    # Try pre-aggregated stats first (instant)
+    all_stats = _load_wallet_stats()
+    if all_stats:
+        result = {}
+        for addr in addresses:
+            data = all_stats.get(addr.lower())
+            if data:
+                result[addr.lower()] = data
+        return result
 
+    # Fallback: direct query (slow, first time only)
+    return _batch_enrich_wallets_direct(addresses)
+
+
+def _batch_enrich_wallets_direct(addresses: list[str]) -> dict[str, dict]:
+    """Direct DuckDB batch query (used as fallback before stats file exists)."""
     conn = _get_conn()
     if not conn or not _has_data():
         return {}
+
+    cache_key = "batch_enrich_direct"
+    cached = _cached(cache_key)
+    if cached is not None:
+        # Filter to requested addresses
+        return {a.lower(): cached[a.lower()] for a in addresses if a.lower() in cached}
 
     try:
         addr_list = ", ".join(f"'{a.lower()}'" for a in addresses)
@@ -120,7 +289,6 @@ def batch_enrich_wallets(addresses: list[str]) -> dict[str, dict]:
                     SUM(fee_usdc) as total_fees,
                     COUNT(DISTINCT market_id) as unique_markets
                 FROM (
-                    -- As maker
                     SELECT
                         LOWER(maker) as wallet,
                         CASE WHEN maker_asset_id = '0' THEN maker_amount / 1e6 ELSE 0 END as usdc_spent,
@@ -132,7 +300,6 @@ def batch_enrich_wallets(addresses: list[str]) -> dict[str, dict]:
 
                     UNION ALL
 
-                    -- As taker
                     SELECT
                         LOWER(taker) as wallet,
                         CASE WHEN taker_asset_id = '0' THEN taker_amount / 1e6 ELSE 0 END as usdc_spent,
@@ -166,8 +333,32 @@ def batch_enrich_wallets(addresses: list[str]) -> dict[str, dict]:
         return result
 
     except Exception as e:
-        logger.error(f"DuckDB error (batch_enrich_wallets): {e}")
+        logger.error(f"DuckDB error (batch_enrich_wallets_direct): {e}")
         return {}
+
+
+def batch_wallet_win_rates(addresses: list[str]) -> dict[str, dict]:
+    """
+    Batch win rate using pre-aggregated stats (instant).
+    """
+    if not addresses:
+        return {}
+
+    all_stats = _load_wallet_stats()
+    if all_stats:
+        result = {}
+        for addr in addresses:
+            data = all_stats.get(addr.lower())
+            if data and data.get("round_trips", 0) > 0:
+                result[addr.lower()] = {
+                    "estimated_win_rate": data["estimated_win_rate"],
+                    "total_round_trips": data["round_trips"],
+                    "total_trades": data["total_trades"],
+                }
+        return result
+
+    # Fallback: no stats file yet
+    return {}
 
 
 # -----------------------------------------------------------------------
@@ -175,7 +366,14 @@ def batch_enrich_wallets(addresses: list[str]) -> dict[str, dict]:
 # -----------------------------------------------------------------------
 
 def get_wallet_trade_count(address: str) -> int:
-    """Count total trades for a wallet address (as maker or taker)."""
+    """Count total trades for a wallet address."""
+    # Try pre-aggregated first
+    stats = _load_wallet_stats()
+    if stats:
+        data = stats.get(address.lower())
+        if data:
+            return data.get("total_trades", 0)
+
     conn = _get_conn()
     if not conn or not _has_data():
         return 0
@@ -224,16 +422,13 @@ def get_wallet_full_history(address: str, limit: int = 1000) -> list[dict]:
 
 
 def get_wallet_pnl_estimate(address: str) -> dict:
-    """
-    Estimate wallet PnL from historical blockchain trades.
-    For batch processing, use batch_enrich_wallets() instead.
-    """
+    """Estimate wallet PnL (uses pre-aggregated stats if available)."""
     result = batch_enrich_wallets([address])
     return result.get(address.lower(), {})
 
 
 def get_market_trade_flow(asset_id: str, hours: int = 24) -> dict:
-    """Get maker/taker flow for a specific market (by asset_id / token_id)."""
+    """Get maker/taker flow for a specific market."""
     conn = _get_conn()
     if not conn or not _has_data():
         return {}
@@ -270,11 +465,31 @@ def get_market_trade_flow(asset_id: str, hours: int = 24) -> dict:
 
 
 def get_top_wallets_by_volume(limit: int = 100) -> list[dict]:
-    """Find top wallets by total trading volume (USDC)."""
+    """Find top wallets by total trading volume."""
     cache_key = f"top_wallets_{limit}"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
+
+    # Try pre-aggregated stats (instant)
+    stats = _load_wallet_stats()
+    if stats:
+        sorted_wallets = sorted(
+            stats.items(),
+            key=lambda x: x[1].get("total_bought_usdc", 0),
+            reverse=True,
+        )[:limit]
+        result = [
+            {
+                "address": addr,
+                "total_volume_usdc": d.get("total_bought_usdc", 0),
+                "trade_count": d.get("total_trades", 0),
+                "maker_pct": 0,  # not tracked in summary
+            }
+            for addr, d in sorted_wallets
+        ]
+        _set_cache(cache_key, result)
+        return result
 
     conn = _get_conn()
     if not conn or not _has_data():
@@ -329,120 +544,9 @@ def get_top_wallets_by_volume(limit: int = 100) -> list[dict]:
 
 
 def get_wallet_win_rate_historical(address: str) -> dict:
-    """
-    Estimate historical win rate for a wallet based on trade patterns.
-    For batch processing, use batch_wallet_win_rates() instead.
-    """
+    """Estimate historical win rate (uses pre-aggregated stats if available)."""
     result = batch_wallet_win_rates([address])
     return result.get(address.lower(), {})
-
-
-def batch_wallet_win_rates(addresses: list[str]) -> dict[str, dict]:
-    """
-    Batch win rate estimation for multiple wallets in ONE query.
-
-    Uses a SQL-only approach: compares avg buy vs avg sell price per asset
-    per wallet entirely in DuckDB (no Python loop per wallet).
-
-    Returns dict keyed by lowercase address.
-    """
-    if not addresses:
-        return {}
-
-    cache_key = "batch_wr_" + str(sorted(set(a.lower() for a in addresses)))
-    cached = _cached(cache_key)
-    if cached is not None:
-        return cached
-
-    conn = _get_conn()
-    if not conn or not _has_data():
-        return {}
-
-    try:
-        addr_list = ", ".join(f"'{a.lower()}'" for a in addresses)
-
-        df = conn.sql(f"""
-            WITH relevant AS (
-                SELECT *
-                FROM read_parquet('{_trades_glob()}')
-                WHERE LOWER(maker) IN ({addr_list})
-                   OR LOWER(taker) IN ({addr_list})
-            ),
-            wallet_trades AS (
-                -- Determine wallet, action (BUY/SELL), and price for each trade
-                SELECT
-                    wallet,
-                    asset_id,
-                    action,
-                    price_per_token
-                FROM (
-                    -- As maker
-                    SELECT
-                        LOWER(maker) as wallet,
-                        CASE WHEN maker_asset_id != '0' THEN maker_asset_id ELSE taker_asset_id END as asset_id,
-                        CASE WHEN maker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as action,
-                        CASE WHEN maker_asset_id = '0'
-                             THEN maker_amount * 1.0 / NULLIF(taker_amount, 0)
-                             ELSE taker_amount * 1.0 / NULLIF(maker_amount, 0)
-                        END as price_per_token
-                    FROM relevant
-                    WHERE LOWER(maker) IN ({addr_list})
-
-                    UNION ALL
-
-                    -- As taker
-                    SELECT
-                        LOWER(taker) as wallet,
-                        CASE WHEN taker_asset_id != '0' THEN taker_asset_id ELSE maker_asset_id END as asset_id,
-                        CASE WHEN taker_asset_id = '0' THEN 'BUY' ELSE 'SELL' END as action,
-                        CASE WHEN maker_asset_id = '0'
-                             THEN maker_amount * 1.0 / NULLIF(taker_amount, 0)
-                             ELSE taker_amount * 1.0 / NULLIF(maker_amount, 0)
-                        END as price_per_token
-                    FROM relevant
-                    WHERE LOWER(taker) IN ({addr_list})
-                )
-            ),
-            per_asset AS (
-                SELECT
-                    wallet,
-                    asset_id,
-                    AVG(CASE WHEN action = 'BUY' THEN price_per_token END) as avg_buy,
-                    AVG(CASE WHEN action = 'SELL' THEN price_per_token END) as avg_sell,
-                    COUNT(CASE WHEN action = 'BUY' THEN 1 END) as buy_count,
-                    COUNT(CASE WHEN action = 'SELL' THEN 1 END) as sell_count,
-                    COUNT(*) as total
-                FROM wallet_trades
-                GROUP BY wallet, asset_id
-                HAVING buy_count > 0 AND sell_count > 0
-            )
-            SELECT
-                wallet,
-                COUNT(*) as round_trips,
-                SUM(CASE WHEN avg_sell > avg_buy THEN 1 ELSE 0 END) as wins,
-                SUM(total) as total_trades
-            FROM per_asset
-            GROUP BY wallet
-        """).fetchdf()
-
-        result = {}
-        for _, row in df.iterrows():
-            addr = row["wallet"]
-            trips = int(row["round_trips"] or 0)
-            wins = int(row["wins"] or 0)
-            wr = (wins / trips * 100) if trips > 0 else 0
-            result[addr] = {
-                "estimated_win_rate": round(wr, 1),
-                "total_round_trips": trips,
-                "total_trades": int(row["total_trades"] or 0),
-            }
-
-        _set_cache(cache_key, result)
-        return result
-
-    except Exception as e:
-        logger.error(f"DuckDB error (batch_wallet_win_rates): {e}")
-        return {}
 
 
 def get_data_summary() -> dict:
