@@ -144,9 +144,21 @@ class PositionManager:
                     # Auto-import market from on-chain data
                     title = raw.get("title") or raw.get("question") or ""
                     if condition_id and token_id:
-                        # Determine which token is YES/NO based on outcome
-                        yes_tok = token_id if outcome.upper() in ("YES", "Y", "") else ""
-                        no_tok = token_id if outcome.upper() in ("NO", "N") else ""
+                        # Determine which token is YES/NO based on outcome or outcomeIndex
+                        # NEVER assume empty/unknown outcome = YES
+                        outcome_idx = raw.get("outcomeIndex")
+                        if outcome.upper() in ("YES", "Y"):
+                            yes_tok, no_tok = token_id, ""
+                        elif outcome.upper() in ("NO", "N"):
+                            yes_tok, no_tok = "", token_id
+                        elif outcome_idx is not None and int(outcome_idx) == 1:
+                            yes_tok, no_tok = "", token_id
+                        elif outcome_idx is not None and int(outcome_idx) == 0:
+                            yes_tok, no_tok = token_id, ""
+                        else:
+                            # Unknown side — leave both empty, will be resolved later
+                            yes_tok, no_tok = "", ""
+                            logger.warning(f"Unknown outcome '{outcome}' for token {token_id[:20]}, cannot determine YES/NO")
                         engine.execute(
                             """INSERT OR IGNORE INTO markets (id, question, yes_token_id, no_token_id, active, created_at)
                                VALUES (?, ?, ?, ?, 1, datetime('now'))""",
@@ -159,14 +171,20 @@ class PositionManager:
                     if not market:
                         continue
 
-                # Determine side: prefer outcome field, fallback to token_id comparison
-                side = "YES"
-                if outcome.upper() in ("NO", "N"):
+                # Determine side: prefer outcomeIndex, then outcome string, then token_id comparison
+                outcome_index = raw.get("outcomeIndex")
+                if outcome_index is not None:
+                    side = "YES" if int(outcome_index) == 0 else "NO"
+                elif outcome.upper() in ("NO", "N"):
                     side = "NO"
                 elif outcome.upper() in ("YES", "Y"):
                     side = "YES"
                 elif token_id and market["no_token_id"] and token_id == market["no_token_id"]:
                     side = "NO"
+                elif token_id and market["yes_token_id"] and token_id == market["yes_token_id"]:
+                    side = "YES"
+                else:
+                    side = "YES"  # last resort fallback
 
                 if not token_id:
                     token_id = market["yes_token_id"] if side == "YES" else market["no_token_id"]
