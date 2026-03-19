@@ -93,20 +93,34 @@ class TelegramAlerts:
         """Send trade settlement alert (win/loss)."""
         if not self.alert_config.get("on_trade_settled", True):
             return
+
+        # Sanity check: PnL should never exceed ~20x the invested amount
+        # (max theoretical is buy at 0.05 → resolve at 1.0 = 19x, but >10x is suspicious)
+        suspicious = abs(pnl) > amount * 10 if amount > 0 else False
+
         emoji = "✅" if result == "win" else "❌"
+        if suspicious:
+            emoji = "🚨"
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        self.send(
+        msg = (
             f"{emoji} <b>Trade {result.upper()}</b>\n"
             f"Markt: {market}\n"
             f"Seite: {side} | Einsatz: ${amount:.2f}\n"
             f"Ergebnis: {pnl_str}"
         )
+        if suspicious:
+            msg += (
+                f"\n\n🚨 <b>ACHTUNG: PnL unplausibel!</b>\n"
+                f"PnL ${pnl:+.2f} bei Einsatz ${amount:.2f} ({abs(pnl/amount):.0f}x).\n"
+                f"Bitte manuell pruefen — moeglicherweise falsche Side/Resolution."
+            )
+        self.send(msg)
 
     # Errors to ignore in alerts (auth retries, known harmless patterns)
+    # NOTE: never ignore HTTP status codes here — they can mask real API breakage
     _IGNORED_ERROR_PATTERNS = [
         "auth/api-key",
         "auth/derive-api-key",
-        "400 Bad Request",
         "create_or_derive_api_creds",
     ]
 
