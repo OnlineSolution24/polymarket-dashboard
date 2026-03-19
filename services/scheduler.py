@@ -227,6 +227,18 @@ def start_scheduler(config: AppConfig) -> None:
                 )
                 logger.info(f"Scheduled: resolution_updater every {res_hours}h")
 
+            # Strategy Discovery (weekly pattern mining on blockchain data)
+            disc_cfg = sched_cfg.get("strategy_discovery", {})
+            if disc_cfg.get("enabled", False):
+                disc_day = disc_cfg.get("schedule_day", "monday")
+                disc_hour = disc_cfg.get("schedule_hour", 4)
+                _scheduler.add_job(
+                    _job_strategy_discovery, "cron",
+                    day_of_week=disc_day[:3].lower(), hour=disc_hour,
+                    id="strategy_discovery", replace_existing=True,
+                )
+                logger.info(f"Scheduled: strategy_discovery every {disc_day} at {disc_hour}:00 UTC")
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
@@ -1751,6 +1763,48 @@ def _job_blockchain_indexer(max_chunks: int = 500):
 
     except Exception as e:
         logger.error(f"Blockchain indexer job failed: {e}")
+
+
+def _job_strategy_discovery():
+    """Weekly pattern discovery — mine blockchain trades for trading patterns."""
+    try:
+        from services.strategy_discovery import run_discovery, save_patterns_as_strategies
+
+        logger.info("Strategy Discovery starting...")
+        result = run_discovery(min_edge=0.03, min_sample=1000)
+
+        if not result.get("ok"):
+            logger.error(f"Strategy Discovery failed: {result.get('error')}")
+            return
+
+        patterns = result.get("patterns", [])
+        logger.info(
+            f"Strategy Discovery: {result.get('total_patterns')} found, "
+            f"{result.get('qualified_patterns')} qualified"
+        )
+
+        if patterns:
+            created = save_patterns_as_strategies(patterns)
+            logger.info(f"Created {len(created)} new strategies from patterns")
+
+            # Send Telegram alert
+            try:
+                from services.telegram_service import send_alert
+                msg = "Strategy Discovery: {} patterns found\n\n".format(len(patterns))
+                for p in patterns[:5]:
+                    msg += (
+                        "- {}: {:.1%} edge ({:,} trades)\n".format(
+                            p["name"], p["expected_edge"], p["sample_size"]
+                        )
+                    )
+                if len(patterns) > 5:
+                    msg += "\n... and {} more".format(len(patterns) - 5)
+                send_alert(msg)
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Strategy Discovery job failed: {e}")
 
 
 def _job_resolution_updater():
