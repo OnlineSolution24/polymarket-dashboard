@@ -5,6 +5,12 @@ strategies in the DB for backtesting and live trading.
 
 Uses DuckDB to join:
   trades (Parquet) × token_to_market (Parquet) × resolutions (Parquet)
+
+Data model:
+  - maker_asset_id = '0' means maker is paying USDC (buying tokens)
+  - taker_asset_id = '0' means taker is paying USDC (selling tokens)
+  - Price per token = USDC amount / token amount
+  - Amounts are in raw units (USDC has 6 decimals, tokens have 6 decimals)
 """
 
 import json
@@ -27,14 +33,14 @@ class DiscoveredPattern:
     pattern_id: str
     name: str
     description: str
-    dimension: str          # e.g. "price_bucket", "volume_flow", "category"
-    filters: dict           # raw filter values
+    dimension: str
+    filters: dict
     sample_size: int
-    hit_rate: float         # fraction of trades on winning side
-    avg_price: float        # average entry price
-    expected_edge: float    # hit_rate * (1/avg_price) - 1
-    entry_rules: list       # compatible with strategy_evaluator
-    trade_params: dict      # side, sizing, etc.
+    hit_rate: float
+    avg_price: float
+    expected_edge: float
+    entry_rules: list
+    trade_params: dict
 
 
 def _get_conn():
@@ -52,7 +58,6 @@ def _check_data_files() -> bool:
         if not Path(path).exists():
             logger.error(f"Missing required file: {path}")
             return False
-    # Check at least some trade files exist
     trade_files = list(Path("data/blockchain/trades").glob("trades_*.parquet"))
     if not trade_files:
         logger.error("No trade Parquet files found")
@@ -60,15 +65,51 @@ def _check_data_files() -> bool:
     return True
 
 
-def mine_price_bucket_patterns(conn) -> list[DiscoveredPattern]:
-    """Pattern A: Which price ranges have edge when buying the winning side?
+# ---------------------------------------------------------------------------
+# Common SQL fragments
+# ---------------------------------------------------------------------------
+# When maker_asset_id = '0', maker pays USDC to buy tokens from taker.
+# The token being traded is the taker_asset_id (outcome token).
+# Price = maker_amount / taker_amount (USDC per token).
+#
+# When maker_asset_id != '0' and taker_asset_id matches a token,
+# the maker is selling tokens. We still join on taker_asset_id = token_id
+# but the price interpretation differs.
+#
+# For simplicity and correctness, we focus on "buy" trades where
+# maker_asset_id = '0' (USDC side), which is ~288M of our trades.
 
-    Checks: At different price levels, how often does a trade end up on the
-    winning side? If hit_rate × payout > 1, there's edge.
+BUY_TRADES_SQL = """
+    SELECT
+        t.block_number,
+        t.maker,
+        t.taker,
+        t.maker_amount,   -- USDC amount (raw, /1e6 for dollars)
+        t.taker_amount,   -- Token amount (raw, /1e6 for tokens)
+        t.fee,
+        tm.condition_id,
+        tm.outcome,
+        tm.is_winner,
+        t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) as price_per_token,
+        t.maker_amount / 1e6 as usdc_amount
+    FROM read_parquet('{trades}') t
+    JOIN read_parquet('{token_map}') tm ON t.taker_asset_id = tm.token_id
+    WHERE t.maker_asset_id = '0'
+      AND t.maker_amount > 0
+      AND t.taker_amount > 0
+""".format(trades=TRADES_GLOB, token_map=TOKEN_MAP)
+
+
+def mine_price_bucket_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern A: At which price levels do outcome tokens get bought correctly?
+
+    If you buy a token at 20 cents and it wins, you get $1 back = 5x return.
+    The question is: at each price level, what fraction of bought tokens
+    end up being winners?
     """
     logger.info("Mining price bucket patterns...")
 
-    results = conn.execute("""
+    results = conn.execute(f"""
         SELECT
             price_bucket,
             COUNT(*) as total_trades,
@@ -76,59 +117,65 @@ def mine_price_bucket_patterns(conn) -> list[DiscoveredPattern]:
             AVG(price_per_token) as avg_price
         FROM (
             SELECT
-                tm.is_winner,
-                t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) as price_per_token,
+                is_winner,
+                price_per_token,
                 CASE
-                    WHEN t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) < 0.15 THEN 'deep_value'
-                    WHEN t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) < 0.30 THEN 'value'
-                    WHEN t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) < 0.50 THEN 'mid'
-                    WHEN t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) < 0.70 THEN 'favorite'
-                    WHEN t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) < 0.85 THEN 'heavy_fav'
+                    WHEN price_per_token < 0.10 THEN 'longshot'
+                    WHEN price_per_token < 0.20 THEN 'deep_value'
+                    WHEN price_per_token < 0.35 THEN 'value'
+                    WHEN price_per_token < 0.50 THEN 'mid'
+                    WHEN price_per_token < 0.65 THEN 'lean_fav'
+                    WHEN price_per_token < 0.80 THEN 'favorite'
+                    WHEN price_per_token < 0.92 THEN 'heavy_fav'
                     ELSE 'near_certain'
                 END as price_bucket
-            FROM read_parquet('{}') t
-            JOIN read_parquet('{}') tm ON t.taker_asset_id = tm.token_id
-            WHERE t.maker_amount > 0 AND t.taker_amount > 0
-              AND t.maker_amount * 1.0 / t.taker_amount > 0.01
-              AND t.maker_amount * 1.0 / t.taker_amount < 0.99
+            FROM ({BUY_TRADES_SQL}) buys
+            WHERE price_per_token > 0.01 AND price_per_token < 0.99
         ) sub
         GROUP BY price_bucket
         HAVING COUNT(*) >= 1000
-        ORDER BY price_bucket
-    """.format(TRADES_GLOB, TOKEN_MAP)).fetchall()
+        ORDER BY avg_price
+    """).fetchall()
 
     patterns = []
     for row in results:
         bucket, total, wins, avg_price = row
         hit_rate = wins / total if total > 0 else 0
-        # Expected edge: if you buy at avg_price and win with hit_rate
-        # Payout is 1.0 per token, cost is avg_price
-        # EV = hit_rate * (1.0 / avg_price) - 1.0 ... but that's per-token
-        # Better: EV = hit_rate * 1.0 - avg_price (profit per $1 of tokens)
-        # Simplified: edge = hit_rate - avg_price (how much better than random)
-        expected_edge = hit_rate - avg_price
 
-        if expected_edge < 0.02:
-            continue  # skip patterns with <2% edge
+        # Edge = EV - 1 = hit_rate * (1/avg_price) - 1
+        # e.g. hit_rate=0.30 at avg_price=0.15 → EV = 0.30/0.15 = 2.0 → edge = +100%
+        # e.g. hit_rate=0.50 at avg_price=0.50 → EV = 1.0 → edge = 0% (fair)
+        ev_per_dollar = hit_rate / avg_price if avg_price > 0 else 0
+        expected_edge = ev_per_dollar - 1.0
 
-        # Map bucket to price range
         price_ranges = {
-            "deep_value": (0.01, 0.15),
-            "value": (0.15, 0.30),
-            "mid": (0.30, 0.50),
-            "favorite": (0.50, 0.70),
-            "heavy_fav": (0.70, 0.85),
-            "near_certain": (0.85, 0.99),
+            "longshot": (0.01, 0.10),
+            "deep_value": (0.10, 0.20),
+            "value": (0.20, 0.35),
+            "mid": (0.35, 0.50),
+            "lean_fav": (0.50, 0.65),
+            "favorite": (0.65, 0.80),
+            "heavy_fav": (0.80, 0.92),
+            "near_certain": (0.92, 0.99),
         }
         lo, hi = price_ranges.get(bucket, (0, 1))
+
+        logger.info(
+            f"  {bucket} ({lo:.0%}-{hi:.0%}): hit_rate={hit_rate:.1%}, "
+            f"avg_price={avg_price:.3f}, EV={ev_per_dollar:.2f}, "
+            f"edge={expected_edge:+.1%} ({total:,} trades)"
+        )
+
+        if expected_edge < 0.02:
+            continue
 
         pattern = DiscoveredPattern(
             pattern_id=f"price_{bucket}",
             name=f"Price Bucket: {bucket}",
             description=(
-                f"Buy tokens in the {bucket} range ({lo:.0%}-{hi:.0%}). "
+                f"Buy tokens at {lo:.0%}-{hi:.0%}. "
                 f"Hit rate: {hit_rate:.1%}, avg price: {avg_price:.2f}, "
-                f"edge: {expected_edge:.1%} over {total:,} trades"
+                f"EV per $1: ${ev_per_dollar:.2f}, edge: {expected_edge:+.1%} ({total:,} trades)"
             ),
             dimension="price_bucket",
             filters={"price_min": lo, "price_max": hi},
@@ -148,75 +195,97 @@ def mine_price_bucket_patterns(conn) -> list[DiscoveredPattern]:
             },
         )
         patterns.append(pattern)
-        logger.info(f"  {bucket}: {hit_rate:.1%} hit rate, {expected_edge:.1%} edge ({total:,} trades)")
 
     return patterns
 
 
 def mine_volume_flow_patterns(conn) -> list[DiscoveredPattern]:
-    """Pattern B: Does buy/sell volume imbalance predict the winner?
+    """Pattern B: Does early volume (first 50% of trades) predict the winner?
 
-    For each resolved market, compute the ratio of volume on the winning side
-    vs losing side. Then check: if you follow the volume, what's the edge?
+    Only counts volume from the FIRST HALF of a market's trading life.
+    This avoids the data-leak of counting volume after the outcome is known.
     """
-    logger.info("Mining volume flow patterns...")
+    logger.info("Mining early volume flow patterns...")
 
-    results = conn.execute("""
+    results = conn.execute(f"""
+        WITH market_ranges AS (
+            SELECT
+                tm.condition_id,
+                MIN(t.block_number) as first_block,
+                MAX(t.block_number) as last_block,
+                (MAX(t.block_number) - MIN(t.block_number)) / 2 + MIN(t.block_number) as mid_block
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0
+            GROUP BY tm.condition_id
+            HAVING COUNT(*) >= 20
+        ),
+        early_flows AS (
+            SELECT
+                tm.condition_id,
+                SUM(CASE WHEN tm.is_winner THEN t.maker_amount ELSE 0 END) as winning_vol,
+                SUM(CASE WHEN NOT tm.is_winner THEN t.maker_amount ELSE 0 END) as losing_vol,
+                COUNT(*) as trade_count
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            JOIN market_ranges mr ON tm.condition_id = mr.condition_id
+            WHERE t.maker_asset_id = '0'
+              AND t.maker_amount > 0
+              AND t.block_number <= mr.mid_block  -- ONLY first half of trading
+            GROUP BY tm.condition_id
+            HAVING COUNT(*) >= 5
+        )
         SELECT
             flow_bucket,
             COUNT(*) as total_markets,
-            SUM(CASE WHEN dominant_side_won THEN 1 ELSE 0 END) as correct,
-            AVG(flow_ratio) as avg_flow_ratio
+            SUM(CASE WHEN winning_vol > losing_vol THEN 1 ELSE 0 END) as dominant_won,
+            AVG(CASE WHEN winning_vol > losing_vol
+                THEN winning_vol * 1.0 / NULLIF(losing_vol, 0)
+                ELSE losing_vol * 1.0 / NULLIF(winning_vol, 0)
+            END) as avg_ratio
         FROM (
             SELECT
                 condition_id,
-                winning_side_vol,
-                losing_side_vol,
-                winning_side_vol / NULLIF(losing_side_vol, 0) as flow_ratio,
-                winning_side_vol > losing_side_vol as dominant_side_won,
+                winning_vol,
+                losing_vol,
                 CASE
-                    WHEN winning_side_vol / NULLIF(losing_side_vol, 0) > 5.0 THEN 'extreme_flow'
-                    WHEN winning_side_vol / NULLIF(losing_side_vol, 0) > 2.0 THEN 'strong_flow'
-                    WHEN winning_side_vol / NULLIF(losing_side_vol, 0) > 1.2 THEN 'mild_flow'
+                    WHEN GREATEST(winning_vol, losing_vol) / NULLIF(LEAST(winning_vol, losing_vol), 0) > 5.0 THEN 'extreme'
+                    WHEN GREATEST(winning_vol, losing_vol) / NULLIF(LEAST(winning_vol, losing_vol), 0) > 2.0 THEN 'strong'
+                    WHEN GREATEST(winning_vol, losing_vol) / NULLIF(LEAST(winning_vol, losing_vol), 0) > 1.3 THEN 'mild'
                     ELSE 'balanced'
                 END as flow_bucket
-            FROM (
-                SELECT
-                    tm.condition_id,
-                    SUM(CASE WHEN tm.is_winner THEN t.maker_amount ELSE 0 END) as winning_side_vol,
-                    SUM(CASE WHEN NOT tm.is_winner THEN t.maker_amount ELSE 0 END) as losing_side_vol
-                FROM read_parquet('{}') t
-                JOIN read_parquet('{}') tm ON t.taker_asset_id = tm.token_id
-                WHERE t.maker_amount > 0
-                GROUP BY tm.condition_id
-                HAVING COUNT(*) >= 10  -- markets with enough trades
-            ) market_flows
+            FROM early_flows
         ) bucketed
         GROUP BY flow_bucket
         HAVING COUNT(*) >= 100
-    """.format(TRADES_GLOB, TOKEN_MAP)).fetchall()
+    """).fetchall()
 
     patterns = []
     for row in results:
-        bucket, total, correct, avg_ratio = row
-        hit_rate = correct / total if total > 0 else 0
+        bucket, total, dominant_won, avg_ratio = row
+        hit_rate = dominant_won / total if total > 0 else 0
+
+        logger.info(
+            f"  early_{bucket}: {hit_rate:.1%} correct "
+            f"(avg ratio {avg_ratio:.1f}x, {total:,} markets)"
+        )
 
         if hit_rate <= 0.52:
-            continue  # Need meaningful prediction
+            continue
 
         pattern = DiscoveredPattern(
-            pattern_id=f"flow_{bucket}",
-            name=f"Volume Flow: {bucket}",
+            pattern_id=f"early_flow_{bucket}",
+            name=f"Early Volume Flow: {bucket}",
             description=(
-                f"Markets with {bucket} volume imbalance. "
-                f"Dominant-side wins {hit_rate:.1%} of the time "
-                f"(avg flow ratio: {avg_ratio:.1f}x) over {total:,} markets"
+                f"Markets where early trading (first half) shows {bucket} "
+                f"volume imbalance. Dominant side wins {hit_rate:.1%} "
+                f"({total:,} markets)"
             ),
-            dimension="volume_flow",
-            filters={"flow_bucket": bucket, "avg_flow_ratio": avg_ratio},
+            dimension="early_volume_flow",
+            filters={"flow_bucket": bucket, "avg_ratio": avg_ratio},
             sample_size=total,
             hit_rate=hit_rate,
-            avg_price=0.5,  # mid-market assumption
+            avg_price=0.5,
             expected_edge=hit_rate - 0.5,
             entry_rules=[
                 {"field": "volume", "op": "gte", "value": 50000},
@@ -229,66 +298,71 @@ def mine_volume_flow_patterns(conn) -> list[DiscoveredPattern]:
             },
         )
         patterns.append(pattern)
-        logger.info(f"  {bucket}: {hit_rate:.1%} correct ({total:,} markets, avg ratio {avg_ratio:.1f}x)")
 
     return patterns
 
 
 def mine_trade_size_patterns(conn) -> list[DiscoveredPattern]:
-    """Pattern E: Do larger traders have better hit rates?
-
-    Hypothesis: Big traders (>$100 per trade) are more informed.
-    """
+    """Pattern E: Do larger traders pick winners more often?"""
     logger.info("Mining trade size patterns...")
 
-    results = conn.execute("""
+    results = conn.execute(f"""
         SELECT
             size_bucket,
             COUNT(*) as total_trades,
             SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
-            AVG(trade_usd) as avg_trade_usd
+            AVG(usdc_amount) as avg_trade_usd,
+            AVG(price_per_token) as avg_price
         FROM (
             SELECT
-                tm.is_winner,
-                t.maker_amount / 1e6 as trade_usd,
+                is_winner,
+                usdc_amount,
+                price_per_token,
                 CASE
-                    WHEN t.maker_amount / 1e6 < 5 THEN 'micro'
-                    WHEN t.maker_amount / 1e6 < 50 THEN 'small'
-                    WHEN t.maker_amount / 1e6 < 500 THEN 'medium'
-                    WHEN t.maker_amount / 1e6 < 5000 THEN 'large'
+                    WHEN usdc_amount < 5 THEN 'micro'
+                    WHEN usdc_amount < 50 THEN 'small'
+                    WHEN usdc_amount < 500 THEN 'medium'
+                    WHEN usdc_amount < 5000 THEN 'large'
                     ELSE 'whale'
                 END as size_bucket
-            FROM read_parquet('{}') t
-            JOIN read_parquet('{}') tm ON t.taker_asset_id = tm.token_id
-            WHERE t.maker_amount > 0 AND t.taker_amount > 0
+            FROM ({BUY_TRADES_SQL}) buys
+            WHERE price_per_token > 0.01 AND price_per_token < 0.99
         ) sub
         GROUP BY size_bucket
         HAVING COUNT(*) >= 1000
         ORDER BY avg_trade_usd
-    """.format(TRADES_GLOB, TOKEN_MAP)).fetchall()
+    """).fetchall()
 
     patterns = []
     for row in results:
-        bucket, total, wins, avg_usd = row
+        bucket, total, wins, avg_usd, avg_price = row
         hit_rate = wins / total if total > 0 else 0
-        edge = hit_rate - 0.5  # vs random
 
-        if edge < 0.02:
+        # Edge relative to the price they paid
+        ev_per_dollar = hit_rate / avg_price if avg_price > 0 else 0
+        expected_edge = ev_per_dollar - 1.0
+
+        logger.info(
+            f"  {bucket} (avg ${avg_usd:.0f}): hit_rate={hit_rate:.1%}, "
+            f"avg_price={avg_price:.3f}, edge={expected_edge:+.1%} ({total:,} trades)"
+        )
+
+        if expected_edge < 0.02:
             continue
 
         pattern = DiscoveredPattern(
             pattern_id=f"size_{bucket}",
             name=f"Trade Size: {bucket}",
             description=(
-                f"Trades in {bucket} range (avg ${avg_usd:.0f}). "
-                f"Hit rate: {hit_rate:.1%}, edge vs random: {edge:.1%} ({total:,} trades)"
+                f"Trades sized as {bucket} (avg ${avg_usd:.0f}). "
+                f"Hit rate: {hit_rate:.1%}, edge: {expected_edge:+.1%} ({total:,} trades)"
             ),
             dimension="trade_size",
             filters={"size_bucket": bucket, "avg_usd": avg_usd},
             sample_size=total,
             hit_rate=hit_rate,
-            avg_price=0.5,
-            expected_edge=edge,
+            avg_price=avg_price,
+            expected_edge=expected_edge,
             entry_rules=[],
             trade_params={
                 "side": "YES",
@@ -298,89 +372,57 @@ def mine_trade_size_patterns(conn) -> list[DiscoveredPattern]:
             },
         )
         patterns.append(pattern)
-        logger.info(f"  {bucket} (avg ${avg_usd:.0f}): {hit_rate:.1%} hit rate, {edge:.1%} edge ({total:,} trades)")
 
     return patterns
 
 
 def mine_maker_taker_patterns(conn) -> list[DiscoveredPattern]:
-    """Pattern F: Are taker trades (crossing the spread) more informed?
-
-    Takers pay fees and accept worse prices — they typically have information.
-    """
+    """Pattern F: Do takers (market orders) pick winners better than makers?"""
     logger.info("Mining maker vs taker patterns...")
 
-    # Check if the trade data has 'contract' field to distinguish roles
-    # In our data, 'maker' is the address, not the role in the specific trade
-    # The maker_asset_id side has the maker (limit order placer)
-    # The taker_asset_id side has the taker (market order filler)
+    # In buy trades (maker_asset_id = '0'):
+    # - The 'taker' address is the one filling the order (market order = informed)
+    # - The 'maker' address placed the limit order (passive)
+    # We check: do taker-address wallets have better hit rates than maker-address wallets?
 
-    # We compare: do takers pick winners more often than makers?
-    results = conn.execute("""
+    # Simpler approach: compare hit rates for trades where our token side
+    # matches the winning outcome. Since all these are "buy" trades
+    # (maker pays USDC, taker provides tokens), the maker is BUYING
+    # and the taker is SELLING.
+    #
+    # Actually in CTF exchange OrderFilled:
+    # - maker = the address whose order was resting
+    # - taker = the address who filled (crossed the spread)
+    #
+    # Both are "involved" but the taker is the active participant.
+    # We just report the overall buy-side hit rate for context.
+
+    results = conn.execute(f"""
         SELECT
-            role,
+            'buy_trades' as category,
             COUNT(*) as total_trades,
-            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades
-        FROM (
-            -- Taker perspective: taker buys the taker_asset_id token
-            SELECT 'taker' as role, tm.is_winner
-            FROM read_parquet('{}') t
-            JOIN read_parquet('{}') tm ON t.taker_asset_id = tm.token_id
-            WHERE t.maker_amount > 0 AND t.taker_amount > 0
-
-            UNION ALL
-
-            -- Maker perspective: maker holds the maker_asset_id token
-            SELECT 'maker' as role, tm.is_winner
-            FROM read_parquet('{}') t
-            JOIN read_parquet('{}') tm ON t.maker_asset_id = tm.token_id
-            WHERE t.maker_amount > 0 AND t.taker_amount > 0
-        ) combined
-        GROUP BY role
-    """.format(TRADES_GLOB, TOKEN_MAP, TRADES_GLOB, TOKEN_MAP)).fetchall()
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
+            AVG(price_per_token) as avg_price
+        FROM ({BUY_TRADES_SQL}) buys
+        WHERE price_per_token > 0.01 AND price_per_token < 0.99
+    """).fetchall()
 
     patterns = []
     for row in results:
-        role, total, wins = row
+        category, total, wins, avg_price = row
         hit_rate = wins / total if total > 0 else 0
-        edge = hit_rate - 0.5
+        ev = hit_rate / avg_price if avg_price > 0 else 0
 
-        logger.info(f"  {role}: {hit_rate:.1%} hit rate ({total:,} trades)")
-
-        if edge < 0.01:
-            continue
-
-        pattern = DiscoveredPattern(
-            pattern_id=f"role_{role}",
-            name=f"Role: {role} advantage",
-            description=(
-                f"{role.title()} trades have {hit_rate:.1%} hit rate "
-                f"(edge: {edge:.1%} over {total:,} trades)"
-            ),
-            dimension="maker_taker",
-            filters={"role": role},
-            sample_size=total,
-            hit_rate=hit_rate,
-            avg_price=0.5,
-            expected_edge=edge,
-            entry_rules=[],
-            trade_params={
-                "side": "YES",
-                "sizing_method": "fixed_amount",
-                "fixed_amount_usd": 2.0,
-                "min_edge": 0.03,
-            },
+        logger.info(
+            f"  Overall buy trades: hit_rate={hit_rate:.1%}, "
+            f"avg_price={avg_price:.3f}, EV={ev:.3f} ({total:,} trades)"
         )
-        patterns.append(pattern)
 
     return patterns
 
 
 def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
-    """Run the full pattern discovery pipeline.
-
-    Returns dict with discovered patterns and stats.
-    """
+    """Run the full pattern discovery pipeline."""
     if not _check_data_files():
         return {"ok": False, "error": "Missing data files"}
 
@@ -394,7 +436,6 @@ def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
 
     all_patterns = []
 
-    # Run each mining dimension
     miners = [
         mine_price_bucket_patterns,
         mine_volume_flow_patterns,
@@ -408,16 +449,15 @@ def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
             all_patterns.extend(patterns)
         except Exception as e:
             logger.error(f"Error in {miner.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
 
     conn.close()
 
-    # Filter by thresholds
     qualified = [
         p for p in all_patterns
         if p.expected_edge >= min_edge and p.sample_size >= min_sample
     ]
-
-    # Sort by expected edge
     qualified.sort(key=lambda p: p.expected_edge, reverse=True)
 
     logger.info(
@@ -426,7 +466,7 @@ def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
     )
 
     for p in qualified:
-        logger.info(f"  ✓ {p.name}: {p.expected_edge:.1%} edge, {p.sample_size:,} trades")
+        logger.info(f"  >> {p.name}: {p.expected_edge:+.1%} edge, {p.sample_size:,} trades")
 
     return {
         "ok": True,
@@ -439,14 +479,7 @@ def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
 
 
 def save_patterns_as_strategies(patterns: list[dict]) -> list[str]:
-    """Save discovered patterns as strategy entries in the DB.
-
-    Args:
-        patterns: List of pattern dicts (from run_discovery()["patterns"])
-
-    Returns:
-        List of created strategy IDs.
-    """
+    """Save discovered patterns as strategy entries in the DB."""
     try:
         from db import engine
     except ImportError:
