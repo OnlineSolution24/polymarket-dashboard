@@ -336,9 +336,9 @@ def compute_weather_ensemble_edges(engine) -> int:
             cache_key = (lat, lon)
 
             if cache_key not in ensemble_cache:
-                # Rate-limit: 1.5s between API calls to avoid Open-Meteo 429
+                # Rate-limit: 5s between API calls to avoid Open-Meteo 429
                 if ensemble_cache:
-                    time.sleep(1.5)
+                    time.sleep(5)
                 ensemble_cache[cache_key] = _fetch_ensemble_forecast(lat, lon)
 
             ensemble = ensemble_cache[cache_key]
@@ -390,23 +390,34 @@ def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
     Returns {date_str: {temp_max_mean, temp_max_spread, temp_min_mean, temp_min_spread}}
     The spread (max-min across models) gives natural uncertainty.
     """
+    import time as _time
     try:
-        resp = httpx.get(
-            "https://ensemble-api.open-meteo.com/v1/ensemble",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min",
-                "timezone": "auto",
-                "forecast_days": 7,
-                "models": ",".join([
-                    "icon_seamless", "gfs_seamless", "ecmwf_ifs025",
-                    "ecmwf_aifs025", "gfs05", "gem_global",
-                    "bom_access_global_ensemble",
-                ]),
-            },
-            timeout=15,
-        )
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "daily": "temperature_2m_max,temperature_2m_min",
+            "timezone": "auto",
+            "forecast_days": 7,
+            "models": ",".join([
+                "icon_seamless", "gfs_seamless", "ecmwf_ifs025",
+                "ecmwf_aifs025", "gfs05", "gem_global",
+                "bom_access_global_ensemble",
+            ]),
+        }
+        # Retry with exponential backoff on 429
+        resp = None
+        for attempt in range(4):
+            resp = httpx.get(
+                "https://ensemble-api.open-meteo.com/v1/ensemble",
+                params=params,
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s, 80s
+                logger.warning(f"Open-Meteo 429 for ({lat},{lon}), retry {attempt+1}/3 in {wait}s")
+                _time.sleep(wait)
+                continue
+            break
         resp.raise_for_status()
         data = resp.json()
 
