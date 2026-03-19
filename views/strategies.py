@@ -202,24 +202,29 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
             st.markdown("**Ausstiegsregeln**")
             new_exit_rules = []
             for i, rule in enumerate(exit_rules):
+                if not isinstance(rule, dict):
+                    rule = {"field": str(rule), "op": "lt", "value": 0}
+                field = rule.get("field", "")
+                op = rule.get("op", "lt")
+                value = rule.get("value", 0)
                 c1, c2, c3 = st.columns([3, 1.5, 2])
                 with c1:
                     new_field = st.selectbox(
                         "Feld", list(_FIELD_LABELS.keys()),
-                        index=list(_FIELD_LABELS.keys()).index(rule.get("field", "")) if rule.get("field", "") in _FIELD_LABELS else 0,
+                        index=list(_FIELD_LABELS.keys()).index(field) if field in _FIELD_LABELS else 0,
                         format_func=lambda x: _FIELD_LABELS.get(x, x),
                         key=f"xf_{sid}_{i}", label_visibility="collapsed",
                     )
                 with c2:
                     new_op = st.selectbox(
                         "Op", _OP_OPTIONS,
-                        index=_OP_OPTIONS.index(rule.get("op", "lt")) if rule.get("op", "lt") in _OP_OPTIONS else 0,
+                        index=_OP_OPTIONS.index(op) if op in _OP_OPTIONS else 0,
                         format_func=lambda x: _OP_LABELS.get(x, x),
                         key=f"xo_{sid}_{i}", label_visibility="collapsed",
                     )
                 with c3:
                     new_val = st.number_input(
-                        "Wert", value=float(rule.get("value", 0)), step=0.01, format="%.4f",
+                        "Wert", value=float(value), step=0.01, format="%.4f",
                         key=f"xv_{sid}_{i}", label_visibility="collapsed",
                     )
                 new_exit_rule = {"field": new_field, "op": new_op, "value": new_val}
