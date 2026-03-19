@@ -398,7 +398,7 @@ def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
                 "models": ",".join([
                     "icon_seamless", "gfs_seamless", "ecmwf_ifs025",
                     "ecmwf_aifs025", "gfs05", "gem_global",
-                    "bom_access_global_ensemble", "ukmo_global_ensemble",
+                    "bom_access_global_ensemble",
                 ]),
             },
             timeout=15,
