@@ -376,47 +376,334 @@ def mine_trade_size_patterns(conn) -> list[DiscoveredPattern]:
     return patterns
 
 
-def mine_maker_taker_patterns(conn) -> list[DiscoveredPattern]:
-    """Pattern F: Do takers (market orders) pick winners better than makers?"""
-    logger.info("Mining maker vs taker patterns...")
+def mine_category_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern C: Do certain market categories have mispriced outcomes?
 
-    # In buy trades (maker_asset_id = '0'):
-    # - The 'taker' address is the one filling the order (market order = informed)
-    # - The 'maker' address placed the limit order (passive)
-    # We check: do taker-address wallets have better hit rates than maker-address wallets?
-
-    # Simpler approach: compare hit rates for trades where our token side
-    # matches the winning outcome. Since all these are "buy" trades
-    # (maker pays USDC, taker provides tokens), the maker is BUYING
-    # and the taker is SELLING.
-    #
-    # Actually in CTF exchange OrderFilled:
-    # - maker = the address whose order was resting
-    # - taker = the address who filled (crossed the spread)
-    #
-    # Both are "involved" but the taker is the active participant.
-    # We just report the overall buy-side hit rate for context.
+    Extracts category from question text (keywords) and checks if
+    buy trades in certain categories have edge.
+    """
+    logger.info("Mining category patterns...")
 
     results = conn.execute(f"""
         SELECT
-            'buy_trades' as category,
+            category,
             COUNT(*) as total_trades,
             SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
             AVG(price_per_token) as avg_price
-        FROM ({BUY_TRADES_SQL}) buys
-        WHERE price_per_token > 0.01 AND price_per_token < 0.99
+        FROM (
+            SELECT
+                buys.is_winner,
+                buys.price_per_token,
+                CASE
+                    WHEN LOWER(r.question) LIKE '%bitcoin%' OR LOWER(r.question) LIKE '%btc%'
+                         OR LOWER(r.question) LIKE '%ethereum%' OR LOWER(r.question) LIKE '%eth %'
+                         OR LOWER(r.question) LIKE '%crypto%' OR LOWER(r.question) LIKE '%solana%'
+                         THEN 'crypto'
+                    WHEN LOWER(r.question) LIKE '%trump%' OR LOWER(r.question) LIKE '%biden%'
+                         OR LOWER(r.question) LIKE '%president%' OR LOWER(r.question) LIKE '%election%'
+                         OR LOWER(r.question) LIKE '%congress%' OR LOWER(r.question) LIKE '%senate%'
+                         THEN 'politics'
+                    WHEN LOWER(r.question) LIKE '%nba%' OR LOWER(r.question) LIKE '%nfl%'
+                         OR LOWER(r.question) LIKE '%mlb%' OR LOWER(r.question) LIKE '%nhl%'
+                         OR LOWER(r.question) LIKE '%win game%' OR LOWER(r.question) LIKE '%score%'
+                         OR LOWER(r.question) LIKE '%match%' OR LOWER(r.question) LIKE '%playoff%'
+                         THEN 'sports'
+                    WHEN LOWER(r.question) LIKE '%weather%' OR LOWER(r.question) LIKE '%temperature%'
+                         OR LOWER(r.question) LIKE '%rain%' THEN 'weather'
+                    WHEN LOWER(r.question) LIKE '%fed %' OR LOWER(r.question) LIKE '%rate%'
+                         OR LOWER(r.question) LIKE '%gdp%' OR LOWER(r.question) LIKE '%inflation%'
+                         OR LOWER(r.question) LIKE '%cpi%' OR LOWER(r.question) LIKE '%unemployment%'
+                         THEN 'economics'
+                    ELSE 'other'
+                END as category
+            FROM ({BUY_TRADES_SQL}) buys
+            JOIN read_parquet('{RESOLUTIONS}') r ON buys.condition_id = r.condition_id
+            WHERE buys.price_per_token > 0.01 AND buys.price_per_token < 0.99
+        ) sub
+        GROUP BY category
+        HAVING COUNT(*) >= 5000
+        ORDER BY category
     """).fetchall()
 
     patterns = []
     for row in results:
-        category, total, wins, avg_price = row
+        cat, total, wins, avg_price = row
         hit_rate = wins / total if total > 0 else 0
         ev = hit_rate / avg_price if avg_price > 0 else 0
+        edge = ev - 1.0
 
         logger.info(
-            f"  Overall buy trades: hit_rate={hit_rate:.1%}, "
-            f"avg_price={avg_price:.3f}, EV={ev:.3f} ({total:,} trades)"
+            f"  {cat}: hit={hit_rate:.1%}, avg_price={avg_price:.3f}, "
+            f"EV={ev:.3f}, edge={edge:+.1%} ({total:,} trades)"
         )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"cat_{cat}",
+            name=f"Category: {cat}",
+            description=(
+                f"Buy trades in {cat} markets. Hit rate: {hit_rate:.1%}, "
+                f"avg price: {avg_price:.3f}, edge: {edge:+.1%} ({total:,} trades)"
+            ),
+            dimension="category",
+            filters={"category": cat},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=avg_price,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 2.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_lifecycle_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern D: Does buying early vs late in a market's life have different edge?
+
+    Splits each market's trading period into quartiles and checks if
+    trades in certain phases have better outcomes.
+    """
+    logger.info("Mining lifecycle timing patterns...")
+
+    results = conn.execute(f"""
+        WITH market_ranges AS (
+            SELECT
+                tm.condition_id,
+                MIN(t.block_number) as first_block,
+                MAX(t.block_number) as last_block
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0
+            GROUP BY tm.condition_id
+            HAVING COUNT(*) >= 20 AND MAX(t.block_number) > MIN(t.block_number)
+        )
+        SELECT
+            lifecycle_phase,
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
+            AVG(price_per_token) as avg_price
+        FROM (
+            SELECT
+                tm.is_winner,
+                t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) as price_per_token,
+                CASE
+                    WHEN (t.block_number - mr.first_block) * 1.0 / NULLIF(mr.last_block - mr.first_block, 1) < 0.25 THEN 'early_25pct'
+                    WHEN (t.block_number - mr.first_block) * 1.0 / NULLIF(mr.last_block - mr.first_block, 1) < 0.50 THEN 'mid_early'
+                    WHEN (t.block_number - mr.first_block) * 1.0 / NULLIF(mr.last_block - mr.first_block, 1) < 0.75 THEN 'mid_late'
+                    ELSE 'final_25pct'
+                END as lifecycle_phase
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            JOIN market_ranges mr ON tm.condition_id = mr.condition_id
+            WHERE t.maker_asset_id = '0'
+              AND t.maker_amount > 0 AND t.taker_amount > 0
+              AND t.maker_amount * 1.0 / t.taker_amount > 0.01
+              AND t.maker_amount * 1.0 / t.taker_amount < 0.99
+        ) sub
+        GROUP BY lifecycle_phase
+        HAVING COUNT(*) >= 1000
+        ORDER BY lifecycle_phase
+    """).fetchall()
+
+    patterns = []
+    for row in results:
+        phase, total, wins, avg_price = row
+        hit_rate = wins / total if total > 0 else 0
+        ev = hit_rate / avg_price if avg_price > 0 else 0
+        edge = ev - 1.0
+
+        logger.info(
+            f"  {phase}: hit={hit_rate:.1%}, avg_price={avg_price:.3f}, "
+            f"EV={ev:.3f}, edge={edge:+.1%} ({total:,} trades)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"lifecycle_{phase}",
+            name=f"Lifecycle: {phase}",
+            description=(
+                f"Trades in the {phase} of market lifecycle. "
+                f"Hit: {hit_rate:.1%}, avg price: {avg_price:.3f}, "
+                f"edge: {edge:+.1%} ({total:,} trades)"
+            ),
+            dimension="lifecycle",
+            filters={"phase": phase},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=avg_price,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 2.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_price_x_size_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern G: Cross-analysis of price bucket × trade size.
+
+    Maybe whales buying longshots have edge, even if neither dimension alone does.
+    """
+    logger.info("Mining price × size cross patterns...")
+
+    results = conn.execute(f"""
+        SELECT
+            price_bucket,
+            size_bucket,
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
+            AVG(price_per_token) as avg_price
+        FROM (
+            SELECT
+                is_winner,
+                price_per_token,
+                usdc_amount,
+                CASE
+                    WHEN price_per_token < 0.20 THEN 'low_price'
+                    WHEN price_per_token < 0.50 THEN 'mid_price'
+                    WHEN price_per_token < 0.80 THEN 'high_price'
+                    ELSE 'very_high_price'
+                END as price_bucket,
+                CASE
+                    WHEN usdc_amount < 50 THEN 'retail'
+                    WHEN usdc_amount < 500 THEN 'medium'
+                    ELSE 'whale'
+                END as size_bucket
+            FROM ({BUY_TRADES_SQL}) buys
+            WHERE price_per_token > 0.01 AND price_per_token < 0.99
+        ) sub
+        GROUP BY price_bucket, size_bucket
+        HAVING COUNT(*) >= 5000
+        ORDER BY price_bucket, size_bucket
+    """).fetchall()
+
+    patterns = []
+    for row in results:
+        price_b, size_b, total, wins, avg_price = row
+        hit_rate = wins / total if total > 0 else 0
+        ev = hit_rate / avg_price if avg_price > 0 else 0
+        edge = ev - 1.0
+
+        combo = f"{price_b}_{size_b}"
+        logger.info(
+            f"  {combo}: hit={hit_rate:.1%}, avg_price={avg_price:.3f}, "
+            f"EV={ev:.3f}, edge={edge:+.1%} ({total:,} trades)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"cross_{combo}",
+            name=f"Cross: {price_b} × {size_b}",
+            description=(
+                f"{size_b} traders buying at {price_b} prices. "
+                f"Hit: {hit_rate:.1%}, edge: {edge:+.1%} ({total:,} trades)"
+            ),
+            dimension="price_x_size",
+            filters={"price_bucket": price_b, "size_bucket": size_b},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=avg_price,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 2.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_outcome_type_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern H: Do certain outcome types (Yes/No/Over/Under) have systematic bias?
+
+    Checks if the market systematically misprices certain outcome types.
+    """
+    logger.info("Mining outcome type patterns...")
+
+    results = conn.execute(f"""
+        SELECT
+            outcome_type,
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
+            AVG(price_per_token) as avg_price
+        FROM (
+            SELECT
+                buys.is_winner,
+                buys.price_per_token,
+                CASE
+                    WHEN LOWER(buys.outcome) IN ('yes', 'no') THEN LOWER(buys.outcome)
+                    WHEN LOWER(buys.outcome) IN ('over', 'under') THEN LOWER(buys.outcome)
+                    WHEN LOWER(buys.outcome) IN ('up', 'down') THEN LOWER(buys.outcome)
+                    ELSE 'other'
+                END as outcome_type
+            FROM ({BUY_TRADES_SQL}) buys
+            WHERE buys.price_per_token > 0.01 AND buys.price_per_token < 0.99
+        ) sub
+        GROUP BY outcome_type
+        HAVING COUNT(*) >= 10000
+        ORDER BY outcome_type
+    """).fetchall()
+
+    patterns = []
+    for row in results:
+        otype, total, wins, avg_price = row
+        hit_rate = wins / total if total > 0 else 0
+        ev = hit_rate / avg_price if avg_price > 0 else 0
+        edge = ev - 1.0
+
+        logger.info(
+            f"  {otype}: hit={hit_rate:.1%}, avg_price={avg_price:.3f}, "
+            f"EV={ev:.3f}, edge={edge:+.1%} ({total:,} trades)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"outcome_{otype}",
+            name=f"Outcome Type: {otype}",
+            description=(
+                f"Buying {otype} outcomes. Hit: {hit_rate:.1%}, "
+                f"avg price: {avg_price:.3f}, edge: {edge:+.1%} ({total:,} trades)"
+            ),
+            dimension="outcome_type",
+            filters={"outcome_type": otype},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=avg_price,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 2.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
 
     return patterns
 
@@ -440,7 +727,10 @@ def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
         mine_price_bucket_patterns,
         mine_volume_flow_patterns,
         mine_trade_size_patterns,
-        mine_maker_taker_patterns,
+        mine_category_patterns,
+        mine_lifecycle_patterns,
+        mine_price_x_size_patterns,
+        mine_outcome_type_patterns,
     ]
 
     for miner in miners:
