@@ -118,6 +118,9 @@ scheduler:
     enabled: true
     interval_hours: 6
     max_chunks_per_run: 50000
+  resolution_updater:
+    enabled: true
+    interval_hours: 24
 strategy:
   max_active_strategies: 5
   min_confidence_score: 0.5

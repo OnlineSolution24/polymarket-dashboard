@@ -217,6 +217,16 @@ def start_scheduler(config: AppConfig) -> None:
                 )
                 logger.info(f"Scheduled: blockchain_indexer every {bi_hours}h")
 
+            # Resolution data updater (daily, keeps resolution table current)
+            res_cfg = sched_cfg.get("resolution_updater", {})
+            if res_cfg.get("enabled", False):
+                res_hours = res_cfg.get("interval_hours", 24)
+                _scheduler.add_job(
+                    _job_resolution_updater, "interval", hours=res_hours,
+                    id="resolution_updater", replace_existing=True,
+                )
+                logger.info(f"Scheduled: resolution_updater every {res_hours}h")
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
@@ -1741,3 +1751,22 @@ def _job_blockchain_indexer(max_chunks: int = 500):
 
     except Exception as e:
         logger.error(f"Blockchain indexer job failed: {e}")
+
+
+def _job_resolution_updater():
+    """Daily incremental update of resolution data from CLOB API."""
+    try:
+        from scripts.build_resolution_table import run_incremental
+
+        logger.info("Resolution updater starting...")
+        result = run_incremental()
+
+        if result.get("ok"):
+            new = result.get("new_resolutions", 0)
+            total = result.get("total_existing", 0)
+            logger.info(f"Resolution updater done: {new} new resolutions (total known: {total})")
+        else:
+            logger.error(f"Resolution updater failed: {result}")
+
+    except Exception as e:
+        logger.error(f"Resolution updater job failed: {e}")
