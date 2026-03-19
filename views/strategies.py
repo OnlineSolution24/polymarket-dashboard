@@ -115,6 +115,10 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
         st.caption("Filter die bestimmen ob ein Markt fuer diese Strategie in Frage kommt")
 
         # Check for duplicate edge (entry rule + trade param)
+        # Normalize rules: ensure all entries are dicts
+        entry_rules = [r if isinstance(r, dict) else {"field": str(r), "op": "gt", "value": 0} for r in entry_rules]
+        exit_rules = [r if isinstance(r, dict) else {"field": str(r), "op": "lt", "value": 0} for r in exit_rules]
+
         has_edge_rule = any(r.get("field") == "calculated_edge" for r in entry_rules)
         if has_edge_rule:
             st.warning("Edge ist bereits unter Trade-Parameter als 'Min Edge' steuerbar. Die Einstiegsregel hier ist ein Duplikat — du kannst sie mit X entfernen.", icon="⚠️")
