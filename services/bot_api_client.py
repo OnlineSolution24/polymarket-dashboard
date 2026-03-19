@@ -223,6 +223,14 @@ class BotAPIClient:
     def get_patterns(self) -> dict | None:
         return self._get("/api/analytics/patterns")
 
+    def get_strategy_live_stats(self, strategy_id: str) -> dict:
+        return self._get(f"/api/strategies/{strategy_id}/live-stats") or {
+            "trades": 0, "wins": 0, "losses": 0, "open": 0,
+            "total_pnl": 0, "total_invested": 0, "win_rate": 0,
+            "avg_pnl": 0, "roi_pct": 0, "best_trade": 0, "worst_trade": 0,
+            "recent_trades": [],
+        }
+
     def get_strategy_signals(self, strategy_id: str) -> list:
         return self._get(f"/api/analytics/strategy-signals/{strategy_id}") or []
 

@@ -83,46 +83,10 @@ _SIZING_HELP = {
 }
 
 
-
-def _normalize_rules(raw):
-    """Convert any rule format to a list of dicts."""
-    # If raw is a JSON string, parse it first
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            # Plain string like "calculated_edge >= 0.05"
-            return [{"field": raw, "operator": "", "value": ""}]
-    # If it is a single dict, wrap in list
-    if isinstance(raw, dict):
-        return [raw]
-    # If it is a list, normalize each item
-    if isinstance(raw, list):
-        result = []
-        for r in raw:
-            if isinstance(r, dict):
-                result.append(r)
-            elif isinstance(r, str):
-                try:
-                    parsed = json.loads(r)
-                    if isinstance(parsed, dict):
-                        result.append(parsed)
-                    elif isinstance(parsed, list):
-                        result.extend(d for d in parsed if isinstance(d, dict))
-                    else:
-                        result.append({"field": r, "op": "", "value": ""})
-                except (json.JSONDecodeError, TypeError):
-                    result.append({"field": r, "op": "", "value": ""})
-            else:
-                result.append({"field": str(r), "op": "", "value": ""})
-        return result
-    return []
-
-
 def _render_strategy_details(client, sid: str, name: str, definition: dict, strat: dict):
     """Render readable, editable strategy parameters inline per strategy."""
-    entry_rules = _normalize_rules(definition.get("entry_rules", []))
-    exit_rules = _normalize_rules(definition.get("exit_rules", []))
+    entry_rules = definition.get("entry_rules", [])
+    exit_rules = definition.get("exit_rules", [])
     trade_params = definition.get("trade_params", {})
     source = definition.get("source", "")
     name_lower = name.lower()
@@ -151,6 +115,10 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
         st.caption("Filter die bestimmen ob ein Markt fuer diese Strategie in Frage kommt")
 
         # Check for duplicate edge (entry rule + trade param)
+        # Normalize rules: ensure all entries are dicts
+        entry_rules = [r if isinstance(r, dict) else {"field": str(r), "op": "gt", "value": 0} for r in entry_rules]
+        exit_rules = [r if isinstance(r, dict) else {"field": str(r), "op": "lt", "value": 0} for r in exit_rules]
+
         has_edge_rule = any(r.get("field") == "calculated_edge" for r in entry_rules)
         if has_edge_rule:
             st.warning("Edge ist bereits unter Trade-Parameter als 'Min Edge' steuerbar. Die Einstiegsregel hier ist ein Duplikat — du kannst sie mit X entfernen.", icon="⚠️")
@@ -202,29 +170,24 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
             st.markdown("**Ausstiegsregeln**")
             new_exit_rules = []
             for i, rule in enumerate(exit_rules):
-                if not isinstance(rule, dict):
-                    rule = {"field": str(rule), "op": "lt", "value": 0}
-                field = rule.get("field", "")
-                op = rule.get("op", "lt")
-                value = rule.get("value", 0)
                 c1, c2, c3 = st.columns([3, 1.5, 2])
                 with c1:
                     new_field = st.selectbox(
                         "Feld", list(_FIELD_LABELS.keys()),
-                        index=list(_FIELD_LABELS.keys()).index(field) if field in _FIELD_LABELS else 0,
+                        index=list(_FIELD_LABELS.keys()).index(rule.get("field", "")) if rule.get("field", "") in _FIELD_LABELS else 0,
                         format_func=lambda x: _FIELD_LABELS.get(x, x),
                         key=f"xf_{sid}_{i}", label_visibility="collapsed",
                     )
                 with c2:
                     new_op = st.selectbox(
                         "Op", _OP_OPTIONS,
-                        index=_OP_OPTIONS.index(op) if op in _OP_OPTIONS else 0,
+                        index=_OP_OPTIONS.index(rule.get("op", "lt")) if rule.get("op", "lt") in _OP_OPTIONS else 0,
                         format_func=lambda x: _OP_LABELS.get(x, x),
                         key=f"xo_{sid}_{i}", label_visibility="collapsed",
                     )
                 with c3:
                     new_val = st.number_input(
-                        "Wert", value=float(value), step=0.01, format="%.4f",
+                        "Wert", value=float(rule.get("value", 0)), step=0.01, format="%.4f",
                         key=f"xv_{sid}_{i}", label_visibility="collapsed",
                     )
                 new_exit_rule = {"field": new_field, "op": new_op, "value": new_val}
@@ -294,7 +257,7 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
                 fixed_amount = st.number_input(
                     "Fester Betrag pro Trade ($)",
                     value=float(trade_params.get("fixed_amount_usd", 5.0)),
-                    min_value=0.01, max_value=500.0, step=0.50,
+                    min_value=0.10, max_value=500.0, step=0.50,
                     key=f"tp_fixed_{sid}",
                     help="Exakter Dollar-Betrag der pro Trade eingesetzt wird",
                 )
@@ -388,7 +351,7 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
             cashout_min_usd = st.number_input(
                 "Cashout ab Profit $ (Minimum)",
                 value=float(trading_cfg.get("cashout", {}).get("min_profit_usd", 0.50)),
-                min_value=0.01, max_value=50.0, step=0.01,
+                min_value=0.10, max_value=50.0, step=0.10,
                 key=f"gc_cashout_usd_{sid}",
                 help="Zusaetzliche Bedingung: Mindestprofit in Dollar",
             )
@@ -491,34 +454,6 @@ def render():
     )
     best_wr = max((s.get("backtest_win_rate", 0) or 0 for s in strategies), default=0)
 
-    # --- Echte Performance (von Polymarket API) ---
-    perf = client.get_performance()
-    real_realized = perf.get("realized_pnl", 0)
-    real_unrealized = perf.get("unrealized_pnl", 0)
-    real_total_pnl = real_realized + real_unrealized
-    real_open = perf.get("open_market_count", 0)
-    real_wins = perf.get("wins", 0)
-    real_losses = perf.get("losses", 0)
-
-    st.markdown("### 💰 Echte Performance")
-    st.caption("Daten direkt von Polymarket API — tats\u00e4chlich ausgef\u00fchrte Trades")
-    rc1, rc2, rc3, rc4 = st.columns(4)
-    with rc1:
-        rp_color = "#00D4AA" if real_total_pnl >= 0 else "#FF5252"
-        st.markdown(_metric_card("Echte PnL (Gesamt)", f"${real_total_pnl:.2f}", rp_color), unsafe_allow_html=True)
-    with rc2:
-        rr_color = "#00D4AA" if real_realized >= 0 else "#FF5252"
-        st.markdown(_metric_card("Realisiert", f"${real_realized:.2f}", rr_color), unsafe_allow_html=True)
-    with rc3:
-        ru_color = "#00D4AA" if real_unrealized >= 0 else "#FF5252"
-        st.markdown(_metric_card("Unrealisiert", f"${real_unrealized:.2f}", ru_color), unsafe_allow_html=True)
-    with rc4:
-        st.markdown(_metric_card("Offene Positionen", str(real_open)), unsafe_allow_html=True)
-    st.caption(f"W/L: **{real_wins}/{real_losses}**")
-
-    st.markdown("---")
-
-    st.markdown("### Strategie-\u00dcbersicht")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(_metric_card("Gesamt", str(len(strategies))), unsafe_allow_html=True)
@@ -526,10 +461,9 @@ def render():
         st.markdown(_metric_card("Aktiv", str(len(active)), "#00D4AA"), unsafe_allow_html=True)
     with c3:
         pnl_color = "#00D4AA" if total_live_pnl >= 0 else "#FF5252"
-        st.markdown(_metric_card("Theoretisch PnL", f"${total_live_pnl:.2f}", pnl_color), unsafe_allow_html=True)
+        st.markdown(_metric_card("Live PnL", f"${total_live_pnl:.2f}", pnl_color), unsafe_allow_html=True)
     with c4:
         st.markdown(_metric_card("Avg Confidence", f"{avg_confidence:.0%}"), unsafe_allow_html=True)
-    st.caption("\u26a0\ufe0f Theoretisch \u2014 basiert auf Strategie-Vorschl\u00e4gen, nicht auf echten Trades")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -587,37 +521,59 @@ def render():
                     st.markdown(_metric_card("Max DD", f"{bt_dd:.1f}%", dd_c), unsafe_allow_html=True)
 
             with col_live:
-                st.markdown("##### Strategie-Performance (Theoretisch)")
+                st.markdown("##### Live Performance")
+                # Fetch real-time stats from trades
+                live_stats = client.get_strategy_live_stats(sid)
+                ls_trades = live_stats.get("trades", 0)
+                ls_wins = live_stats.get("wins", 0)
+                ls_losses = live_stats.get("losses", 0)
+                ls_open = live_stats.get("open", 0)
+                ls_wr = live_stats.get("win_rate", 0)
+                ls_pnl = live_stats.get("total_pnl", 0)
+                ls_roi = live_stats.get("roi_pct", 0)
+                ls_avg = live_stats.get("avg_pnl", 0)
+                ls_best = live_stats.get("best_trade", 0)
+                ls_worst = live_stats.get("worst_trade", 0)
+                ls_invested = live_stats.get("total_invested", 0)
+
                 m5, m6 = st.columns(2)
                 with m5:
-                    st.markdown(_metric_card("Trades", str(live_trades)), unsafe_allow_html=True)
+                    trades_label = f"{ls_trades} ({ls_wins}W/{ls_losses}L/{ls_open}O)"
+                    st.markdown(_metric_card("Trades", trades_label), unsafe_allow_html=True)
                 with m6:
-                    lwr_c = "#00D4AA" if live_wr >= 0.5 else "#FFB74D" if live_wr >= 0.4 else "#FF5252"
-                    st.markdown(_metric_card("Win Rate", f"{live_wr:.0%}", lwr_c), unsafe_allow_html=True)
+                    lwr_c = "#00D4AA" if ls_wr >= 60 else "#FFB74D" if ls_wr >= 45 else "#FF5252"
+                    st.markdown(_metric_card("Win Rate", f"{ls_wr:.1f}%", lwr_c), unsafe_allow_html=True)
                 m7, m8 = st.columns(2)
                 with m7:
-                    lpnl_c = "#00D4AA" if live_pnl >= 0 else "#FF5252"
-                    st.markdown(_metric_card("PnL", f"${live_pnl:.2f}", lpnl_c), unsafe_allow_html=True)
+                    lpnl_c = "#00D4AA" if ls_pnl >= 0 else "#FF5252"
+                    st.markdown(_metric_card("PnL", f"${ls_pnl:+.2f}", lpnl_c), unsafe_allow_html=True)
                 with m8:
+                    roi_c = "#00D4AA" if ls_roi >= 0 else "#FF5252"
+                    st.markdown(_metric_card("ROI", f"{ls_roi:+.1f}%", roi_c), unsafe_allow_html=True)
+                m9, m10 = st.columns(2)
+                with m9:
+                    st.markdown(_metric_card("Avg PnL", f"${ls_avg:+.2f}"), unsafe_allow_html=True)
+                with m10:
                     conf_c = "#00D4AA" if confidence >= 0.6 else "#FFB74D" if confidence >= 0.4 else "#FF5252"
                     st.markdown(_metric_card("Confidence", f"{confidence:.0%}", conf_c), unsafe_allow_html=True)
-                st.caption("\u26a0\ufe0f Theoretisch \u2014 basiert auf Vorschl\u00e4gen, nicht auf echten Trades")
+                m11, m12 = st.columns(2)
+                with m11:
+                    st.markdown(_metric_card("Bester Trade", f"${ls_best:+.2f}", "#00D4AA" if ls_best > 0 else "#5A6478"), unsafe_allow_html=True)
+                with m12:
+                    st.markdown(_metric_card("Schlechtester", f"${ls_worst:+.2f}", "#FF5252" if ls_worst < 0 else "#5A6478"), unsafe_allow_html=True)
 
-            # --- Echt ausgefuehrte Trades dieser Strategie ---
-            detail = client.get_strategy(sid)
-            real_trades = []
-            if detail:
-                for st_trade in (detail.get("strategy_trades") or []):
-                    if st_trade.get("trade_id") and st_trade.get("is_backtest") == 0:
-                        real_trades.append(st_trade)
-            real_count = len(real_trades)
-            real_pnl_sum = sum(float(t.get("pnl") or 0) for t in real_trades)
-            rp_c = "#00D4AA" if real_pnl_sum >= 0 else "#FF5252"
-            st.markdown(
-                f"**Echt ausgef\u00fchrt:** {real_count} Trades, "
-                f"<span style='color:{rp_c}'>${real_pnl_sum:+.2f} PnL</span>",
-                unsafe_allow_html=True,
-            )
+                # Recent trades table
+                recent = live_stats.get("recent_trades", [])
+                if recent:
+                    with st.expander(f"Letzte {len(recent)} Trades", expanded=False):
+                        import pandas as pd
+                        df = pd.DataFrame(recent)
+                        if not df.empty:
+                            display_cols = ["id", "side", "amount_usd", "pnl", "result", "question", "created_at"]
+                            display_cols = [c for c in display_cols if c in df.columns]
+                            df = df[display_cols]
+                            df.columns = ["#", "Side", "$", "PnL", "Result", "Markt", "Datum"][:len(display_cols)]
+                            st.dataframe(df, use_container_width=True, hide_index=True)
 
             # Strategy definition — readable + editable
             definition_raw = strat.get("definition", "{}")
