@@ -889,6 +889,119 @@ def create_app(config: AppConfig) -> FastAPI:
         engine.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
         return BotActionResponse(ok=True, message="Strategy deleted")
 
+    @app.get("/api/strategies/{strategy_id}/live-stats", dependencies=[Depends(verify_api_key)])
+    def get_strategy_live_stats(strategy_id: str):
+        """Compute live trading stats for a strategy from actual trades."""
+        row = engine.query_one("SELECT definition, category FROM strategies WHERE id = ?", (strategy_id,))
+        if not row:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        try:
+            defn = json.loads(row.get("definition") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            defn = {}
+
+        category_filter = defn.get("category_filter", [])
+        trade_side = defn.get("trade_params", {}).get("side")
+
+        # Build category matching conditions from market_question text
+        _CAT_KEYWORDS = {
+            "Weather": ['temperature', '°F', '°C', 'weather', 'high of', 'low of', 'hottest', 'coldest', 'rainfall', 'snow', 'hurricane'],
+            "Sports": ['win the', 'vs.', 'defeat', 'nba', 'nfl', 'nhl', 'mlb', 'premier league', 'champions league', 'super bowl', 'ufc', 'boxing'],
+            "Politics": ['trump', 'biden', 'election', 'president', 'senate', 'congress', 'democrat', 'republican', 'vote'],
+            "Economics": ['fed ', 'interest rate', 'gdp', 'inflation', 'unemployment', 'cpi', 'fomc', 'treasury'],
+            "Crypto": ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'dogecoin', 'xrp', 'token'],
+        }
+
+        conditions = []
+        params = []
+        for cat in category_filter:
+            keywords = _CAT_KEYWORDS.get(cat, [])
+            for kw in keywords:
+                conditions.append("market_question LIKE ?")
+                params.append(f"%{kw}%")
+            # Also match category column
+            conditions.append("category = ?")
+            params.append(cat)
+
+        if not conditions:
+            # Fallback: match by strategy category
+            cat = row.get("category", "")
+            if cat:
+                keywords = _CAT_KEYWORDS.get(cat, [])
+                for kw in keywords:
+                    conditions.append("market_question LIKE ?")
+                    params.append(f"%{kw}%")
+                conditions.append("category = ?")
+                params.append(cat)
+
+        if not conditions:
+            return {"trades": 0, "wins": 0, "losses": 0, "open": 0, "total_pnl": 0,
+                    "total_invested": 0, "win_rate": 0, "avg_pnl": 0, "roi_pct": 0,
+                    "best_trade": 0, "worst_trade": 0, "recent_trades": []}
+
+        where = "(" + " OR ".join(conditions) + ")"
+
+        # Side filter
+        side_filter = ""
+        side_params = []
+        if trade_side:
+            side_filter = " AND side = ?"
+            side_params = [trade_side]
+
+        # Summary stats
+        stats = engine.query_one(
+            f"""SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN result = 'win' OR result = 'take_profit' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result IS NULL OR result = 'open' THEN 1 ELSE 0 END) as open_trades,
+                COALESCE(SUM(pnl), 0) as total_pnl,
+                COALESCE(SUM(amount_usd), 0) as total_invested,
+                COALESCE(AVG(CASE WHEN pnl IS NOT NULL THEN pnl END), 0) as avg_pnl,
+                COALESCE(MAX(pnl), 0) as best_trade,
+                COALESCE(MIN(CASE WHEN pnl IS NOT NULL THEN pnl END), 0) as worst_trade,
+                MIN(created_at) as first_trade,
+                MAX(created_at) as last_trade
+            FROM trades
+            WHERE status IN ('executed', 'closed') AND {where}{side_filter}""",
+            tuple(params + side_params),
+        ) or {}
+
+        total = stats.get("total_trades", 0) or 0
+        wins = stats.get("wins", 0) or 0
+        losses = stats.get("losses", 0) or 0
+        settled = wins + losses
+        total_pnl = stats.get("total_pnl", 0) or 0
+        total_invested = stats.get("total_invested", 0) or 0
+
+        # Recent trades
+        recent = engine.query(
+            f"""SELECT id, side, amount_usd, pnl, result, status,
+                       substr(market_question, 1, 80) as question, created_at
+            FROM trades
+            WHERE status IN ('executed', 'closed') AND {where}{side_filter}
+            ORDER BY created_at DESC LIMIT 10""",
+            tuple(params + side_params),
+        ) or []
+
+        return {
+            "trades": total,
+            "wins": wins,
+            "losses": losses,
+            "open": stats.get("open_trades", 0) or 0,
+            "total_pnl": round(total_pnl, 2),
+            "total_invested": round(total_invested, 2),
+            "win_rate": round(wins / settled * 100, 1) if settled > 0 else 0,
+            "avg_pnl": round(stats.get("avg_pnl", 0) or 0, 2),
+            "roi_pct": round(total_pnl / total_invested * 100, 1) if total_invested > 0 else 0,
+            "best_trade": round(stats.get("best_trade", 0) or 0, 2),
+            "worst_trade": round(stats.get("worst_trade", 0) or 0, 2),
+            "first_trade": stats.get("first_trade"),
+            "last_trade": stats.get("last_trade"),
+            "recent_trades": recent,
+        }
+
     # ------------------------------------------------------------------
     # Backtesting
     # ------------------------------------------------------------------

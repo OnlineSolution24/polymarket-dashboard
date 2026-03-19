@@ -522,19 +522,58 @@ def render():
 
             with col_live:
                 st.markdown("##### Live Performance")
+                # Fetch real-time stats from trades
+                live_stats = client.get_strategy_live_stats(sid)
+                ls_trades = live_stats.get("trades", 0)
+                ls_wins = live_stats.get("wins", 0)
+                ls_losses = live_stats.get("losses", 0)
+                ls_open = live_stats.get("open", 0)
+                ls_wr = live_stats.get("win_rate", 0)
+                ls_pnl = live_stats.get("total_pnl", 0)
+                ls_roi = live_stats.get("roi_pct", 0)
+                ls_avg = live_stats.get("avg_pnl", 0)
+                ls_best = live_stats.get("best_trade", 0)
+                ls_worst = live_stats.get("worst_trade", 0)
+                ls_invested = live_stats.get("total_invested", 0)
+
                 m5, m6 = st.columns(2)
                 with m5:
-                    st.markdown(_metric_card("Trades", str(live_trades)), unsafe_allow_html=True)
+                    trades_label = f"{ls_trades} ({ls_wins}W/{ls_losses}L/{ls_open}O)"
+                    st.markdown(_metric_card("Trades", trades_label), unsafe_allow_html=True)
                 with m6:
-                    lwr_c = "#00D4AA" if live_wr >= 0.5 else "#FFB74D" if live_wr >= 0.4 else "#FF5252"
-                    st.markdown(_metric_card("Win Rate", f"{live_wr:.0%}", lwr_c), unsafe_allow_html=True)
+                    lwr_c = "#00D4AA" if ls_wr >= 60 else "#FFB74D" if ls_wr >= 45 else "#FF5252"
+                    st.markdown(_metric_card("Win Rate", f"{ls_wr:.1f}%", lwr_c), unsafe_allow_html=True)
                 m7, m8 = st.columns(2)
                 with m7:
-                    lpnl_c = "#00D4AA" if live_pnl >= 0 else "#FF5252"
-                    st.markdown(_metric_card("PnL", f"${live_pnl:.2f}", lpnl_c), unsafe_allow_html=True)
+                    lpnl_c = "#00D4AA" if ls_pnl >= 0 else "#FF5252"
+                    st.markdown(_metric_card("PnL", f"${ls_pnl:+.2f}", lpnl_c), unsafe_allow_html=True)
                 with m8:
+                    roi_c = "#00D4AA" if ls_roi >= 0 else "#FF5252"
+                    st.markdown(_metric_card("ROI", f"{ls_roi:+.1f}%", roi_c), unsafe_allow_html=True)
+                m9, m10 = st.columns(2)
+                with m9:
+                    st.markdown(_metric_card("Avg PnL", f"${ls_avg:+.2f}"), unsafe_allow_html=True)
+                with m10:
                     conf_c = "#00D4AA" if confidence >= 0.6 else "#FFB74D" if confidence >= 0.4 else "#FF5252"
                     st.markdown(_metric_card("Confidence", f"{confidence:.0%}", conf_c), unsafe_allow_html=True)
+                m11, m12 = st.columns(2)
+                with m11:
+                    st.markdown(_metric_card("Bester Trade", f"${ls_best:+.2f}", "#00D4AA" if ls_best > 0 else "#5A6478"), unsafe_allow_html=True)
+                with m12:
+                    st.markdown(_metric_card("Schlechtester", f"${ls_worst:+.2f}", "#FF5252" if ls_worst < 0 else "#5A6478"), unsafe_allow_html=True)
+
+                # Recent trades table
+                recent = live_stats.get("recent_trades", [])
+                if recent:
+                    with st.expander(f"Letzte {len(recent)} Trades", expanded=False):
+                        import pandas as pd
+                        df = pd.DataFrame(recent)
+                        if not df.empty:
+                            display_cols = ["id", "side", "amount_usd", "pnl", "result", "question", "created_at"]
+                            display_cols = [c for c in display_cols if c in df.columns]
+                            df = df[display_cols]
+                            df.columns = ["#", "Side", "$", "PnL", "Result", "Markt", "Datum"][:len(display_cols)]
+                            st.dataframe(df, use_container_width=True, hide_index=True)
 
             # Strategy definition — readable + editable
             definition_raw = strat.get("definition", "{}")
