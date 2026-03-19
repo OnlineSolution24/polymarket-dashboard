@@ -239,6 +239,16 @@ def start_scheduler(config: AppConfig) -> None:
                 )
                 logger.info(f"Scheduled: strategy_discovery every {disc_day} at {disc_hour}:00 UTC")
 
+            # Volume Flow Signal (live order book imbalance scanner)
+            vf_cfg = sched_cfg.get("volume_flow", {})
+            if vf_cfg.get("enabled", False):
+                vf_interval = vf_cfg.get("interval_minutes", 30)
+                _scheduler.add_job(
+                    _job_volume_flow_scan, "interval", minutes=vf_interval,
+                    id="volume_flow", replace_existing=True, args=[config],
+                )
+                logger.info(f"Scheduled: volume_flow every {vf_interval}min")
+
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
 
@@ -1824,3 +1834,36 @@ def _job_resolution_updater():
 
     except Exception as e:
         logger.error(f"Resolution updater job failed: {e}")
+
+
+def _job_volume_flow_scan(config: AppConfig):
+    """Scan active markets for order book imbalance signals."""
+    try:
+        from services.volume_flow_signal import run_volume_flow_scan
+
+        logger.info("Volume Flow scan starting...")
+        result = run_volume_flow_scan(config)
+
+        if result.get("ok"):
+            signals = result.get("signals_found", 0)
+            created = result.get("suggestions_created", 0)
+            logger.info(f"Volume Flow scan done: {signals} signals, {created} suggestions created")
+
+            # Telegram alert if signals found
+            if created > 0:
+                top = result.get("top_signal")
+                try:
+                    from services.telegram_alerts import send_alert
+                    msg = (
+                        f"📊 Volume Flow: {created} neue Signale\n"
+                        f"Top: {top['side']} auf '{top['market'][:60]}'\n"
+                        f"Flow Ratio: {top['ratio']:.1f}x | Edge: {top['edge']:+.0%}"
+                    ) if top else f"📊 Volume Flow: {created} Signale erstellt"
+                    send_alert(msg)
+                except Exception:
+                    pass
+        else:
+            logger.warning(f"Volume Flow scan returned no results")
+
+    except Exception as e:
+        logger.error(f"Volume Flow scan job failed: {e}")

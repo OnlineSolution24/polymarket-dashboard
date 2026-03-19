@@ -127,6 +127,14 @@ scheduler:
     schedule_hour: 4
     min_sample_size: 1000
     min_edge: 0.03
+  volume_flow:
+    enabled: true
+    interval_minutes: 30
+    min_flow_ratio: 2.0
+    min_volume_usd: 10000
+    max_markets_per_scan: 80
+    max_suggestions_per_scan: 5
+    amount_usd: 2.0
 strategy:
   max_active_strategies: 5
   min_confidence_score: 0.5
