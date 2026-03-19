@@ -385,43 +385,43 @@ def compute_weather_ensemble_edges(engine) -> int:
 
 
 def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
-    """Fetch ensemble forecast from Open-Meteo.
+    """Fetch weather forecast from Open-Meteo.
+
+    Tries ensemble API first (multi-model spread), falls back to regular
+    forecast API on 429 rate-limit errors.
 
     Returns {date_str: {temp_max_mean, temp_max_spread, temp_min_mean, temp_min_spread}}
-    The spread (max-min across models) gives natural uncertainty.
     """
-    import time as _time
+    # Try ensemble API first
+    result = _try_ensemble_api(lat, lon)
+    if result is not None:
+        return result
+
+    # Fallback: regular forecast API (more generous rate limits)
+    return _try_regular_forecast_api(lat, lon)
+
+
+def _try_ensemble_api(lat: float, lon: float) -> Optional[dict]:
+    """Try the ensemble API. Returns None on 429 so caller can fallback."""
     try:
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "daily": "temperature_2m_max,temperature_2m_min",
-            "timezone": "auto",
-            "forecast_days": 7,
-            "models": ",".join([
-                "icon_seamless", "gfs_seamless", "ecmwf_ifs025",
-                "ecmwf_aifs025", "gfs05", "gem_global",
-                "bom_access_global_ensemble",
-            ]),
-        }
-        # Retry with exponential backoff on 429
-        resp = None
-        for attempt in range(4):
-            resp = httpx.get(
-                "https://ensemble-api.open-meteo.com/v1/ensemble",
-                params=params,
-                timeout=15,
-            )
-            if resp.status_code == 429:
-                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s, 80s
-                logger.warning(f"Open-Meteo 429 for ({lat},{lon}), retry {attempt+1}/3 in {wait}s")
-                _time.sleep(wait)
-                continue
-            break
+        resp = httpx.get(
+            "https://ensemble-api.open-meteo.com/v1/ensemble",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min",
+                "timezone": "auto",
+                "forecast_days": 7,
+                "models": "icon_seamless,gfs_seamless,ecmwf_ifs025,gem_global",
+            },
+            timeout=15,
+        )
+        if resp.status_code == 429:
+            logger.debug(f"Ensemble API 429 for ({lat},{lon}), falling back to regular API")
+            return None  # signal fallback
         resp.raise_for_status()
         data = resp.json()
 
-        # The ensemble API returns arrays per model — aggregate across models
         daily = data.get("daily", {})
         dates = daily.get("time", [])
         t_max = daily.get("temperature_2m_max", [])
@@ -432,17 +432,14 @@ def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
 
         result = {}
         for i, date_str in enumerate(dates):
-            # Each value can be a list (per member) or a single value
             max_vals = t_max[i] if isinstance(t_max[i], list) else [t_max[i]] if i < len(t_max) else []
             min_vals = t_min[i] if isinstance(t_min[i], list) else [t_min[i]] if i < len(t_min) else []
-
             max_vals = [v for v in max_vals if v is not None]
             min_vals = [v for v in min_vals if v is not None]
 
             if max_vals and min_vals:
                 max_mean = sum(max_vals) / len(max_vals)
                 min_mean = sum(min_vals) / len(min_vals)
-                # Use standard deviation for better probability estimation (more accurate than spread)
                 max_std = (sum((v - max_mean) ** 2 for v in max_vals) / len(max_vals)) ** 0.5 if len(max_vals) > 1 else 1.5
                 min_std = (sum((v - min_mean) ** 2 for v in min_vals) / len(min_vals)) ** 0.5 if len(min_vals) > 1 else 1.5
                 result[date_str] = {
@@ -457,7 +454,55 @@ def _fetch_ensemble_forecast(lat: float, lon: float) -> Optional[dict]:
         return result
 
     except Exception as e:
-        logger.error(f"Ensemble API error: {e}")
+        logger.debug(f"Ensemble API error for ({lat},{lon}): {e}")
+        return None  # trigger fallback
+
+
+def _try_regular_forecast_api(lat: float, lon: float) -> Optional[dict]:
+    """Fallback: use regular Open-Meteo forecast API (single model, generous limits).
+
+    Uses a default spread of 2.0C to account for forecast uncertainty.
+    """
+    try:
+        resp = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min",
+                "timezone": "auto",
+                "forecast_days": 7,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        daily = data.get("daily", {})
+        dates = daily.get("time", [])
+        t_max = daily.get("temperature_2m_max", [])
+        t_min = daily.get("temperature_2m_min", [])
+
+        if not dates:
+            return None
+
+        result = {}
+        DEFAULT_SPREAD = 2.0  # conservative uncertainty for single-model forecast
+        for i, date_str in enumerate(dates):
+            if i < len(t_max) and i < len(t_min) and t_max[i] is not None and t_min[i] is not None:
+                result[date_str] = {
+                    "temp_max_mean": t_max[i],
+                    "temp_max_spread": DEFAULT_SPREAD,
+                    "temp_min_mean": t_min[i],
+                    "temp_min_spread": DEFAULT_SPREAD,
+                    "temp_max_members": 1,
+                    "temp_min_members": 1,
+                }
+
+        return result if result else None
+
+    except Exception as e:
+        logger.error(f"Regular forecast API error for ({lat},{lon}): {e}")
         return None
 
 
