@@ -52,7 +52,7 @@ ORDER_FILLED_ABI = {
 }
 
 BATCH_SIZE = 10_000  # trades per Parquet file
-CHUNK_SIZE = 10      # blocks per RPC query (Alchemy Free Tier limit)
+CHUNK_SIZE = 2000    # blocks per RPC query (dRPC supports up to 3000)
 
 
 @dataclass
@@ -249,8 +249,8 @@ def run_incremental(max_chunks: int = 50000) -> dict:
                     f"{chunks_processed} chunks | {total_saved + len(all_trades)} trades"
                 )
 
-            # Rate limiting (Alchemy Free Tier: ~5 req/sec limit)
-            time.sleep(0.5)
+            # Rate limiting
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         logger.info("Blockchain indexer interrupted, progress saved")
