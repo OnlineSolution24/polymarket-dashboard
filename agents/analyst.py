@@ -175,7 +175,23 @@ class AnalystAgent(BaseAgent):
             return
 
         market_id = market["id"]
-        side = "YES" if edge > 0 else "NO"
+
+        # Check if an active NO-bias strategy exists for this market's category
+        # If so, prefer NO side (structural bias from historical data)
+        category = (market.get("category") or "").strip()
+        no_strategy = None
+        if category:
+            no_strategy = engine.query_one(
+                "SELECT id, definition FROM strategies WHERE status = 'active' "
+                "AND definition LIKE ? AND definition LIKE ?",
+                (f'%"category_filter"%{category}%', '%"side": "NO"%'),
+            )
+
+        if no_strategy:
+            side = "NO"
+            self.log("debug", f"NO-bias strategy active for category '{category}' -> side=NO")
+        else:
+            side = "YES" if edge > 0 else "NO"
 
         # Skip if open position exists
         open_pos = engine.query_one(

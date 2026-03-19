@@ -175,7 +175,19 @@ class TraderAgent(BaseAgent):
                 self.log("debug", f"Suggestion skip: {reason}")
                 continue
 
-            side = "YES" if m["yes_price"] < 0.5 else "NO"
+            # Check if an active NO-bias strategy exists for this market's category
+            category = (m.get("category") or "").strip()
+            no_strategy = None
+            if category:
+                no_strategy = engine.query_one(
+                    "SELECT id FROM strategies WHERE status = 'active' "
+                    "AND definition LIKE ? AND definition LIKE ?",
+                    (f'%"category_filter"%{category}%', '%"side": "NO"%'),
+                )
+            if no_strategy:
+                side = "NO"
+            else:
+                side = "YES" if m["yes_price"] < 0.5 else "NO"
             amount = self._calculate_position_size(m)
             if amount <= 0:
                 continue
