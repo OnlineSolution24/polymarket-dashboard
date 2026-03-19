@@ -920,9 +920,7 @@ def create_app(config: AppConfig) -> FastAPI:
             for kw in keywords:
                 conditions.append("market_question LIKE ?")
                 params.append(f"%{kw}%")
-            # Also match category column
-            conditions.append("category = ?")
-            params.append(cat)
+            # Note: trades table has no category column, only match via market_question text
 
         if not conditions:
             # Fallback: match by strategy category
@@ -932,8 +930,6 @@ def create_app(config: AppConfig) -> FastAPI:
                 for kw in keywords:
                     conditions.append("market_question LIKE ?")
                     params.append(f"%{kw}%")
-                conditions.append("category = ?")
-                params.append(cat)
 
         if not conditions:
             return {"trades": 0, "wins": 0, "losses": 0, "open": 0, "total_pnl": 0,
