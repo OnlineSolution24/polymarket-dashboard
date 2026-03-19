@@ -52,6 +52,10 @@ def fetch_all_markets(existing_condition_ids: set[str] | None = None) -> tuple[l
         while True:
             params = {"limit": "500"}
             if cursor:
+                # CLOB API returns "LTE=" (base64 of -1) as end-of-pagination
+                if cursor in ("LTE=", ""):
+                    logger.info("Reached end-of-pagination cursor, done.")
+                    break
                 params["next_cursor"] = cursor
 
             for attempt in range(5):
