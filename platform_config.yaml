@@ -38,8 +38,8 @@ trading:
   market_filters:
     min_price: 0.05
     max_price: 0.85
-    min_volume_24h: 10000
-    min_liquidity: 5000
+    min_volume_24h: 1000
+    min_liquidity: 1000
     min_orderbook_depth: 0
   mode: full-auto
   capital_usd: 1400

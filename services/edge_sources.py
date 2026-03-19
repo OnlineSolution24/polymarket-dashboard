@@ -315,15 +315,16 @@ def compute_weather_ensemble_edges(engine) -> int:
         "SELECT id, question, yes_price, no_price FROM markets "
         "WHERE (question LIKE '%temperature%' OR question LIKE '%deg%F%' OR question LIKE '%deg%C%') "
         "AND accepting_orders = 1 AND yes_price > 0 AND yes_price < 1 "
-        "ORDER BY volume DESC LIMIT 200"
+        "ORDER BY volume DESC LIMIT 50"
     )
 
     if not weather_markets:
         return 0
 
-    # Cache ensemble forecasts by (lat, lon)
+    # Cache ensemble forecasts by (lat, lon) — avoids duplicate API calls for same city
     ensemble_cache = {}
     updated = 0
+    import time
 
     for market in weather_markets:
         try:
@@ -335,6 +336,9 @@ def compute_weather_ensemble_edges(engine) -> int:
             cache_key = (lat, lon)
 
             if cache_key not in ensemble_cache:
+                # Rate-limit: 1.5s between API calls to avoid Open-Meteo 429
+                if ensemble_cache:
+                    time.sleep(1.5)
                 ensemble_cache[cache_key] = _fetch_ensemble_forecast(lat, lon)
 
             ensemble = ensemble_cache[cache_key]
