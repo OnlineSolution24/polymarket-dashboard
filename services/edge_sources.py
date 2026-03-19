@@ -302,54 +302,108 @@ def _text_similarity(a: str, b: str) -> float:
 # ============================================================
 
 def compute_weather_ensemble_edges(engine) -> int:
-    """Use Open-Meteo ensemble models for more accurate probability estimates.
+    """Smart weather edge calculation — only checks markets near their target date.
 
-    The ensemble API returns min/max/mean from 50+ weather models,
-    giving a natural probability distribution for temperature forecasts.
+    Strategy:
+    1. Load ALL weather markets (no artificial limit)
+    2. Only process markets whose target date is within 48h (upcoming)
+    3. Skip markets where we already have an open trade (SL/TP handles those)
+    4. Cache forecasts per city for 6h (weather forecast barely changes)
+    5. Rate-limit API calls to stay within Open-Meteo free tier
 
     Returns number of markets updated.
     """
+    import time
+    from datetime import datetime, timedelta
     from services.weather_forecast import parse_weather_market
 
+    now = datetime.utcnow()
+    max_hours_ahead = 48
+
+    # Load ALL weather markets — no limit, we filter smartly below
     weather_markets = engine.query(
         "SELECT id, question, yes_price, no_price FROM markets "
         "WHERE (question LIKE '%temperature%' OR question LIKE '%deg%F%' OR question LIKE '%deg%C%') "
         "AND accepting_orders = 1 AND yes_price > 0 AND yes_price < 1 "
-        "ORDER BY volume DESC LIMIT 50"
+        "ORDER BY volume DESC"
     )
 
     if not weather_markets:
         return 0
 
-    # Cache ensemble forecasts by (lat, lon) — avoids duplicate API calls for same city
-    ensemble_cache = {}
-    updated = 0
-    import time
+    # Smart filter: only markets with target date in next 48h
+    relevant = []
+    skipped_past = 0
+    skipped_far = 0
+    skipped_open = 0
 
     for market in weather_markets:
-        try:
-            parsed = parse_weather_market(market["question"])
-            if not parsed:
-                continue
+        parsed = parse_weather_market(market["question"])
+        if not parsed:
+            continue
 
+        target_date = parsed["target_date"]
+        hours_until = (target_date - now).total_seconds() / 3600
+
+        if hours_until < -12:
+            skipped_past += 1
+            continue
+
+        if hours_until > max_hours_ahead:
+            skipped_far += 1
+            continue
+
+        # Skip if we already have an open trade — SL/TP bot handles it from here
+        open_trade = engine.query_one(
+            "SELECT id FROM trades WHERE market_id = ? AND status = 'executed' "
+            "AND (result IS NULL OR result = 'open')",
+            (market["id"],),
+        )
+        if open_trade:
+            skipped_open += 1
+            continue
+
+        relevant.append((market, parsed))
+
+    logger.info(
+        f"Weather filter: {len(relevant)} relevant of {len(weather_markets)} total "
+        f"(skip: {skipped_past} past, {skipped_far} far, {skipped_open} open trades)"
+    )
+
+    if not relevant:
+        return 0
+
+    # Persistent forecast cache: (lat, lon) -> (timestamp, data)
+    # Re-use cached data if less than 6h old
+    if not hasattr(compute_weather_ensemble_edges, "_forecast_cache"):
+        compute_weather_ensemble_edges._forecast_cache = {}
+    cache = compute_weather_ensemble_edges._forecast_cache
+    cache_max_age = 6 * 3600  # 6 hours
+
+    updated = 0
+    api_calls = 0
+
+    for market, parsed in relevant:
+        try:
             lat, lon = parsed["lat"], parsed["lon"]
             cache_key = (lat, lon)
 
-            if cache_key not in ensemble_cache:
-                # Rate-limit: 5s between API calls to avoid Open-Meteo 429
-                if ensemble_cache:
-                    time.sleep(5)
-                ensemble_cache[cache_key] = _fetch_ensemble_forecast(lat, lon)
+            # Use cached forecast if fresh enough
+            cached = cache.get(cache_key)
+            if cached and (time.time() - cached[0]) < cache_max_age:
+                forecast_data = cached[1]
+            else:
+                if api_calls > 0:
+                    time.sleep(2)
+                forecast_data = _fetch_ensemble_forecast(lat, lon)
+                cache[cache_key] = (time.time(), forecast_data)
+                api_calls += 1
 
-            ensemble = ensemble_cache[cache_key]
-            if not ensemble:
+            if not forecast_data:
                 continue
 
-            target_date = parsed["target_date"]
-            date_str = target_date.strftime("%Y-%m-%d")
-
-            # Get ensemble stats for target date
-            day_data = ensemble.get(date_str)
+            date_str = parsed["target_date"].strftime("%Y-%m-%d")
+            day_data = forecast_data.get(date_str)
             if not day_data:
                 continue
 
@@ -361,14 +415,12 @@ def compute_weather_ensemble_edges(engine) -> int:
                 spread = day_data["temp_min_spread"]
 
             if spread <= 0:
-                spread = 1.0  # fallback
+                spread = 1.0
 
-            # Probability using ensemble spread as natural uncertainty
             fair_prob = _probability_in_range(
                 mean_temp, parsed["temp_low_c"], parsed["temp_high_c"], spread / 2.0
             )
 
-            # Edge calculation
             edge = fair_prob - market["yes_price"]
 
             engine.execute(
@@ -380,7 +432,10 @@ def compute_weather_ensemble_edges(engine) -> int:
         except Exception as e:
             logger.debug(f"Ensemble edge error for {market['id'][:30]}: {e}")
 
-    logger.info(f"Weather ensemble: {updated}/{len(weather_markets)} markets updated")
+    logger.info(
+        f"Weather ensemble: {updated}/{len(relevant)} updated "
+        f"({api_calls} API calls, {len(cache)} cities cached)"
+    )
     return updated
 
 
