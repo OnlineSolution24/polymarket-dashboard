@@ -1,8 +1,14 @@
 """
-Kelly Sizing Backtest — Uses REAL 388M trade data to compare sizing strategies.
+Kelly Sizing Backtest v2 — CORRECTED with real entry prices & asymmetric payoff.
 
-Tests: Fixed $5 vs Quarter-Kelly vs Half-Kelly on Volume Flow + Contrarian Whale edges.
-Uses actual market outcomes from Parquet resolution data, not simulations.
+Critical fixes vs v1:
+  1. Real entry prices from Parquet trades (avg price of dominant side)
+  2. Asymmetric prediction market payoff: Win = bet*(1/price-1), Lose = -bet
+  3. 2% Polymarket fee on profits
+  4. $200 max bet cap, $1 min bet
+
+Tests: Fixed $5 vs Fixed $10 vs Quarter-Kelly vs Half-Kelly
+On: Volume Flow + Contrarian Whale edges.
 
 Run via: docker exec polymarket-bot python3 backtesting/kelly_backtest.py
 """
@@ -16,6 +22,8 @@ from dataclasses import dataclass
 TRADES_GLOB = "data/blockchain/trades/trades_*.parquet"
 TOKEN_MAP = "data/blockchain/token_to_market.parquet"
 RESOLUTIONS = "data/blockchain/resolutions.parquet"
+
+POLYMARKET_FEE = 0.02  # 2% fee on profits
 
 
 @dataclass
@@ -32,6 +40,7 @@ class BacktestResult:
     max_drawdown_pct: float
     sharpe_approx: float
     avg_bet: float
+    avg_entry_price: float
 
 
 def get_conn():
@@ -43,8 +52,12 @@ def get_conn():
 
 
 def load_volume_flow_markets(conn) -> list[dict]:
-    """Load per-market volume flow data from real Parquet trades."""
-    print("Loading Volume Flow markets from Parquet...")
+    """Load per-market volume flow data WITH real entry prices from Parquet trades.
+
+    Returns avg entry price of the dominant side so we can compute
+    realistic asymmetric payoff: Win = bet * (1/price - 1), Lose = -bet.
+    """
+    print("Loading Volume Flow markets from Parquet (with entry prices)...")
 
     results = conn.execute(f"""
         WITH market_ranges AS (
@@ -55,24 +68,37 @@ def load_volume_flow_markets(conn) -> list[dict]:
                 (MAX(t.block_number) - MIN(t.block_number)) / 2 + MIN(t.block_number) as mid_block
             FROM read_parquet('{TRADES_GLOB}') t
             JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
-            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0
+            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0 AND t.taker_amount > 0
             GROUP BY tm.condition_id
             HAVING COUNT(*) >= 20 AND MAX(t.block_number) > MIN(t.block_number)
         ),
-        early_flows AS (
+        early_trades AS (
             SELECT
                 tm.condition_id,
-                SUM(CASE WHEN tm.is_winner THEN t.maker_amount ELSE 0 END) as winning_vol,
-                SUM(CASE WHEN NOT tm.is_winner THEN t.maker_amount ELSE 0 END) as losing_vol,
-                MIN(t.block_number) as first_block
+                tm.is_winner,
+                t.maker_amount,
+                t.taker_amount,
+                t.block_number
             FROM read_parquet('{TRADES_GLOB}') t
             JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
             JOIN market_ranges mr ON tm.condition_id = mr.condition_id
             WHERE t.maker_asset_id = '0'
-              AND t.maker_amount > 0
+              AND t.maker_amount > 0 AND t.taker_amount > 0
               AND t.block_number <= mr.mid_block
-            GROUP BY tm.condition_id
-            HAVING SUM(t.maker_amount) > 0
+        ),
+        early_flows AS (
+            SELECT
+                condition_id,
+                SUM(CASE WHEN is_winner THEN maker_amount ELSE 0 END) as winning_vol,
+                SUM(CASE WHEN NOT is_winner THEN maker_amount ELSE 0 END) as losing_vol,
+                -- Avg entry price for winning side: USDC paid / shares received
+                AVG(CASE WHEN is_winner THEN maker_amount * 1.0 / taker_amount END) as winning_avg_price,
+                -- Avg entry price for losing side
+                AVG(CASE WHEN NOT is_winner THEN maker_amount * 1.0 / taker_amount END) as losing_avg_price,
+                MIN(block_number) as first_block
+            FROM early_trades
+            GROUP BY condition_id
+            HAVING SUM(maker_amount) > 0
         )
         SELECT
             condition_id,
@@ -81,7 +107,10 @@ def load_volume_flow_markets(conn) -> list[dict]:
             first_block,
             GREATEST(winning_vol, losing_vol) * 1.0
                 / NULLIF(LEAST(winning_vol, losing_vol), 0) as flow_ratio,
-            CASE WHEN winning_vol > losing_vol THEN 1 ELSE 0 END as dominant_won
+            CASE WHEN winning_vol > losing_vol THEN 1 ELSE 0 END as dominant_won,
+            -- Entry price of the dominant side (what we'd buy at)
+            CASE WHEN winning_vol > losing_vol THEN winning_avg_price
+                 ELSE losing_avg_price END as entry_price
         FROM early_flows
         WHERE winning_vol > 0 AND losing_vol > 0
         ORDER BY first_block
@@ -89,23 +118,32 @@ def load_volume_flow_markets(conn) -> list[dict]:
 
     markets = []
     for row in results:
-        cid, wvol, lvol, fb, ratio, won = row
+        cid, wvol, lvol, fb, ratio, won, price = row
         if ratio is None or ratio < 1.3:
             continue
+        if price is None or price <= 0 or price >= 1.0:
+            continue  # skip invalid prices
         markets.append({
             "condition_id": cid,
             "flow_ratio": float(ratio),
             "dominant_won": bool(won),
             "first_block": fb,
+            "entry_price": float(price),
         })
 
-    print(f"  Loaded {len(markets)} markets with flow_ratio >= 1.3")
+    print(f"  Loaded {len(markets)} markets with flow_ratio >= 1.3 and valid prices")
+    # Show price distribution
+    prices = [m["entry_price"] for m in markets]
+    if prices:
+        prices.sort()
+        print(f"  Entry price range: {prices[0]:.3f} - {prices[-1]:.3f}")
+        print(f"  Median entry price: {prices[len(prices)//2]:.3f}")
     return markets
 
 
 def load_contrarian_whale_markets(conn) -> list[dict]:
-    """Load per-market whale flow dominance from real Parquet trades."""
-    print("Loading Contrarian Whale markets from Parquet...")
+    """Load per-market whale flow dominance WITH real entry prices from Parquet trades."""
+    print("Loading Contrarian Whale markets from Parquet (with entry prices)...")
 
     results = conn.execute(f"""
         WITH market_flows AS (
@@ -115,7 +153,10 @@ def load_contrarian_whale_markets(conn) -> list[dict]:
                 tm.is_winner,
                 SUM(CASE WHEN t.maker_amount / 1e6 < 50 THEN t.maker_amount / 1e6 ELSE 0 END) as retail_vol,
                 SUM(CASE WHEN t.maker_amount / 1e6 >= 500 THEN t.maker_amount / 1e6 ELSE 0 END) as whale_vol,
-                MIN(t.block_number) as first_block
+                MIN(t.block_number) as first_block,
+                -- Avg entry price: USDC / shares
+                AVG(CASE WHEN t.taker_amount > 0
+                    THEN t.maker_amount * 1.0 / t.taker_amount END) as avg_price
             FROM read_parquet('{TRADES_GLOB}') t
             JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
             WHERE t.maker_asset_id = '0'
@@ -129,6 +170,7 @@ def load_contrarian_whale_markets(conn) -> list[dict]:
             retail_vol,
             whale_vol,
             first_block,
+            avg_price,
             CASE
                 WHEN whale_vol > 0 AND (retail_vol = 0 OR whale_vol > retail_vol * 5) THEN 'whale_only'
                 WHEN whale_vol > retail_vol * 2 AND retail_vol > 0 THEN 'whale_dominant'
@@ -141,17 +183,25 @@ def load_contrarian_whale_markets(conn) -> list[dict]:
 
     markets = []
     for row in results:
-        cid, outcome, is_winner, rvol, wvol, fb, flow_type = row
+        cid, outcome, is_winner, rvol, wvol, fb, avg_price, flow_type = row
         if flow_type == "other":
             continue
+        if avg_price is None or avg_price <= 0 or avg_price >= 1.0:
+            continue  # skip invalid prices
         markets.append({
             "condition_id": cid,
             "flow_type": flow_type,
             "is_winner": bool(is_winner),
             "first_block": fb,
+            "entry_price": float(avg_price),
         })
 
-    print(f"  Loaded {len(markets)} whale-dominated outcomes")
+    print(f"  Loaded {len(markets)} whale-dominated outcomes with valid prices")
+    prices = [m["entry_price"] for m in markets]
+    if prices:
+        prices.sort()
+        print(f"  Entry price range: {prices[0]:.3f} - {prices[-1]:.3f}")
+        print(f"  Median entry price: {prices[len(prices)//2]:.3f}")
     return markets
 
 
@@ -178,14 +228,34 @@ WHALE_HIT_RATES = {
 }
 
 
-def kelly_fraction(hit_rate: float) -> float:
-    """Kelly criterion for binary bets (win = +bet, lose = -bet)."""
-    return max(2 * hit_rate - 1, 0)
+def kelly_fraction_asymmetric(hit_rate: float, price: float) -> float:
+    """Kelly criterion for asymmetric prediction market bets.
+
+    Win: profit = bet * (1/price - 1)  (e.g., buy at 0.60, win 0.67x bet)
+    Lose: loss = -bet
+
+    Kelly% = (p * b - q) / b
+    where p = hit_rate, q = 1-p, b = (1/price - 1) = profit per $1 bet
+    """
+    if price <= 0 or price >= 1.0:
+        return 0
+    b = (1.0 / price) - 1.0  # odds ratio (profit per $1 risked)
+    if b <= 0:
+        return 0
+    q = 1.0 - hit_rate
+    kelly = (hit_rate * b - q) / b
+    return max(kelly, 0)
 
 
 def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
                      hit_rate_fn, max_position_pct: float = 0.20) -> BacktestResult:
-    """Simulate equity curve for a list of markets with a given sizing strategy."""
+    """Simulate equity curve with REAL asymmetric prediction market payoff.
+
+    Prediction market mechanics:
+      - Buy shares at entry_price (e.g., $0.60 per share)
+      - Win: each share pays $1.00 → profit = bet * (1/price - 1) minus 2% fee
+      - Lose: shares worth $0.00 → loss = -bet (full bet lost)
+    """
     capital = start_capital
     peak = start_capital
     max_dd = 0.0
@@ -193,10 +263,15 @@ def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
     losses = 0
     returns = []
     total_bet = 0.0
+    total_entry_price = 0.0
 
     for m in markets:
         hit_rate = hit_rate_fn(m)
         if hit_rate is None:
+            continue
+
+        entry_price = m.get("entry_price", 0.5)
+        if entry_price <= 0 or entry_price >= 1.0:
             continue
 
         won = m.get("dominant_won", m.get("is_winner", False))
@@ -207,17 +282,17 @@ def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
         elif sizing == "fixed_10":
             bet = 10.0
         elif sizing == "quarter_kelly":
-            kf = kelly_fraction(hit_rate)
+            kf = kelly_fraction_asymmetric(hit_rate, entry_price)
             bet = capital * kf / 4
         elif sizing == "half_kelly":
-            kf = kelly_fraction(hit_rate)
+            kf = kelly_fraction_asymmetric(hit_rate, entry_price)
             bet = capital * kf / 2
         else:
             bet = 5.0
 
         # Cap at max position size and absolute max
         bet = min(bet, capital * max_position_pct)
-        bet = min(bet, 200.0)  # absolute max $200 per trade (realistic)
+        bet = min(bet, 200.0)  # absolute max $200 per trade
         bet = min(bet, capital - 1.0)  # keep at least $1
         bet = max(bet, 1.0)  # minimum $1
 
@@ -229,14 +304,18 @@ def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
             break
 
         total_bet += bet
+        total_entry_price += entry_price
 
+        # Asymmetric payoff
         if won:
-            capital += bet
+            gross_profit = bet * (1.0 / entry_price - 1.0)
+            net_profit = gross_profit * (1.0 - POLYMARKET_FEE)  # 2% fee on profits
+            capital += net_profit
             wins += 1
-            prev = capital - bet
-            returns.append(bet / prev if prev > 0 else 0)
+            prev = capital - net_profit
+            returns.append(net_profit / prev if prev > 0 else 0)
         else:
-            capital -= bet
+            capital -= bet  # total loss
             losses += 1
             prev = capital + bet
             returns.append(-bet / prev if prev > 0 else 0)
@@ -250,6 +329,7 @@ def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
 
     total_trades = wins + losses
     avg_bet = total_bet / total_trades if total_trades > 0 else 0
+    avg_price = total_entry_price / total_trades if total_trades > 0 else 0
 
     # Approximate Sharpe (mean return / std return)
     if returns and len(returns) > 1:
@@ -273,6 +353,7 @@ def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
         max_drawdown_pct=round(max_dd * 100, 1),
         sharpe_approx=round(sharpe, 3),
         avg_bet=round(avg_bet, 2),
+        avg_entry_price=round(avg_price, 3),
     )
 
 
@@ -323,13 +404,25 @@ def print_result(r: BacktestResult):
           f"Final: ${r.final_capital:>12,.2f} | "
           f"MaxDD: {r.max_drawdown_pct:5.1f}% | "
           f"Sharpe: {r.sharpe_approx:6.3f} | "
-          f"AvgBet: ${r.avg_bet:>7.2f}")
+          f"AvgBet: ${r.avg_bet:>7.2f} | "
+          f"AvgPrice: {r.avg_entry_price:.3f}")
 
 
 def main():
     conn = get_conn()
     START_CAPITAL = 1000.0
     SIZINGS = ["fixed_5", "fixed_10", "quarter_kelly", "half_kelly"]
+
+    print("=" * 120)
+    print("KELLY BACKTEST v2 — CORRECTED METHODOLOGY")
+    print("=" * 120)
+    print("Fixes vs v1:")
+    print("  1. REAL entry prices from Parquet trades (avg USDC/share for dominant side)")
+    print("  2. ASYMMETRIC payoff: Win = bet * (1/price - 1) * 0.98, Lose = -bet")
+    print("  3. 2% Polymarket fee on all profits")
+    print("  4. Kelly formula adjusted for asymmetric odds: K = (p*b - q) / b")
+    print(f"  5. Max bet: $200, Min bet: $1, Max position: 20% of capital")
+    print()
 
     # ─── VOLUME FLOW BACKTEST ─────────────────────────────────────────────
     vf_markets = load_volume_flow_markets(conn)
