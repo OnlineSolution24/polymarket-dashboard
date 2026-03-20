@@ -857,6 +857,10 @@ def _job_weather_edge_analysis(config: AppConfig):
             if abs_edge < min_edge:
                 continue
 
+            # Skip same-day events — forecast already public, no real edge
+            if r.get("days_ahead", 0) < 1:
+                continue
+
             market_id = r["market_id"]
             side = r["side"]
 
@@ -884,25 +888,20 @@ def _job_weather_edge_analysis(config: AppConfig):
                 except (ValueError, TypeError):
                     pass
 
-            # Skip if we already have a pending/approved/executed suggestion for this market
+            # Skip if we already have any recent suggestion for this market (including failed)
             existing = engine.query_one(
                 "SELECT id FROM suggestions WHERE type = 'trade' "
-                "AND status IN ('pending', 'auto_approved', 'executed') "
-                "AND payload LIKE ?",
+                "AND status IN ('pending', 'auto_approved', 'approved', 'executed', 'failed') "
+                "AND payload LIKE ? "
+                "AND created_at > datetime('now', '-24 hours')",
                 (f'%"market_id": "{market_id}"%',),
             )
             if existing:
                 continue
 
-            # Calculate amount (Kelly-lite: edge * fraction of max position)
-            capital = trading_cfg.get("capital_usd", 100.0)
-            limits = trading_cfg.get("limits", {})
-            max_pct = limits.get("max_position_pct", 5) / 100
-            max_amount = capital * max_pct
-
-            # Scale amount by edge strength (higher edge = larger bet, capped)
-            amount = min(round(abs_edge * capital * 0.5, 2), max_amount)
-            amount = max(amount, 1.0)  # minimum $1
+            # Fixed amount for weather trades (consistent with other strategies)
+            weather_amount = trading_cfg.get("analyst_suggestions", {}).get("max_amount_usd", 3.0)
+            amount = weather_amount
 
             price = r["yes_price"] if side == "YES" else (1 - r["yes_price"])
             status = "auto_approved" if mode == "full-auto" else "pending"
