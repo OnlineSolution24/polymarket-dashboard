@@ -116,6 +116,8 @@ class TraderAgent(BaseAgent):
                 )
         return count
 
+    MAX_TRADE_RETRIES = 3
+
     def _process_user_approved(self) -> int:
         """Process suggestions that the user approved via Dashboard."""
         suggestions = engine.query(
@@ -139,11 +141,24 @@ class TraderAgent(BaseAgent):
                 )
                 count += 1
             else:
-                # Trade failed — revert to approved so user can retry
-                engine.execute(
-                    "UPDATE suggestions SET status = 'approved' WHERE id = ? AND status = 'processing'",
-                    (s["id"],),
-                )
+                # Track retries via user_response field — fail after MAX_TRADE_RETRIES
+                prev = s.get("user_response") or ""
+                retries = prev.count("RETRY") + 1
+                if retries >= self.MAX_TRADE_RETRIES:
+                    engine.execute(
+                        "UPDATE suggestions SET status = 'failed', resolved_at = ?, "
+                        "user_response = ? WHERE id = ?",
+                        (datetime.utcnow().isoformat(),
+                         f"FAIL: trade failed after {retries} attempts",
+                         s["id"]),
+                    )
+                    self.log("warning", f"Suggestion {s['id']} permanently failed after {retries} retries")
+                else:
+                    engine.execute(
+                        "UPDATE suggestions SET status = 'approved', user_response = ? "
+                        "WHERE id = ? AND status = 'processing'",
+                        (f"{prev}RETRY{retries} ", s["id"]),
+                    )
         return count
 
     def _process_paper_trades(self) -> int:
