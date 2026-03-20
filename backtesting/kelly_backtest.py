@@ -215,24 +215,31 @@ def simulate_equity(markets: list[dict], sizing: str, start_capital: float,
         else:
             bet = 5.0
 
-        # Cap at max position size
+        # Cap at max position size and absolute max
         bet = min(bet, capital * max_position_pct)
+        bet = min(bet, 200.0)  # absolute max $200 per trade (realistic)
         bet = min(bet, capital - 1.0)  # keep at least $1
         bet = max(bet, 1.0)  # minimum $1
 
         if capital < 2.0:
             break  # bankrupt
 
+        # Safety: skip if NaN/inf
+        if bet != bet or capital != capital:
+            break
+
         total_bet += bet
 
         if won:
             capital += bet
             wins += 1
-            returns.append(bet / (capital - bet))
+            prev = capital - bet
+            returns.append(bet / prev if prev > 0 else 0)
         else:
             capital -= bet
             losses += 1
-            returns.append(-bet / (capital + bet))
+            prev = capital + bet
+            returns.append(-bet / prev if prev > 0 else 0)
 
         # Track drawdown
         if capital > peak:
