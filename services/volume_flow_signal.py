@@ -149,6 +149,13 @@ def scan_markets_for_flow_signals(config: AppConfig) -> list[FlowSignal]:
         if volume < min_volume:
             continue
 
+        # Filter: skip penny tokens — extreme longshots always have high
+        # order book ratios (structural, not informational). Only trade
+        # markets where the dominant side is priced 10-90¢.
+        yes_price = float(market.get("yes_price", market.get("best_bid", 0)) or 0)
+        if yes_price < 0.10 or yes_price > 0.90:
+            continue
+
         # Filter: early lifecycle only
         if not is_market_early(market):
             continue
@@ -185,7 +192,7 @@ def scan_markets_for_flow_signals(config: AppConfig) -> list[FlowSignal]:
         if estimated_edge <= 0:
             continue
 
-        yes_price = float(market.get("yes_price", market.get("best_bid", 0)) or 0)
+        # yes_price already computed above (penny filter)
         no_price = 1.0 - yes_price if yes_price > 0 else 0
 
         signals.append(FlowSignal(
