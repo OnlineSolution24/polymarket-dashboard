@@ -88,8 +88,8 @@ def find_matching_markets(definition: dict, limit: int = 50) -> list[dict]:
 
     if category_filter:
         placeholders = ",".join("?" for _ in category_filter)
-        query += f" AND category IN ({placeholders})"
-        params.extend(category_filter)
+        query += f" AND LOWER(category) IN ({placeholders})"
+        params.extend([c.lower() for c in category_filter])
 
     query += " ORDER BY volume DESC LIMIT ?"
     params.append(limit)
@@ -116,7 +116,12 @@ def compute_trade_params(market: dict, trade_params: dict, capital: float = 100.
     sizing_value = trade_params.get("sizing_value", 0.03)
     min_edge = trade_params.get("min_edge", 0.03)
 
+    # Use market's calculated_edge if available, otherwise fall back to
+    # the strategy's own declared edge (from discovery/backtest).
     edge = market.get("calculated_edge", 0) or 0
+    strategy_edge = trade_params.get("strategy_edge", 0)
+    if edge <= 0 and strategy_edge > 0:
+        edge = strategy_edge
     if edge < min_edge:
         return None
 
@@ -126,7 +131,7 @@ def compute_trade_params(market: dict, trade_params: dict, capital: float = 100.
     elif sizing_method == "fixed_pct":
         amount = capital * sizing_value
     elif sizing_method == "fixed_amount":
-        amount = sizing_value
+        amount = trade_params.get("fixed_amount_usd", sizing_value)
     else:
         amount = capital * 0.03
 
