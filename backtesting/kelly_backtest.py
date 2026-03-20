@@ -228,6 +228,11 @@ WHALE_HIT_RATES = {
 }
 
 
+def kelly_fraction(hit_rate: float) -> float:
+    """Simple Kelly fraction for display purposes (symmetric 1:1 odds)."""
+    return max(2 * hit_rate - 1, 0)
+
+
 def kelly_fraction_asymmetric(hit_rate: float, price: float) -> float:
     """Kelly criterion for asymmetric prediction market bets.
 
