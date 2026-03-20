@@ -134,7 +134,6 @@ scheduler:
     min_volume_usd: 10000
     max_markets_per_scan: 80
     max_suggestions_per_scan: 5
-    amount_usd: 2.0
 strategy:
   max_active_strategies: 5
   min_confidence_score: 0.5

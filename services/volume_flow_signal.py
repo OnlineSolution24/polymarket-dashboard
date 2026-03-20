@@ -39,30 +39,38 @@ class FlowSignal:
 #   flow_ratio 2-3x  → ~12% edge
 #   flow_ratio 3-5x  → ~27% edge
 #   flow_ratio 5x+   → ~45% edge
-FLOW_RATIO_EDGE = [
-    (5.0, 0.30),   # 5x+ imbalance → ~30% edge (conservative vs 45% historical)
-    (3.0, 0.18),   # 3-5x → ~18% edge (conservative vs 27%)
-    (2.0, 0.08),   # 2-3x → ~8% edge (conservative vs 12%)
+# Conservative estimates (65% of historical) since order book depth is a proxy.
+FLOW_RATIO_TIERS = [
+    # (min_ratio, edge, amount_usd)
+    (5.0, 0.30, 6.0),   # 5x+ → high confidence
+    (3.0, 0.18, 4.0),   # 3-5x → medium confidence
+    (2.0, 0.08, 2.0),   # 2-3x → low confidence
 ]
 
 
 def estimate_edge_from_ratio(ratio: float) -> float:
-    """Map a flow ratio to estimated edge based on historical data.
-
-    We use conservative estimates (roughly 65% of historical edge)
-    because order book depth is a proxy, not exact volume flow.
-    """
-    for threshold, edge in FLOW_RATIO_EDGE:
+    """Map a flow ratio to estimated edge based on historical data."""
+    for threshold, edge, _ in FLOW_RATIO_TIERS:
         if ratio >= threshold:
             return edge
     return 0.0
 
 
-def is_market_early(market: dict) -> bool:
-    """Check if a market is still in its early phase (first half of lifecycle).
+def get_amount_for_ratio(ratio: float, default: float = 2.0) -> float:
+    """Tiered position sizing — stronger signal = larger bet."""
+    for threshold, _, amount in FLOW_RATIO_TIERS:
+        if ratio >= threshold:
+            return amount
+    return default
 
-    The historical edge only applies to early volume flow — once a market
-    matures, the flow information is already priced in.
+
+def is_market_early(market: dict) -> bool:
+    """Check if a market is in the right lifecycle phase for volume flow edge.
+
+    Requirements:
+    - Must have at least 7 days remaining (not about to close)
+    - If we know creation date, must be at least 3 days old (needs time for
+      order book to develop) AND still in first half of lifecycle
     """
     end_date_str = market.get("end_date")
     if not end_date_str:
@@ -72,12 +80,32 @@ def is_market_early(market: dict) -> bool:
         end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
         now = datetime.now(end_date.tzinfo) if end_date.tzinfo else datetime.utcnow()
 
-        # Market must end at least 24h from now (not about to close)
-        if end_date - now < timedelta(hours=24):
+        remaining = end_date - now
+
+        # Must have at least 7 days remaining
+        if remaining < timedelta(days=7):
             return False
 
-        # We don't know exact creation date from Gamma API, but we can
-        # filter out markets ending very soon as "late lifecycle"
+        # If we have creation date, check lifecycle position
+        created_str = market.get("created_at") or market.get("startDate")
+        if created_str:
+            try:
+                created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                age = now - created
+
+                # Must be at least 3 days old (order book needs time to develop)
+                if age < timedelta(days=3):
+                    return False
+
+                # Must be in first half of lifecycle
+                total_duration = end_date - created
+                if total_duration.total_seconds() > 0:
+                    lifecycle_pct = age / total_duration
+                    if lifecycle_pct > 0.5:
+                        return False
+            except (ValueError, TypeError):
+                pass
+
         return True
     except Exception:
         return True
@@ -189,7 +217,6 @@ def create_suggestions_from_signals(signals: list[FlowSignal]) -> int:
 
     platform_cfg = load_platform_config()
     vf_cfg = platform_cfg.get("scheduler", {}).get("volume_flow", {})
-    amount_usd = vf_cfg.get("amount_usd", 2.0)
     max_suggestions = vf_cfg.get("max_suggestions_per_scan", 5)
 
     created = 0
@@ -200,6 +227,9 @@ def create_suggestions_from_signals(signals: list[FlowSignal]) -> int:
 
         if price <= 0 or price >= 0.95:
             continue
+
+        # Tiered sizing: stronger flow = larger position
+        amount_usd = get_amount_for_ratio(signal.flow_ratio)
 
         payload = {
             "market_id": signal.condition_id,
