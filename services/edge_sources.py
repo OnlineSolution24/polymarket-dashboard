@@ -201,7 +201,7 @@ def _parse_number(num_str: str, suffix: Optional[str]) -> float:
 # ============================================================
 
 def compute_cross_platform_edges(engine) -> int:
-    """Compare Polymarket prices with Manifold Markets probabilities.
+    """Compare Polymarket prices with Manifold + Kalshi probabilities.
 
     Returns number of markets updated.
     """
@@ -216,20 +216,32 @@ def compute_cross_platform_edges(engine) -> int:
     if not poly_markets:
         return 0
 
+    # Fetch Kalshi events once (expensive call, reuse for all markets)
+    kalshi_events = _fetch_kalshi_events()
+
     updated = 0
     for market in poly_markets:
         try:
-            edge = _compute_manifold_edge(market)
+            # Try Kalshi first (regulated, more reliable prices)
+            edge = _compute_kalshi_edge(market, kalshi_events) if kalshi_events else None
+            source = "Kalshi"
+
+            # Fallback to Manifold if no Kalshi match
+            if edge is None:
+                edge = _compute_manifold_edge(market)
+                source = "Manifold"
+
             if edge is not None and abs(edge) >= 0.03:
                 engine.execute(
                     "UPDATE markets SET calculated_edge = ?, last_updated = datetime('now') WHERE id = ?",
                     (round(edge, 4), market["id"]),
                 )
                 updated += 1
+                logger.debug(f"Cross-platform ({source}): {market['question'][:50]} edge={edge:+.3f}")
         except Exception as e:
-            logger.debug(f"Manifold edge error for {market['id'][:30]}: {e}")
+            logger.debug(f"Cross-platform edge error for {market['id'][:30]}: {e}")
 
-    logger.info(f"Cross-platform edge: {updated}/{len(poly_markets)} markets updated via Manifold")
+    logger.info(f"Cross-platform edge: {updated}/{len(poly_markets)} markets updated (Kalshi: {len(kalshi_events) if kalshi_events else 0} events loaded)")
     return updated
 
 
@@ -295,6 +307,138 @@ def _text_similarity(a: str, b: str) -> float:
     intersection = words_a & words_b
     union = words_a | words_b
     return len(intersection) / len(union)
+
+
+# ============================================================
+# 2b. KALSHI CROSS-PLATFORM — Kalshi public API (no auth)
+# ============================================================
+
+# Stop-words to ignore during matching (too common, pollute similarity)
+_MATCH_STOPWORDS = {
+    "will", "the", "be", "a", "an", "in", "on", "of", "to", "by", "for",
+    "is", "at", "or", "and", "this", "that", "it", "from", "with", "as",
+    "before", "after", "than", "more", "less", "above", "below", "over",
+    "under", "yes", "no", "market", "question",
+}
+
+
+def _fetch_kalshi_events() -> list:
+    """Fetch all open events with nested markets from Kalshi public API.
+
+    Returns list of dicts with: title, category, markets (list of market dicts).
+    Paginates through all results. Uses 15s cache header — safe to call every 20min.
+    """
+    all_events = []
+    cursor = None
+    max_pages = 10  # safety limit (100 events/page = 1000 events max)
+
+    for _ in range(max_pages):
+        try:
+            params = {
+                "status": "open",
+                "with_nested_markets": "true",
+                "limit": 100,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = httpx.get(
+                "https://api.elections.kalshi.com/trade-api/v2/events",
+                params=params,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Kalshi API returned {resp.status_code}")
+                break
+
+            data = resp.json()
+            events = data.get("events", [])
+            if not events:
+                break
+
+            all_events.extend(events)
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+        except Exception as e:
+            logger.warning(f"Kalshi API error: {e}")
+            break
+
+    logger.info(f"Kalshi: loaded {len(all_events)} open events")
+    return all_events
+
+
+def _compute_kalshi_edge(poly_market: dict, kalshi_events: list) -> Optional[float]:
+    """Find matching Kalshi market and compute probability edge.
+
+    Matching strategy:
+    1. Extract meaningful keywords from Polymarket question
+    2. Compare against Kalshi event title + market titles
+    3. Require >= 3 keyword matches AND similarity > 0.25
+    4. Use best match's last_price as Kalshi probability
+    """
+    question = poly_market["question"]
+    q_lower = question.lower()
+    q_keywords = {w for w in q_lower.split() if w not in _MATCH_STOPWORDS and len(w) > 2}
+
+    if len(q_keywords) < 2:
+        return None
+
+    best_match = None
+    best_sim = 0
+
+    for event in kalshi_events:
+        event_title = (event.get("title") or "").lower()
+
+        for kalshi_market in event.get("markets", []):
+            if kalshi_market.get("status") != "active":
+                continue
+
+            market_title = (kalshi_market.get("title") or "").lower()
+            # Combine event title + market title for matching
+            combined = f"{event_title} {market_title}"
+            k_keywords = {w for w in combined.split() if w not in _MATCH_STOPWORDS and len(w) > 2}
+
+            if not k_keywords:
+                continue
+
+            # Count keyword overlap
+            overlap = q_keywords & k_keywords
+            if len(overlap) < 3:
+                continue
+
+            # Jaccard similarity on keywords (stopwords removed)
+            sim = len(overlap) / len(q_keywords | k_keywords)
+            if sim > best_sim and sim > 0.25:
+                best_sim = sim
+                best_match = kalshi_market
+
+    if not best_match:
+        return None
+
+    # Extract Kalshi probability from last_price_dollars (e.g., "0.5500" = 55%)
+    kalshi_price_str = best_match.get("last_price_dollars") or best_match.get("yes_bid_dollars")
+    if not kalshi_price_str:
+        return None
+
+    try:
+        kalshi_prob = float(kalshi_price_str)
+    except (ValueError, TypeError):
+        return None
+
+    if kalshi_prob <= 0 or kalshi_prob >= 1:
+        return None
+
+    poly_price = poly_market["yes_price"]
+    edge = kalshi_prob - poly_price
+
+    logger.debug(
+        f"Kalshi match: '{question[:50]}' ↔ '{best_match.get('title', '')[:50]}' | "
+        f"Poly={poly_price:.2f} Kalshi={kalshi_prob:.2f} edge={edge:+.3f} sim={best_sim:.2f}"
+    )
+
+    return edge
 
 
 # ============================================================
