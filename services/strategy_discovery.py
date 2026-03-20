@@ -708,6 +708,521 @@ def mine_outcome_type_patterns(conn) -> list[DiscoveredPattern]:
     return patterns
 
 
+def mine_market_duration_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern I: Do short-lived vs long-lived markets have different pricing efficiency?
+
+    Uses block_number span (first to last trade) as proxy for market duration.
+    Short markets may have less time for price discovery → mispricing.
+    """
+    logger.info("Mining market duration patterns...")
+
+    results = conn.execute(f"""
+        WITH market_spans AS (
+            SELECT
+                tm.condition_id,
+                MIN(t.block_number) as first_block,
+                MAX(t.block_number) as last_block,
+                MAX(t.block_number) - MIN(t.block_number) as block_span,
+                COUNT(*) as trade_count
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0
+            GROUP BY tm.condition_id
+            HAVING COUNT(*) >= 10 AND MAX(t.block_number) > MIN(t.block_number)
+        )
+        SELECT
+            duration_bucket,
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
+            AVG(price_per_token) as avg_price
+        FROM (
+            SELECT
+                tm.is_winner,
+                t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0) as price_per_token,
+                CASE
+                    WHEN ms.block_span < 21600 THEN 'flash'
+                    WHEN ms.block_span < 129600 THEN 'short'
+                    WHEN ms.block_span < 907200 THEN 'medium'
+                    ELSE 'long'
+                END as duration_bucket
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            JOIN market_spans ms ON tm.condition_id = ms.condition_id
+            WHERE t.maker_asset_id = '0'
+              AND t.maker_amount > 0 AND t.taker_amount > 0
+              AND t.maker_amount * 1.0 / t.taker_amount > 0.01
+              AND t.maker_amount * 1.0 / t.taker_amount < 0.99
+        ) sub
+        GROUP BY duration_bucket
+        HAVING COUNT(*) >= 5000
+        ORDER BY duration_bucket
+    """).fetchall()
+
+    duration_labels = {
+        "flash": "<12 hours",
+        "short": "12h-3 days",
+        "medium": "3 days-3 weeks",
+        "long": "3+ weeks",
+    }
+
+    patterns = []
+    for row in results:
+        bucket, total, wins, avg_price = row
+        hit_rate = wins / total if total > 0 else 0
+        ev = hit_rate / avg_price if avg_price > 0 else 0
+        edge = ev - 1.0
+
+        label = duration_labels.get(bucket, bucket)
+        logger.info(
+            f"  {bucket} ({label}): hit={hit_rate:.1%}, avg_price={avg_price:.3f}, "
+            f"edge={edge:+.1%} ({total:,} trades)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"duration_{bucket}",
+            name=f"Market Duration: {bucket}",
+            description=(
+                f"Trades in {label} markets. "
+                f"Hit: {hit_rate:.1%}, avg price: {avg_price:.3f}, "
+                f"edge: {edge:+.1%} ({total:,} trades)"
+            ),
+            dimension="market_duration",
+            filters={"duration_bucket": bucket},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=avg_price,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 2.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_wallet_reputation_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern J: Do wallets with historically high hit rates predict winners?
+
+    Two-phase approach with temporal split to avoid data leakage:
+    Phase 1: Build wallet reputation from first 50% of blocks
+    Phase 2: Test if following high-reputation wallets has edge in second 50%
+    """
+    logger.info("Mining wallet reputation patterns...")
+
+    # Phase 1: Find the median block number for temporal split
+    mid_block_row = conn.execute(f"""
+        SELECT CAST(percentile_disc(0.5) WITHIN GROUP (ORDER BY block_number) AS BIGINT) as mid_block
+        FROM read_parquet('{TRADES_GLOB}')
+        WHERE maker_asset_id = '0' AND maker_amount > 0
+    """).fetchone()
+
+    if not mid_block_row:
+        logger.warning("  No trades found for wallet reputation")
+        return []
+
+    mid_block = mid_block_row[0]
+    logger.info(f"  Temporal split at block {mid_block:,}")
+
+    # Phase 2: Build wallet reputation from FIRST HALF only
+    conn.execute(f"""
+        CREATE OR REPLACE TEMP TABLE wallet_rep AS
+        SELECT
+            maker as wallet,
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_trades,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) * 1.0 / COUNT(*) as hit_rate,
+            AVG(price_per_token) as avg_price,
+            CASE
+                WHEN SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) * 1.0 / COUNT(*)
+                     / NULLIF(AVG(price_per_token), 0) - 1.0 > 0.05 THEN 'alpha'
+                WHEN SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) * 1.0 / COUNT(*)
+                     / NULLIF(AVG(price_per_token), 0) - 1.0 > 0.02 THEN 'skilled'
+                WHEN SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) * 1.0 / COUNT(*)
+                     / NULLIF(AVG(price_per_token), 0) - 1.0 > -0.02 THEN 'average'
+                ELSE 'fish'
+            END as reputation_tier
+        FROM ({BUY_TRADES_SQL}) buys
+        WHERE buys.block_number <= {mid_block}
+        GROUP BY maker
+        HAVING COUNT(*) >= 50
+    """)
+
+    tier_counts = conn.execute("SELECT reputation_tier, COUNT(*) FROM wallet_rep GROUP BY reputation_tier").fetchall()
+    for tier, cnt in tier_counts:
+        logger.info(f"  Tier '{tier}': {cnt:,} wallets")
+
+    # Phase 3: Test on SECOND HALF of blocks — does following high-rep wallets work?
+    results = conn.execute(f"""
+        SELECT
+            wr.reputation_tier,
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN tm.is_winner THEN 1 ELSE 0 END) as winning_trades,
+            AVG(t.maker_amount * 1.0 / NULLIF(t.taker_amount, 0)) as avg_price
+        FROM read_parquet('{TRADES_GLOB}') t
+        JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+        JOIN wallet_rep wr ON t.maker = wr.wallet
+        WHERE t.maker_asset_id = '0'
+          AND t.maker_amount > 0 AND t.taker_amount > 0
+          AND t.block_number > {mid_block}
+          AND t.maker_amount * 1.0 / t.taker_amount > 0.01
+          AND t.maker_amount * 1.0 / t.taker_amount < 0.99
+        GROUP BY wr.reputation_tier
+        HAVING COUNT(*) >= 5000
+    """).fetchall()
+
+    conn.execute("DROP TABLE IF EXISTS wallet_rep")
+
+    patterns = []
+    for row in results:
+        tier, total, wins, avg_price = row
+        hit_rate = wins / total if total > 0 else 0
+        ev = hit_rate / avg_price if avg_price > 0 else 0
+        edge = ev - 1.0
+
+        logger.info(
+            f"  {tier} (out-of-sample): hit={hit_rate:.1%}, avg_price={avg_price:.3f}, "
+            f"edge={edge:+.1%} ({total:,} trades)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"wallet_{tier}",
+            name=f"Wallet Reputation: {tier}",
+            description=(
+                f"Following {tier}-tier wallets (out-of-sample test). "
+                f"Hit: {hit_rate:.1%}, avg price: {avg_price:.3f}, "
+                f"edge: {edge:+.1%} ({total:,} trades)"
+            ),
+            dimension="wallet_reputation",
+            filters={"reputation_tier": tier},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=avg_price,
+            expected_edge=edge,
+            entry_rules=[
+                {"field": "smart_money_score", "op": "gte", "value": 60},
+            ],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 3.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_whale_clustering_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern K: Do clusters of whale trades on the same side predict outcomes?
+
+    When 3+ whale trades ($500+) land within ~1000 blocks (~30 min) on the same
+    outcome of a market, does that concentrated buying predict the winner?
+    """
+    logger.info("Mining whale clustering patterns...")
+
+    results = conn.execute(f"""
+        WITH whale_trades AS (
+            SELECT
+                tm.condition_id,
+                tm.outcome,
+                tm.is_winner,
+                t.block_number,
+                t.maker_amount / 1e6 as usd_amount
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            WHERE t.maker_asset_id = '0'
+              AND t.maker_amount / 1e6 >= 500
+              AND t.maker_amount > 0 AND t.taker_amount > 0
+        ),
+        whale_clusters AS (
+            SELECT
+                condition_id,
+                outcome,
+                is_winner,
+                block_number,
+                COUNT(*) OVER (
+                    PARTITION BY condition_id, outcome
+                    ORDER BY block_number
+                    RANGE BETWEEN 1000 PRECEDING AND CURRENT ROW
+                ) as cluster_size
+            FROM whale_trades
+        ),
+        market_max_cluster AS (
+            SELECT
+                condition_id,
+                outcome,
+                is_winner,
+                MAX(cluster_size) as max_cluster,
+                CASE
+                    WHEN MAX(cluster_size) >= 5 THEN 'mega_cluster'
+                    WHEN MAX(cluster_size) >= 3 THEN 'cluster'
+                    ELSE 'isolated'
+                END as cluster_bucket
+            FROM whale_clusters
+            GROUP BY condition_id, outcome, is_winner
+        )
+        SELECT
+            cluster_bucket,
+            COUNT(*) as total_outcomes,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_outcomes,
+            COUNT(DISTINCT condition_id) as markets
+        FROM market_max_cluster
+        GROUP BY cluster_bucket
+        HAVING COUNT(*) >= 200
+    """).fetchall()
+
+    patterns = []
+    for row in results:
+        bucket, total, wins, markets = row
+        hit_rate = wins / total if total > 0 else 0
+
+        # For whale clustering, edge is measured as hit_rate vs expected 50%
+        # (since we're looking at per-outcome level, random = ~50%)
+        edge = hit_rate - 0.5
+
+        logger.info(
+            f"  {bucket}: hit={hit_rate:.1%}, edge={edge:+.1%} "
+            f"({total:,} outcomes, {markets:,} markets)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"whale_cluster_{bucket}",
+            name=f"Whale Clustering: {bucket}",
+            description=(
+                f"Outcomes with {bucket} whale activity ($500+ trades within ~30min). "
+                f"Hit: {hit_rate:.1%}, edge: {edge:+.1%} ({markets:,} markets)"
+            ),
+            dimension="whale_clustering",
+            filters={"cluster_bucket": bucket},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=0.5,
+            expected_edge=edge,
+            entry_rules=[
+                {"field": "whale_buy_count", "op": "gte", "value": 3},
+            ],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 3.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_volume_acceleration_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern L: Does a volume surge (Q2 >> Q1) predict the winning outcome?
+
+    Compares volume in the first 25% of a market's block range vs the second 25%.
+    A sharp increase may indicate new information spreading.
+    """
+    logger.info("Mining volume acceleration patterns...")
+
+    results = conn.execute(f"""
+        WITH market_ranges AS (
+            SELECT
+                tm.condition_id,
+                MIN(t.block_number) as first_block,
+                MAX(t.block_number) as last_block
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0
+            GROUP BY tm.condition_id
+            HAVING COUNT(*) >= 20 AND MAX(t.block_number) > MIN(t.block_number)
+        ),
+        volume_phases AS (
+            SELECT
+                tm.condition_id,
+                tm.outcome,
+                tm.is_winner,
+                SUM(CASE
+                    WHEN (t.block_number - mr.first_block) * 1.0
+                         / NULLIF(mr.last_block - mr.first_block, 1) < 0.25
+                    THEN t.maker_amount / 1e6 ELSE 0
+                END) as vol_q1,
+                SUM(CASE
+                    WHEN (t.block_number - mr.first_block) * 1.0
+                         / NULLIF(mr.last_block - mr.first_block, 1) BETWEEN 0.25 AND 0.50
+                    THEN t.maker_amount / 1e6 ELSE 0
+                END) as vol_q2
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            JOIN market_ranges mr ON tm.condition_id = mr.condition_id
+            WHERE t.maker_asset_id = '0' AND t.maker_amount > 0
+            GROUP BY tm.condition_id, tm.outcome, tm.is_winner
+            HAVING SUM(t.maker_amount / 1e6) >= 100
+        )
+        SELECT
+            accel_bucket,
+            COUNT(*) as total_outcomes,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_outcomes
+        FROM (
+            SELECT
+                condition_id,
+                outcome,
+                is_winner,
+                vol_q2 / NULLIF(vol_q1, 0) as accel_ratio,
+                CASE
+                    WHEN vol_q1 <= 0 THEN 'no_q1'
+                    WHEN vol_q2 / NULLIF(vol_q1, 0) > 3.0 THEN 'surge'
+                    WHEN vol_q2 / NULLIF(vol_q1, 0) > 1.5 THEN 'accelerating'
+                    WHEN vol_q2 / NULLIF(vol_q1, 0) > 0.7 THEN 'steady'
+                    ELSE 'declining'
+                END as accel_bucket
+            FROM volume_phases
+            WHERE vol_q1 > 0
+        ) sub
+        GROUP BY accel_bucket
+        HAVING COUNT(*) >= 200
+    """).fetchall()
+
+    patterns = []
+    for row in results:
+        bucket, total, wins = row
+        hit_rate = wins / total if total > 0 else 0
+        edge = hit_rate - 0.5
+
+        logger.info(
+            f"  {bucket}: hit={hit_rate:.1%}, edge={edge:+.1%} ({total:,} outcomes)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"accel_{bucket}",
+            name=f"Volume Acceleration: {bucket}",
+            description=(
+                f"Outcomes with {bucket} volume acceleration (Q2/Q1 ratio). "
+                f"Hit: {hit_rate:.1%}, edge: {edge:+.1%} ({total:,} outcomes)"
+            ),
+            dimension="volume_acceleration",
+            filters={"accel_bucket": bucket},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=0.5,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 2.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
+def mine_contrarian_whale_patterns(conn) -> list[DiscoveredPattern]:
+    """Pattern M: When whales buy opposite to retail flow, who wins?
+
+    For each market outcome, compare retail volume (<$50) vs whale volume ($500+).
+    If whales are buying while retail sells (or vice versa), does the whale side win?
+    """
+    logger.info("Mining contrarian whale patterns...")
+
+    results = conn.execute(f"""
+        WITH market_flows AS (
+            SELECT
+                tm.condition_id,
+                tm.outcome,
+                tm.is_winner,
+                SUM(CASE WHEN t.maker_amount / 1e6 < 50 THEN t.maker_amount / 1e6 ELSE 0 END) as retail_vol,
+                SUM(CASE WHEN t.maker_amount / 1e6 >= 500 THEN t.maker_amount / 1e6 ELSE 0 END) as whale_vol,
+                COUNT(CASE WHEN t.maker_amount / 1e6 < 50 THEN 1 END) as retail_count,
+                COUNT(CASE WHEN t.maker_amount / 1e6 >= 500 THEN 1 END) as whale_count
+            FROM read_parquet('{TRADES_GLOB}') t
+            JOIN read_parquet('{TOKEN_MAP}') tm ON t.taker_asset_id = tm.token_id
+            WHERE t.maker_asset_id = '0'
+              AND t.maker_amount > 0 AND t.taker_amount > 0
+            GROUP BY tm.condition_id, tm.outcome, tm.is_winner
+        )
+        SELECT
+            flow_type,
+            COUNT(*) as total_outcomes,
+            SUM(CASE WHEN is_winner THEN 1 ELSE 0 END) as winning_outcomes,
+            COUNT(DISTINCT condition_id) as markets
+        FROM (
+            SELECT
+                condition_id,
+                outcome,
+                is_winner,
+                retail_vol,
+                whale_vol,
+                CASE
+                    WHEN whale_vol > 0 AND retail_vol > whale_vol * 2 THEN 'retail_dominant'
+                    WHEN whale_vol > retail_vol * 2 AND retail_vol > 0 THEN 'whale_dominant'
+                    WHEN whale_vol > 0 AND retail_vol > 0 THEN 'mixed'
+                    WHEN whale_vol > 0 AND retail_vol = 0 THEN 'whale_only'
+                    ELSE 'retail_only'
+                END as flow_type
+            FROM market_flows
+            WHERE whale_vol > 0 OR retail_vol > 0
+        ) sub
+        GROUP BY flow_type
+        HAVING COUNT(*) >= 500
+    """).fetchall()
+
+    patterns = []
+    for row in results:
+        flow_type, total, wins, markets = row
+        hit_rate = wins / total if total > 0 else 0
+        edge = hit_rate - 0.5
+
+        logger.info(
+            f"  {flow_type}: hit={hit_rate:.1%}, edge={edge:+.1%} "
+            f"({total:,} outcomes, {markets:,} markets)"
+        )
+
+        if edge < 0.02:
+            continue
+
+        pattern = DiscoveredPattern(
+            pattern_id=f"contrarian_{flow_type}",
+            name=f"Contrarian Whale: {flow_type}",
+            description=(
+                f"Outcomes where {flow_type} flow pattern detected. "
+                f"Hit: {hit_rate:.1%}, edge: {edge:+.1%} ({markets:,} markets)"
+            ),
+            dimension="contrarian_whale",
+            filters={"flow_type": flow_type},
+            sample_size=total,
+            hit_rate=hit_rate,
+            avg_price=0.5,
+            expected_edge=edge,
+            entry_rules=[],
+            trade_params={
+                "side": "YES",
+                "sizing_method": "fixed_amount",
+                "fixed_amount_usd": 3.0,
+                "min_edge": 0.03,
+            },
+        )
+        patterns.append(pattern)
+
+    return patterns
+
+
 def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
     """Run the full pattern discovery pipeline."""
     if not _check_data_files():
@@ -731,6 +1246,12 @@ def run_discovery(min_edge: float = 0.03, min_sample: int = 1000) -> dict:
         mine_lifecycle_patterns,
         mine_price_x_size_patterns,
         mine_outcome_type_patterns,
+        # v2: deeper dimensions
+        mine_market_duration_patterns,
+        mine_wallet_reputation_patterns,
+        mine_whale_clustering_patterns,
+        mine_volume_acceleration_patterns,
+        mine_contrarian_whale_patterns,
     ]
 
     for miner in miners:
