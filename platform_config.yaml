@@ -27,7 +27,7 @@ circuit_breaker:
   auto_reset: true
   enabled: false
   max_consecutive_losses: 999
-  pause_hours: 24
+  pause_hours: 0
 diversification:
   max_exposure_per_category_pct: 25
   max_positions_per_category: 30
