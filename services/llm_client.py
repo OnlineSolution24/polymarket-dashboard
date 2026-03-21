@@ -19,6 +19,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_MAP = {
     "claude-sonnet": "anthropic/claude-sonnet-4",
     "claude-opus": "anthropic/claude-opus-4",
+    "claude-opus-4-6": "anthropic/claude-opus-4-6",
     "haiku": "anthropic/claude-3.5-haiku",
     "gemini-flash": "google/gemini-2.5-flash",
     "gemini-pro": "google/gemini-2.5-flash",

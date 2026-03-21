@@ -7,11 +7,30 @@ budget checks, and daily summaries.
 
 import logging
 import threading
-from datetime import datetime, date
+import re
+from datetime import datetime, date, timedelta
 
 from config import load_platform_config, AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+# --- Market Blocklist (spam prevention) ---
+_MARKET_BLOCKLIST_KEYWORDS = [
+    "leganes", "leganés",
+    "wichita state shockers",
+]
+
+def _is_market_blocklisted(question: str) -> bool:
+    """Check if a market question matches any blocklisted keyword."""
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in _MARKET_BLOCKLIST_KEYWORDS)
+
+
+# Lazy import to avoid circular deps
+def _preflight(market_id, side="YES", edge=0, amount=0):
+    from services.suggestion_preflight import suggestion_preflight_check
+    return suggestion_preflight_check(market_id, side, edge, amount)
 
 _scheduler = None
 _lock = threading.Lock()
@@ -38,8 +57,18 @@ def start_scheduler(config: AppConfig) -> None:
                 _scheduler.add_job(
                     _job_refresh_markets, "interval", minutes=interval,
                     id="market_refresh", replace_existing=True, args=[config],
+                    next_run_time=datetime.now(),
                 )
                 logger.info(f"Scheduled: market_refresh every {interval}min")
+
+            # Whale/smart-money signals (top 100 markets, every 60min)
+            whale_interval = sched_cfg.get("whale_signals", {}).get("interval_minutes", 60)
+            _scheduler.add_job(
+                _job_whale_signals, "interval", minutes=whale_interval,
+                id="whale_signals", replace_existing=True, args=[config],
+                next_run_time=datetime.now(),
+            )
+            logger.info(f"Scheduled: whale_signals every {whale_interval}min")
 
             # Sentiment update
             if sched_cfg.get("sentiment_update", {}).get("enabled", True):
@@ -64,6 +93,7 @@ def start_scheduler(config: AppConfig) -> None:
                 _scheduler.add_job(
                     _job_run_agent_cycles, "interval", minutes=interval,
                     id="agent_cycles", replace_existing=True, args=[config],
+                    next_run_time=datetime.now(),
                 )
                 logger.info(f"Scheduled: agent_cycles every {interval}min")
 
@@ -75,13 +105,14 @@ def start_scheduler(config: AppConfig) -> None:
             )
             logger.info(f"Scheduled: chief_analysis daily at {chief_hour}:00 UTC")
 
-            # Analyst cycle (1x/day at 08:00 UTC)
-            analyst_hour = sched_cfg.get("analyst_hour", 8)
-            _scheduler.add_job(
-                _job_run_analyst_cycle, "cron", hour=analyst_hour, minute=0,
-                id="analyst_cycle", replace_existing=True, args=[config],
-            )
-            logger.info(f"Scheduled: analyst_cycle daily at {analyst_hour}:00 UTC")
+            # Analyst cycle: 3x daily at strategic times (EU pre-open, US pre-open, evening review)
+            for analyst_hour in [6, 13, 21]:
+                _scheduler.add_job(
+                    _job_run_analyst_cycle, "cron",
+                    hour=analyst_hour, minute=0,
+                    id=f"analyst_cycle_{analyst_hour}", replace_existing=True, args=[config],
+                )
+            logger.info("Scheduled: analyst_cycle at 06:00, 13:00, 21:00 UTC")
 
             # ML retraining
             if sched_cfg.get("ml_retrain", {}).get("enabled", False):
@@ -107,6 +138,14 @@ def start_scheduler(config: AppConfig) -> None:
                 id="daily_reset", replace_existing=True,
             )
 
+            # Daily snapshot backtests (run at 04:00 UTC)
+            _scheduler.add_job(
+                _job_daily_backtests, "cron", hour=4, minute=0,
+                id="daily_backtests", replace_existing=True,
+            )
+            logger.info("Scheduled: daily_backtests at 04:00 UTC")
+
+
             # Strategy evaluation (active strategies → trade suggestions)
             if sched_cfg.get("strategy_evaluation", {}).get("enabled", True):
                 strat_interval = sched_cfg["strategy_evaluation"].get("interval_minutes", 15)
@@ -128,24 +167,32 @@ def start_scheduler(config: AppConfig) -> None:
             _scheduler.add_job(
                 _job_run_trader_cycle, "interval", minutes=trader_interval,
                 id="trader_cycle", replace_existing=True, args=[config],
+                next_run_time=datetime.now(),
             )
             logger.info(f"Scheduled: trader_cycle every {trader_interval}min")
 
-            # Pattern Scanner (daily at 09:00 UTC — after analyst at 08:00)
+            # Pattern Scanner (daily at 09:00 UTC)
             pattern_hour = sched_cfg.get("pattern_scanner_hour", 9)
             _scheduler.add_job(
                 _job_pattern_scanner, "cron", hour=pattern_hour, minute=0,
                 id="pattern_scanner", replace_existing=True, args=[config],
             )
             logger.info(f"Scheduled: pattern_scanner daily at {pattern_hour}:00 UTC")
+            # Settlement: handled by PositionManager (no scheduler job)
 
-            # Settlement: check if markets resolved, update trade results
-            settlement_interval = sched_cfg.get("settlement", {}).get("interval_minutes", 30)
-            _scheduler.add_job(
-                _job_settle_trades, "interval", minutes=settlement_interval,
-                id="settlement", replace_existing=True, args=[config],
-            )
-            logger.info(f"Scheduled: settlement every {settlement_interval}min")
+            # Blockchain indexer (fetch trades from Polygon chain)
+            bi_cfg = sched_cfg.get("blockchain_indexer", {})
+            if bi_cfg.get("enabled", False):
+                bi_hours = bi_cfg.get("interval_hours", 6)
+                _scheduler.add_job(
+                    _job_blockchain_indexer, "interval", hours=bi_hours,
+                    id="blockchain_indexer", replace_existing=True, args=[config],
+                )
+                logger.info(f"Scheduled: blockchain_indexer every {bi_hours}h")
+
+
+
+
 
             # Portfolio snapshot (3x daily: 08:05, 14:00, 20:05 UTC)
             for hour in [8, 14, 20]:
@@ -163,21 +210,31 @@ def start_scheduler(config: AppConfig) -> None:
             logger.info("Scheduled: expire_old_suggestions every 1h")
 
             # Weather edge analysis (every 30 min)
-            _scheduler.add_job(
-                _job_weather_edge_analysis, "interval", minutes=30,
-                id="weather_edge", replace_existing=True, args=[config],
-            )
-            logger.info("Scheduled: weather_edge_analysis every 30min")
+            scheduler.add_job(_job_weather_edge_analysis, "interval", minutes=30, id="weather_edge")
 
-            # Smart Money Consensus (every 30 min)
-            smc_cfg = sched_cfg.get("smart_money_consensus", {})
-            if smc_cfg.get("enabled", True):
-                smc_interval = smc_cfg.get("interval_minutes", 30)
-                _scheduler.add_job(
-                    _job_smart_money_consensus, "interval", minutes=smc_interval,
-                    id="smart_money_consensus", replace_existing=True, args=[config],
-                )
-                logger.info(f"Scheduled: smart_money_consensus every {smc_interval}min")
+            # Resolution Sniper: Weather (every 15 min - precise hourly forecasts)
+            _scheduler.add_job(
+                _job_weather_sniper, "interval", minutes=15,
+                id="weather_sniper", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: weather_sniper every 15min")
+
+            # Resolution Sniper: Economic data (every 5 min during US hours 8-18 UTC)
+            _scheduler.add_job(
+                _job_economic_sniper, "interval", minutes=5,
+                id="economic_sniper", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: economic_sniper every 5min")
+
+            # Resolution Sniper: Sport scores (every 10 min)
+            _scheduler.add_job(
+                _job_sport_sniper, "interval", minutes=10,
+                id="sport_sniper", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: sport_sniper every 10min")
+
+            # New Market Scanner (every 15 min)
+            # DISABLED: new_market_scan (zero results, unnecessary load)
 
             # Cache cleanup (every 6 hours)
             _scheduler.add_job(
@@ -192,52 +249,31 @@ def start_scheduler(config: AppConfig) -> None:
             )
 
             # Position sync with Polymarket wallet (2x daily)
-            _scheduler.add_job(
-                _job_sync_positions, "interval", hours=12,
-                id="position_sync", replace_existing=True, args=[config],
-            )
+            # Position sync job removed - handled by PositionManager
             logger.info("Scheduled: position_sync every 12h")
 
-            # Health Watchdog (every 30 min) — checks critical jobs, alerts on failure
+            # DISABLED: arbitrage_scan (arb_v2 lost money, no proven edge)
+            #             _scheduler.add_job(
+            #                 _job_arbitrage_scan, "interval", minutes=30,
+            #                 id="arbitrage_scan", replace_existing=True, args=[config],
+            #             )
+            #             logger.info("Scheduled: arbitrage_scan every 30min")
+            # Edge Sources (every 20 min) — crypto, cross-platform, weather ensemble
             _scheduler.add_job(
-                _job_health_watchdog, "interval", minutes=30,
-                id="health_watchdog", replace_existing=True, args=[config],
+                _job_edge_sources, "interval", minutes=20,
+                id="edge_sources", replace_existing=True, args=[config],
             )
-            logger.info("Scheduled: health_watchdog every 30min")
+            logger.info("Scheduled: edge_sources every 20min")
 
-            # Blockchain indexer (incremental, default every 6h, disabled by default)
-            bi_cfg = sched_cfg.get("blockchain_indexer", {})
-            if bi_cfg.get("enabled", False):
-                bi_hours = bi_cfg.get("interval_hours", 6)
-                bi_max_chunks = bi_cfg.get("max_chunks_per_run", 500)
-                _scheduler.add_job(
-                    _job_blockchain_indexer, "interval", hours=bi_hours,
-                    id="blockchain_indexer", replace_existing=True,
-                    args=[bi_max_chunks],
-                )
-                logger.info(f"Scheduled: blockchain_indexer every {bi_hours}h")
+            # Health Monitor (every 2 hours)
+            _scheduler.add_job(
+                _job_health_monitor, "interval", hours=2,
+                id="health_monitor", replace_existing=True, args=[config],
+            )
+            logger.info("Scheduled: health_monitor every 2h")
 
-            # Resolution data updater (daily, keeps resolution table current)
-            res_cfg = sched_cfg.get("resolution_updater", {})
-            if res_cfg.get("enabled", False):
-                res_hours = res_cfg.get("interval_hours", 24)
-                _scheduler.add_job(
-                    _job_resolution_updater, "interval", hours=res_hours,
-                    id="resolution_updater", replace_existing=True,
-                )
-                logger.info(f"Scheduled: resolution_updater every {res_hours}h")
-
-            # Strategy Discovery (weekly pattern mining on blockchain data)
-            disc_cfg = sched_cfg.get("strategy_discovery", {})
-            if disc_cfg.get("enabled", False):
-                disc_day = disc_cfg.get("schedule_day", "monday")
-                disc_hour = disc_cfg.get("schedule_hour", 4)
-                _scheduler.add_job(
-                    _job_strategy_discovery, "cron",
-                    day_of_week=disc_day[:3].lower(), hour=disc_hour,
-                    id="strategy_discovery", replace_existing=True,
-                )
-                logger.info(f"Scheduled: strategy_discovery every {disc_day} at {disc_hour}:00 UTC")
+            # Live Sports Edge (every 5 min during games)
+            scheduler.add_job(_job_live_sports_edge, "interval", minutes=10, id="live_sports_edge")
 
             # Volume Flow Signal (live order book imbalance scanner)
             vf_cfg = sched_cfg.get("volume_flow", {})
@@ -266,6 +302,13 @@ def _job_refresh_markets(config: AppConfig):
 
         service = PolymarketService(config)
         markets = service.fetch_markets()
+
+        # Filter out closed/non-accepting markets
+        active_markets = [m for m in markets if m.get("accepting_orders", 1) != 0]
+        closed_count = len(markets) - len(active_markets)
+        if closed_count:
+            logger.info(f"Market refresh: filtered out {closed_count} closed/non-accepting markets")
+        markets = active_markets
 
         now = datetime.utcnow().isoformat()
 
@@ -322,23 +365,53 @@ def _job_refresh_markets(config: AppConfig):
         except Exception as e:
             logger.error(f"Order book signal computation failed: {e}")
 
-        # Compute whale/smart-money signals for top 20 markets
-        whale_count = 0
-        try:
-            from services.data_api_client import DataAPIClient
+        logger.info(
+            f"Market refresh: {len(markets)} markets updated + snapshots saved + "
+            f"{ob_count} order books analyzed"
+        )
+    except Exception as e:
+        logger.error(f"Market refresh failed: {e}")
 
-            data_client = DataAPIClient()
-            top_for_whale = engine.query(
-                "SELECT id FROM markets "
-                "WHERE accepting_orders = 1 "
-                "ORDER BY volume DESC LIMIT 20"
-            )
-            for m in top_for_whale:
-                mid = m["id"]
+
+def _job_whale_signals(config: AppConfig):
+    """Enhanced whale/smart-money signal collection for top 100 markets.
+
+    Runs every 60 minutes. Fetches whale trades, holder concentration,
+    open interest, smart money score, and volume spike detection.
+    """
+    import time
+
+    try:
+        from services.data_api_client import DataAPIClient
+        from db import engine
+
+        data_client = DataAPIClient(timeout=20)
+        whale_count = 0
+        volume_spike_count = 0
+
+        # Get top 100 active markets by volume
+        top_markets = engine.query(
+            "SELECT id, volume_24h, volume_1w FROM markets "
+            "WHERE accepting_orders = 1 "
+            "ORDER BY volume DESC LIMIT 100"
+        )
+
+        for m in top_markets:
+            mid = m["id"]
+            try:
+                # Whale trades (single API call, reuse for smart_money_score)
                 whale = data_client.compute_whale_signals(mid)
+
+                # Holder concentration
                 conc = data_client.compute_holder_concentration(mid)
+
+                # Open interest
                 oi = data_client.get_open_interest(mid)
-                sm_score = data_client.compute_smart_money_score(mid)
+
+                # Smart money score (pass pre-computed data to avoid duplicate calls)
+                sm_score = data_client.compute_smart_money_score(
+                    mid, whale_data=whale, concentration=conc
+                )
 
                 # Compute OI change vs last stored value
                 oi_change = None
@@ -351,28 +424,47 @@ def _job_refresh_markets(config: AppConfig):
                         if old_oi > 0:
                             oi_change = round((oi - old_oi) / old_oi, 4)
 
+                # Volume spike detection:
+                # Compare volume_24h with volume_1w / 7 (daily average over last week)
+                volume_change = None
+                vol_24h = m.get("volume_24h") or 0
+                vol_1w = m.get("volume_1w") or 0
+                if vol_1w > 0:
+                    avg_daily = vol_1w / 7.0
+                    if avg_daily > 0:
+                        volume_change = round(vol_24h / avg_daily, 4)
+                        if volume_change > 2.0:
+                            volume_spike_count += 1
+
                 engine.execute(
                     """UPDATE markets SET
                        whale_buy_count = ?, whale_sell_count = ?, whale_net_flow = ?,
                        top_holder_concentration = ?, open_interest = ?,
                        oi_change_24h = COALESCE(?, oi_change_24h),
-                       smart_money_score = ?
+                       smart_money_score = ?,
+                       volume_change_24h = ?
                        WHERE id = ?""",
                     (whale["whale_buy_count"], whale["whale_sell_count"],
-                     whale["whale_net_flow"], conc, oi, oi_change, sm_score, mid),
+                     whale["whale_net_flow"], conc, oi, oi_change, sm_score,
+                     volume_change, mid),
                 )
                 whale_count += 1
 
-            data_client.close()
-        except Exception as e:
-            logger.error(f"Whale signal computation failed: {e}")
+                # Rate limit: 0.5s between markets (3 API calls per market)
+                time.sleep(0.5)
+
+            except Exception as e:
+                logger.warning(f"Whale signals failed for market {mid[:20]}: {e}")
+                continue
+
+        data_client.close()
 
         logger.info(
-            f"Market refresh: {len(markets)} markets updated + snapshots saved + "
-            f"{ob_count} order books + {whale_count} whale signals analyzed"
+            f"Whale signals: {whale_count}/{len(top_markets)} markets updated, "
+            f"{volume_spike_count} volume spikes detected"
         )
     except Exception as e:
-        logger.error(f"Market refresh failed: {e}")
+        logger.error(f"Whale signal job failed: {e}")
 
 
 def _job_update_sentiment(config: AppConfig):
@@ -411,7 +503,7 @@ def _job_run_agent_cycles(config: AppConfig):
         configs = load_agent_configs()
 
         # Agents that have their own dedicated schedule
-        _SEPARATE_SCHEDULE = {"chief", "analyst"}
+        _SEPARATE_SCHEDULE = {"chief", "analyst", "trader"}
 
         for agent_cfg in configs:
             if not agent_cfg.enabled:
@@ -527,13 +619,16 @@ def _job_evaluate_strategies(config: AppConfig):
                     continue
 
                 for market in matched:
-                    # Skip if we already have a pending/auto_approved suggestion for this market+strategy
+                    # Skip if we already have a pending/auto_approved/approved suggestion for this market+strategy in last 24h
                     existing = engine.query_one(
-                        "SELECT id FROM suggestions WHERE type = 'trade' AND status IN ('pending', 'auto_approved') "
-                        "AND payload LIKE ? AND payload LIKE ?",
+                        "SELECT id FROM suggestions WHERE type = 'trade' "
+                        "AND status IN ('pending', 'auto_approved', 'approved') "
+                        "AND payload LIKE ? AND payload LIKE ? "
+                        "AND created_at > datetime('now', '-24 hours')",
                         (f'%"market_id": "{market["id"]}"%', f'%"strategy_id": "{strategy["id"]}"%'),
                     )
                     if existing:
+                        logger.debug(f"Skipping duplicate suggestion for market {market['id']} + strategy {strategy['id']}")
                         continue
 
                     params = compute_trade_params(market, trade_params, capital)
@@ -543,8 +638,24 @@ def _job_evaluate_strategies(config: AppConfig):
                     params["strategy_id"] = strategy["id"]
                     params["strategy_name"] = strategy["name"]
 
+                    # Pre-flight: open position, rebuy cooldown, min edge, circuit breaker
+                    pf_ok, pf_reason = _preflight(market["id"], params.get("side", "YES"), params.get("edge", 0), params.get("amount_usd", 0))
+                    if not pf_ok:
+                        logger.debug(f"Preflight reject ({strategy['name']}): {pf_reason} for {market['id'][:30]}")
+                        continue
+
                     status = "auto_approved" if mode == "full-auto" else "pending"
                     now = datetime.utcnow().isoformat()
+
+                    # Dedup: skip if suggestion for this market exists in last 24h (any status)
+                    _dup = engine.query_one(
+                        "SELECT id FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                        "AND created_at > datetime('now', '-24 hours')",
+                        (market["id"],),
+                    )
+                    if _dup:
+                        logger.debug(f"Strategy dedup: skip {market['id'][:30]} - already suggested")
+                        continue
 
                     engine.execute(
                         """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
@@ -592,50 +703,82 @@ def _job_score_strategies():
 
         strategies = engine.query("SELECT * FROM strategies WHERE status = 'active'")
         for strategy in strategies:
-            trades = engine.query(
-                "SELECT pnl, result FROM strategy_trades st "
-                "JOIN trades t ON st.trade_id = t.id "
-                "WHERE st.strategy_id = ? AND t.result IS NOT NULL",
+            # Count ALL strategy_trades (not just settled) for live_trades
+            all_trades = engine.query(
+                "SELECT COUNT(*) as cnt FROM strategy_trades "
+                "WHERE strategy_id = ? AND is_backtest = 0",
                 (strategy["id"],),
             )
-            if not trades:
-                continue
+            live_count = all_trades[0]["cnt"] if all_trades else 0
 
-            total = len(trades)
-            wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
-            total_pnl = sum(t.get("pnl") or 0 for t in trades)
-            win_rate = wins / total if total > 0 else 0
+            # Get settled trades from strategy_trades directly (has own pnl/result columns)
+            settled = engine.query(
+                "SELECT pnl, result FROM strategy_trades "
+                "WHERE strategy_id = ? AND is_backtest = 0 AND result IS NOT NULL",
+                (strategy["id"],),
+            )
+
+            # Also estimate unrealized PnL for open strategy_trades via trades table
+            unrealized = engine.query(
+                "SELECT st.entry_price, st.amount_usd, t.price as current_price "
+                "FROM strategy_trades st "
+                "JOIN trades t ON st.market_id = t.market_id "
+                "  AND t.status = 'executed' AND t.result IS NULL "
+                "WHERE st.strategy_id = ? AND st.is_backtest = 0 AND st.result IS NULL "
+                "GROUP BY st.id",
+                (strategy["id"],),
+            )
+
+            # Calculate realized PnL from settled trades
+            realized_pnl = sum(t.get("pnl") or 0 for t in settled) if settled else 0
+            settled_count = len(settled) if settled else 0
+            wins = sum(1 for t in settled if (t.get("pnl") or 0) > 0) if settled else 0
+
+            # Calculate unrealized PnL estimate (current_price - entry_price) * shares
+            unrealized_pnl = 0.0
+            if unrealized:
+                for t in unrealized:
+                    entry = t.get("entry_price") or 0
+                    amount = t.get("amount_usd") or 0
+                    if entry > 0 and amount > 0:
+                        shares = amount / entry
+                        current = t.get("current_price") or entry
+                        unrealized_pnl += (current - entry) * shares
+
+            total_pnl = realized_pnl + unrealized_pnl
+            win_rate = wins / settled_count if settled_count > 0 else 0
 
             # Confidence = weighted combination of win rate and profitability
-            pnl_score = min(max(total_pnl / 10, -1), 1)  # Normalize PnL to [-1, 1]
-            confidence = round(0.6 * win_rate + 0.4 * (pnl_score + 1) / 2, 3)
+            pnl_score = min(max(total_pnl / 10, -1), 1)
+            confidence = round(0.6 * win_rate + 0.4 * (pnl_score + 1) / 2, 3) if settled_count > 0 else 0.5
 
             engine.execute(
                 "UPDATE strategies SET live_trades = ?, live_pnl = ?, live_win_rate = ?, "
                 "confidence_score = ?, updated_at = ? WHERE id = ?",
-                (total, round(total_pnl, 2), round(win_rate, 3), confidence,
+                (live_count, round(total_pnl, 2), round(win_rate, 3), confidence,
                  datetime.utcnow().isoformat(), strategy["id"]),
             )
 
             # Auto-retire on drawdown or trade limit
-            max_dd = 0
-            running_pnl = 0
-            peak = 0
-            for t in trades:
-                running_pnl += t.get("pnl") or 0
-                peak = max(peak, running_pnl)
-                dd = peak - running_pnl
-                max_dd = max(max_dd, dd)
+            if settled:
+                max_dd = 0
+                running_pnl = 0
+                peak = 0
+                for t in settled:
+                    running_pnl += t.get("pnl") or 0
+                    peak = max(peak, running_pnl)
+                    dd = peak - running_pnl
+                    max_dd = max(max_dd, dd)
 
-            capital = platform_cfg.get("trading", {}).get("capital_usd", 100)
-            dd_pct = (max_dd / capital * 100) if capital > 0 else 0
+                capital = platform_cfg.get("trading", {}).get("capital_usd", 100)
+                dd_pct = (max_dd / capital * 100) if capital > 0 else 0
 
-            if total >= retire_trades or dd_pct >= retire_dd:
-                engine.execute(
-                    "UPDATE strategies SET status = 'retired', retired_at = ? WHERE id = ?",
-                    (datetime.utcnow().isoformat(), strategy["id"]),
-                )
-                logger.info(f"Strategy {strategy['id']} retired (trades={total}, dd={dd_pct:.1f}%)")
+                if live_count >= retire_trades or dd_pct >= retire_dd:
+                    engine.execute(
+                        "UPDATE strategies SET status = 'retired', retired_at = ? WHERE id = ?",
+                        (datetime.utcnow().isoformat(), strategy["id"]),
+                    )
+                    logger.info(f"Strategy {strategy['id']} retired (trades={live_count}, dd={dd_pct:.1f}%)")
 
         logger.debug(f"Strategy scoring: updated {len(strategies)} strategies")
 
@@ -857,10 +1000,6 @@ def _job_weather_edge_analysis(config: AppConfig):
             if abs_edge < min_edge:
                 continue
 
-            # Skip same-day events — forecast already public, no real edge
-            if r.get("days_ahead", 0) < 1:
-                continue
-
             market_id = r["market_id"]
             side = r["side"]
 
@@ -873,11 +1012,11 @@ def _job_weather_edge_analysis(config: AppConfig):
             if open_pos:
                 continue
 
-            # Skip if recently closed (rebuy cooldown)
+            # Skip if recently closed (rebuy cooldown) - catches ALL result types
             rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
             last_closed = engine.query_one(
                 "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
-                "AND result IN ('cashout', 'win', 'loss', 'settled')",
+                "AND status = 'closed' AND result IS NOT NULL",
                 (market_id,),
             )
             if last_closed and last_closed.get("last_close"):
@@ -888,22 +1027,34 @@ def _job_weather_edge_analysis(config: AppConfig):
                 except (ValueError, TypeError):
                     pass
 
-            # Skip if we already have any recent suggestion for this market (including failed)
+            # Skip if we already have a pending/approved/executed suggestion for this market
             existing = engine.query_one(
                 "SELECT id FROM suggestions WHERE type = 'trade' "
-                "AND status IN ('pending', 'auto_approved', 'approved', 'executed', 'failed') "
-                "AND payload LIKE ? "
-                "AND created_at > datetime('now', '-24 hours')",
+                "AND status IN ('pending', 'auto_approved', 'executed') "
+                "AND payload LIKE ?",
                 (f'%"market_id": "{market_id}"%',),
             )
             if existing:
                 continue
 
-            # Fixed amount for weather trades (consistent with other strategies)
-            weather_amount = trading_cfg.get("analyst_suggestions", {}).get("max_amount_usd", 3.0)
-            amount = weather_amount
+            # Calculate amount (Kelly-lite: edge * fraction of max position)
+            capital = trading_cfg.get("capital_usd", 100.0)
+            limits = trading_cfg.get("limits", {})
+            max_pct = limits.get("max_position_pct", 5) / 100
+            max_amount = capital * max_pct
+
+            # Scale amount by edge strength (higher edge = larger bet, capped)
+            amount = min(round(abs_edge * capital * 0.5, 2), max_amount)
+            amount = max(amount, 1.0)  # minimum $1
 
             price = r["yes_price"] if side == "YES" else (1 - r["yes_price"])
+
+            # Max entry price check - skip if price too high (no upside)
+            max_entry = trading_cfg.get("max_entry_price", 0.93)
+            if price > max_entry:
+                logger.debug(f"Weather: skip {market_id[:30]} - price {price:.3f} > max {max_entry}")
+                continue
+
             status = "auto_approved" if mode == "full-auto" else "pending"
 
             payload = {
@@ -918,6 +1069,16 @@ def _job_weather_edge_analysis(config: AppConfig):
                 "days_ahead": r["days_ahead"],
                 "strategy_name": "Weather Forecast Edge",
             }
+
+            # Dedup: skip if suggestion for this market exists in last 24h (any status)
+            _dup = engine.query_one(
+                "SELECT id FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                "AND created_at > datetime('now', '-24 hours')",
+                (market_id,),
+            )
+            if _dup:
+                logger.debug(f"Weather dedup: skip {market_id[:30]} - already suggested")
+                continue
 
             engine.execute(
                 """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
@@ -941,154 +1102,6 @@ def _job_weather_edge_analysis(config: AppConfig):
 
     except Exception as e:
         logger.error(f"Weather edge analysis failed: {e}")
-
-
-def _job_smart_money_consensus(config: AppConfig):
-    """Scan top wallets for position consensus and create trade suggestions.
-
-    Finds markets where 3+ top-performing wallets agree on the same side.
-    Creates trade suggestions based on consensus strength.
-    """
-    try:
-        from db import engine
-        from services.smart_money_consensus import scan_smart_money_consensus
-        import json as _json
-
-        platform_cfg = load_platform_config()
-        trading_cfg = platform_cfg.get("trading", {})
-        mode = trading_cfg.get("mode", "paper")
-        min_edge = trading_cfg.get("smart_money_min_edge", 0.08)
-
-        smc_cfg = platform_cfg.get("scheduler", {}).get("smart_money_consensus", {})
-        max_wallets = smc_cfg.get("max_wallets", 30)
-        min_consensus = smc_cfg.get("min_consensus_wallets", 3)
-
-        signals = scan_smart_money_consensus(
-            max_wallets=max_wallets,
-            min_consensus=min_consensus,
-        )
-
-        if not signals:
-            logger.debug("Smart money consensus: no signals found")
-            return
-
-        # Update calculated_edge in DB for markets with consensus
-        for s in signals:
-            engine.execute(
-                "UPDATE markets SET calculated_edge = ?, last_updated = datetime('now') WHERE id = ?",
-                (s.edge, s.market_id),
-            )
-
-        # Create trade suggestions for strong signals
-        suggestions_created = 0
-        for s in signals:
-            if s.abs_edge < min_edge:
-                continue
-
-            if s.consensus_score < 0.3:
-                continue
-
-            market_id = s.market_id
-
-            # Skip if we already have an open position
-            open_pos = engine.query_one(
-                "SELECT id FROM trades WHERE market_id = ? AND status IN ('executed', 'executing') "
-                "AND (result IS NULL OR result = 'open')",
-                (market_id,),
-            )
-            if open_pos:
-                continue
-
-            # Skip if recently closed (rebuy cooldown)
-            rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
-            last_closed = engine.query_one(
-                "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
-                "AND result IN ('cashout', 'win', 'loss', 'settled')",
-                (market_id,),
-            )
-            if last_closed and last_closed.get("last_close"):
-                try:
-                    closed_at = datetime.fromisoformat(last_closed["last_close"])
-                    if (datetime.utcnow() - closed_at).days < rebuy_cooldown_days:
-                        continue
-                except (ValueError, TypeError):
-                    pass
-
-            # Skip duplicate suggestions
-            existing = engine.query_one(
-                "SELECT id FROM suggestions WHERE type = 'trade' "
-                "AND status IN ('pending', 'auto_approved', 'executed') "
-                "AND payload LIKE ?",
-                (f'%"market_id": "{market_id}"%',),
-            )
-            if existing:
-                continue
-
-            # Calculate amount (scale by consensus strength)
-            capital = trading_cfg.get("capital_usd", 100.0)
-            limits = trading_cfg.get("limits", {})
-            max_pct = limits.get("max_position_pct", 5) / 100
-            max_amount = capital * max_pct
-
-            amount = min(round(s.consensus_score * capital * 0.3, 2), max_amount)
-            amount = max(amount, 1.0)
-
-            price = s.current_price if s.consensus_side == "YES" else (1 - s.current_price)
-            status = "auto_approved" if mode == "full-auto" else "pending"
-
-            wallets_str = ", ".join(s.wallet_names[:5])
-            payload = {
-                "market_id": market_id,
-                "market_question": s.market_title,
-                "side": s.consensus_side,
-                "amount_usd": amount,
-                "price": price,
-                "edge": s.edge,
-                "strategy_name": "Smart Money Consensus",
-                "consensus_wallets": s.wallet_count,
-                "consensus_score": s.consensus_score,
-                "avg_wallet_pnl": s.avg_wallet_pnl,
-            }
-
-            engine.execute(
-                """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
-                (
-                    "smart-money-consensus",
-                    "trade",
-                    f"SMC: {s.consensus_side} '{s.market_title[:50]}'",
-                    f"Consensus: {s.wallet_count} Wallets ({wallets_str}) | "
-                    f"Score: {s.consensus_score:.0%} | Edge: {s.edge:+.1%} | "
-                    f"Avg PnL: ${s.avg_wallet_pnl:.0f}",
-                    _json.dumps(payload),
-                    status,
-                ),
-            )
-            suggestions_created += 1
-
-        logger.info(
-            f"Smart money consensus: {len(signals)} signals, "
-            f"{suggestions_created} suggestions created (min_edge={min_edge:.0%})"
-        )
-
-        # Send Telegram alert for strong signals
-        if suggestions_created > 0:
-            try:
-                from services.telegram_alerts import get_alerts
-                alerts = get_alerts(config)
-                top = signals[0]
-                alerts.send(
-                    f"🧠 <b>Smart Money Consensus</b>\n\n"
-                    f"Top Signal: <b>{top.consensus_side}</b> auf '{top.market_title[:60]}'\n"
-                    f"Wallets: {top.wallet_count} | Score: {top.consensus_score:.0%}\n"
-                    f"Edge: {top.edge:+.1%} | Avg PnL: ${top.avg_wallet_pnl:.0f}\n\n"
-                    f"Insgesamt {suggestions_created} Vorschläge erstellt."
-                )
-            except Exception:
-                pass
-
-    except Exception as e:
-        logger.error(f"Smart money consensus failed: {e}")
 
 
 def _job_cleanup_cache():
@@ -1285,260 +1298,7 @@ def _job_pattern_scanner(config: AppConfig):
         logger.error(f"Pattern scanner failed: {e}")
 
 
-def _job_settle_trades(config: AppConfig):
-    """
-    Settlement: Check if any executed trades have been resolved.
-    For each open trade, query Gamma API to see if the market resolved.
-    If resolved, calculate PnL, update DB, notify via Telegram, update circuit breaker.
-    """
-    try:
-        from db import engine
-        from services.polymarket_client import PolymarketService
-        from services.telegram_alerts import get_alerts
-
-        # Find all executed trades that haven't been settled yet
-        open_trades = engine.query(
-            "SELECT id, market_id, market_question, side, amount_usd, price "
-            "FROM trades WHERE status = 'executed' AND result IS NULL"
-        )
-
-        if not open_trades:
-            return
-
-        service = PolymarketService(config)
-        alerts = get_alerts(config)
-        settled_count = 0
-        wins = 0
-        losses = 0
-        total_pnl = 0.0
-
-        # Cache resolution results per market (multiple trades may share a market)
-        resolution_cache = {}
-
-        for trade in open_trades:
-            market_id = trade["market_id"]
-
-            # Check cache first
-            if market_id not in resolution_cache:
-                resolution_cache[market_id] = service.get_market_resolution(market_id)
-
-            resolution = resolution_cache[market_id]
-            if not resolution or not resolution.get("resolved"):
-                continue
-
-            # Calculate PnL
-            winning_side = resolution["winning_side"]
-            trade_side = trade["side"]
-            entry_price = trade["price"] or 0
-            amount = trade["amount_usd"] or 0
-
-            if entry_price <= 0 or amount <= 0:
-                logger.warning(f"Trade {trade['id']}: invalid price/amount, skipping")
-                continue
-
-            # How many shares did we buy?
-            shares = amount / entry_price
-
-            if trade_side == winning_side:
-                # Won: each share pays out $1
-                payout = shares * 1.0
-                pnl = payout - amount
-                result = "win"
-                wins += 1
-            else:
-                # Lost: shares are worth $0
-                pnl = -amount
-                result = "loss"
-                losses += 1
-
-            pnl = round(pnl, 4)
-            total_pnl += pnl
-
-            # Update trade record
-            engine.execute(
-                "UPDATE trades SET result = ?, pnl = ? WHERE id = ?",
-                (result, pnl, trade["id"]),
-            )
-
-            # Also update strategy_trades if linked
-            engine.execute(
-                "UPDATE strategy_trades SET result = ?, pnl = ?, exit_price = ? "
-                "WHERE market_id = ? AND result IS NULL",
-                (result, pnl, 1.0 if result == "win" else 0.0, market_id),
-            )
-
-            settled_count += 1
-
-            # Send Telegram notification
-            market_name = (trade.get("market_question") or market_id)[:80]
-            alerts.alert_trade_settled(market_name, trade_side, result, pnl, amount)
-
-        if settled_count > 0:
-            # Update circuit breaker with consecutive losses
-            _update_circuit_breaker_from_settlements(config)
-
-            logger.info(
-                f"Settlement: {settled_count} trades settled "
-                f"({wins}W/{losses}L, PnL: ${total_pnl:+.2f})"
-            )
-
-    except Exception as e:
-        logger.error(f"Settlement job failed: {e}")
-
-
-def _update_circuit_breaker_from_settlements(config: AppConfig):
-    """Recalculate circuit breaker state based on recent trade results."""
-    try:
-        from db import engine
-
-        # Get last N trades with results, ordered by execution time
-        recent = engine.query(
-            "SELECT result FROM trades WHERE result IS NOT NULL "
-            "ORDER BY executed_at DESC LIMIT 10"
-        )
-
-        if not recent:
-            return
-
-        # Count consecutive losses from the most recent trade
-        consecutive_losses = 0
-        for trade in recent:
-            if trade["result"] == "loss":
-                consecutive_losses += 1
-            else:
-                break
-
-        platform_cfg = load_platform_config()
-        cb_cfg = platform_cfg.get("circuit_breaker", {})
-        max_losses = cb_cfg.get("max_consecutive_losses", 3)
-        pause_hours = cb_cfg.get("pause_hours", 24)
-
-        if consecutive_losses >= max_losses:
-            from datetime import timedelta
-            paused_until = (datetime.utcnow() + timedelta(hours=pause_hours)).isoformat()
-            engine.execute(
-                "INSERT OR REPLACE INTO circuit_breaker (id, consecutive_losses, paused_until) "
-                "VALUES (1, ?, ?)",
-                (consecutive_losses, paused_until),
-            )
-
-            from services.telegram_alerts import get_alerts
-            alerts = get_alerts(config)
-            alerts.alert_circuit_breaker(consecutive_losses, paused_until)
-            logger.warning(f"Circuit breaker ACTIVATED: {consecutive_losses} consecutive losses")
-        else:
-            # Reset circuit breaker if not triggered
-            engine.execute(
-                "INSERT OR REPLACE INTO circuit_breaker (id, consecutive_losses, paused_until) "
-                "VALUES (1, ?, NULL)",
-                (consecutive_losses,),
-            )
-
-    except Exception as e:
-        logger.error(f"Circuit breaker update failed: {e}")
-
-
-def _job_sync_positions(config: AppConfig):
-    """
-    Sync real on-chain positions from Polymarket Data API into the DB.
-    Creates trade records for positions that aren't tracked yet,
-    and updates entry prices from actual trade data.
-    """
-    try:
-        from db import engine
-        from services.polymarket_client import PolymarketService
-
-        funder = config.polymarket_funder
-        if not funder:
-            return
-
-        service = PolymarketService(config)
-        positions = service.get_user_positions(funder)
-
-        if not positions:
-            logger.debug("Position sync: no on-chain positions found")
-            return
-
-        synced = 0
-        for pos in positions:
-            # Data API returns: market, asset (token_id), size (shares),
-            # avgPrice, curPrice, value, pnl, etc.
-            market_slug = pos.get("market", {}).get("slug", "") if isinstance(pos.get("market"), dict) else ""
-            condition_id = pos.get("conditionId", pos.get("market", {}).get("conditionId", "")) if isinstance(pos.get("market"), dict) else pos.get("conditionId", "")
-            token_id = pos.get("asset", pos.get("tokenId", ""))
-            shares = float(pos.get("size", 0) or 0)
-            avg_price = float(pos.get("avgPrice", 0) or 0)
-            cur_price = float(pos.get("curPrice", 0) or 0)
-
-            if shares <= 0 or not condition_id:
-                continue
-
-            amount_usd = round(shares * avg_price, 4)
-
-            # Determine side (YES/NO) by matching token_id to market
-            market_row = engine.query_one(
-                "SELECT id, yes_token_id, no_token_id, question FROM markets WHERE id = ?",
-                (condition_id,),
-            )
-            if not market_row:
-                # Try to find by token ID
-                market_row = engine.query_one(
-                    "SELECT id, yes_token_id, no_token_id, question FROM markets "
-                    "WHERE yes_token_id = ? OR no_token_id = ?",
-                    (token_id, token_id),
-                )
-            if not market_row:
-                continue
-
-            side = "YES" if token_id == market_row.get("yes_token_id") else "NO"
-            market_id = market_row["id"]
-            question = market_row.get("question", "")
-
-            # Check if we already have ANY trade for this market+side (active or closed)
-            existing = engine.query_one(
-                "SELECT id, price, result FROM trades WHERE market_id = ? AND side = ? "
-                "AND status = 'executed' AND (result IS NULL OR result = 'open')",
-                (market_id, side),
-            )
-
-            # Also check if market was recently traded (avoid re-creating after cashout)
-            any_trade = engine.query_one(
-                "SELECT id FROM trades WHERE market_id = ? AND status = 'executed'",
-                (market_id,),
-            )
-
-            if existing:
-                # Update price if missing
-                if not existing.get("price") or existing["price"] <= 0:
-                    engine.execute(
-                        "UPDATE trades SET price = ?, amount_usd = ? WHERE id = ?",
-                        (avg_price, amount_usd, existing["id"]),
-                    )
-                    synced += 1
-                    logger.info(f"Position sync: updated price for trade {existing['id']} "
-                                f"({side} {question[:40]}): ${avg_price:.4f}")
-            elif any_trade:
-                # Market was already traded — don't re-import (avoids cashout loop)
-                logger.debug(f"Position sync: skipping {question[:40]} — already traded")
-            else:
-                # Truly new position — import it
-                engine.execute(
-                    """INSERT INTO trades
-                       (market_id, market_question, side, amount_usd, price, status,
-                        agent_id, user_cmd, created_at, executed_at)
-                       VALUES (?, ?, ?, ?, ?, 'executed', 'sync', 'position_sync', ?, ?)""",
-                    (market_id, question, side, amount_usd, avg_price,
-                     datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-                )
-                synced += 1
-                logger.info(f"Position sync: imported {side} position in "
-                            f"'{question[:40]}' (${amount_usd:.2f} @ {avg_price:.4f})")
-
-        if synced > 0:
-            logger.info(f"Position sync: {synced} positions synced from Data API")
-
-    except Exception as e:
-        logger.error(f"Position sync failed: {e}")
+# Settlement and position sync removed — handled by PositionManager
 
 
 def _job_portfolio_snapshot(config: AppConfig):
@@ -1625,220 +1385,290 @@ def _job_expire_old_suggestions():
         logger.error(f"Expire suggestions failed: {e}")
 
 
-def _job_health_watchdog(config: AppConfig):
-    """Check that critical systems are working and alert via Telegram if not.
-
-    Runs every 30 min. Checks:
-    1. Market refresh is producing fresh data (< 60 min old)
-    2. DB schema has all required columns
-    3. No repeated errors in recent logs
-    4. Active strategies exist
-    5. Polymarket API is reachable
-    """
-    from services.telegram_alerts import get_alerts
-
+def _job_daily_backtests():
+    """Run snapshot-based backtests for all active strategies."""
     try:
-        from db import engine
-        alerts = get_alerts(config)
-        problems = []
-
-        # --- 1. Market data freshness ---
-        freshest = engine.query_one(
-            "SELECT MAX(last_updated) as latest FROM markets"
-        )
-        if freshest and freshest.get("latest"):
-            try:
-                latest = datetime.fromisoformat(str(freshest["latest"]))
-                age_min = (datetime.utcnow() - latest).total_seconds() / 60
-                if age_min > 60:
-                    problems.append(
-                        f"Marktdaten veraltet: letztes Update vor {age_min:.0f} Min"
-                    )
-            except (ValueError, TypeError):
-                problems.append("Marktdaten: last_updated nicht parsbar")
-        else:
-            problems.append("Keine Marktdaten in der DB")
-
-        # --- 2. DB schema check (critical columns) ---
-        cols = engine.query("PRAGMA table_info(markets)")
-        col_names = {c["name"] for c in cols} if cols else set()
-        required = {"description", "yes_token_id", "spread", "volume_24h",
-                     "accepting_orders", "sentiment_score"}
-        missing = required - col_names
-        if missing:
-            problems.append(f"DB Schema: fehlende Spalten: {', '.join(missing)}")
-
-        # --- 3. Recent error count (excluding auth-related harmless errors) ---
-        error_row = engine.query_one(
-            "SELECT COUNT(*) as cnt FROM agent_logs "
-            "WHERE level = 'error' AND created_at > datetime('now', '-1 hour') "
-            "AND message NOT LIKE '%auth/api-key%' "
-            "AND message NOT LIKE '%auth/derive-api-key%' "
-            "AND message NOT LIKE '%create_or_derive_api_creds%'"
-        )
-        error_count = int(error_row["cnt"]) if error_row else 0
-        if error_count >= 5:
-            # Get sample error (excluding auth noise)
-            sample = engine.query_one(
-                "SELECT agent_id, message FROM agent_logs "
-                "WHERE level = 'error' "
-                "AND message NOT LIKE '%auth/api-key%' "
-                "AND message NOT LIKE '%auth/derive-api-key%' "
-                "AND message NOT LIKE '%create_or_derive_api_creds%' "
-                "ORDER BY created_at DESC LIMIT 1"
-            )
-            sample_msg = f" ({sample['agent_id']}: {sample['message'][:80]})" if sample else ""
-            problems.append(
-                f"{error_count} Fehler in der letzten Stunde{sample_msg}"
-            )
-
-        # --- 4. Active strategies ---
-        strat_row = engine.query_one(
-            "SELECT COUNT(*) as cnt FROM strategies WHERE status = 'active'"
-        )
-        active_strats = int(strat_row["cnt"]) if strat_row else 0
-        if active_strats == 0:
-            problems.append("Keine aktiven Strategien")
-
-        # --- 5. Polymarket API reachable ---
-        try:
-            import httpx
-            funder = config.polymarket_funder
-            if funder:
-                resp = httpx.get(
-                    "https://data-api.polymarket.com/positions",
-                    params={"user": funder},
-                    timeout=10,
-                )
-                if resp.status_code != 200:
-                    problems.append(
-                        f"Polymarket API: Status {resp.status_code}"
-                    )
-            else:
-                problems.append("POLYMARKET_FUNDER nicht konfiguriert")
-        except Exception as e:
-            problems.append(f"Polymarket API nicht erreichbar: {e}")
-
-        # --- 6. OpenRouter API key ---
-        if not config.openrouter_api_key:
-            problems.append("OPENROUTER_API_KEY fehlt")
-
-        # --- 7. Telegram configured ---
-        if not config.telegram_bot_token or not config.alert_telegram_user_id:
-            # Can't alert if Telegram isn't configured, just log
-            logger.warning("Health watchdog: Telegram not configured")
-
-        # --- Report ---
-        if problems:
-            msg = "🚨 <b>Health Watchdog — Probleme erkannt</b>\n\n"
-            for i, p in enumerate(problems, 1):
-                msg += f"{i}. {p}\n"
-            msg += f"\n<i>Geprüft: {datetime.utcnow().strftime('%H:%M UTC')}</i>"
-            alerts.send(msg)
-            logger.warning(f"Health watchdog: {len(problems)} problems found")
-            # Also write to agent_logs for dashboard visibility
-            for p in problems:
-                engine.execute(
-                    "INSERT INTO agent_logs (agent_id, level, message, created_at) "
-                    "VALUES (?, ?, ?, datetime('now'))",
-                    ("health_watchdog", "warn", p),
-                )
-        else:
-            logger.info("Health watchdog: all systems OK")
-
-    except Exception as e:
-        logger.error(f"Health watchdog failed: {e}")
-
-
-def _job_blockchain_indexer(max_chunks: int = 500):
-    """Incremental blockchain trade indexer — fetches new Polymarket trades from Polygon."""
-    try:
-        from services.blockchain_indexer import run_incremental, get_data_stats
-
-        stats_before = get_data_stats()
+        from services.backtester import run_all_backtests
+        logger.info("Starting daily snapshot backtests...")
+        results = run_all_backtests(days=7)
+        profitable = sum(1 for r in results if r.get("total_pnl", 0) > 0)
         logger.info(
-            f"Blockchain indexer starting (cursor: {stats_before.get('cursor_block')}, "
-            f"files: {stats_before.get('total_files')})"
+            f"Daily backtests complete: {len(results)} strategies, "
+            f"{profitable} profitable"
         )
 
-        result = run_incremental(max_chunks=max_chunks)
-
-        if result.get("ok"):
-            trades = result.get("trades_fetched", 0)
-            blocks = result.get("blocks_processed", 0)
-            logger.info(f"Blockchain indexer done: {trades} trades, {blocks} blocks processed")
-        else:
-            logger.error(f"Blockchain indexer failed: {result.get('error')}")
+        # Send summary via telegram if available
+        try:
+            from services.telegram_alerts import get_alerts as _get_alerts_bt
+            alerts = _get_alerts_bt(AppConfig.from_env())
+            lines = ["Daily Backtest Results (7d):"]
+            for r in sorted(results, key=lambda x: x.get("total_pnl", 0), reverse=True):
+                pnl = r.get("total_pnl", 0)
+                wr = r.get("win_rate", 0)
+                trades = r.get("total_trades", 0)
+                emoji = "+" if pnl > 0 else ""
+                lines.append(
+                    f"  {r['strategy_name']}: {emoji}${pnl:.2f} "
+                    f"(WR: {wr:.0%}, {trades} trades)"
+                )
+            alerts.send_message("\n".join(lines))
+        except Exception as e:
+            logger.debug(f"Telegram alert for backtests skipped: {e}")
 
     except Exception as e:
-        logger.error(f"Blockchain indexer job failed: {e}")
+        logger.error(f"Daily backtests failed: {e}", exc_info=True)
 
 
-def _job_strategy_discovery():
-    """Weekly pattern discovery — mine blockchain trades for trading patterns."""
+def _job_new_market_scan(config: AppConfig):
+    """Scan for newly created markets and detect mispricing opportunities."""
     try:
-        from services.strategy_discovery import run_discovery, save_patterns_as_strategies
+        from services.new_market_scanner import run_new_market_scan
+        opportunities = run_new_market_scan(config)
+        if opportunities:
+            logger.info(f"New market scan: {len(opportunities)} opportunities found")
+        else:
+            logger.debug("New market scan: no opportunities")
+    except Exception as e:
+        logger.error(f"New market scan failed: {e}")
 
-        logger.info("Strategy Discovery starting...")
-        result = run_discovery(min_edge=0.03, min_sample=1000)
 
-        if not result.get("ok"):
-            logger.error(f"Strategy Discovery failed: {result.get('error')}")
+# -----------------------------------------------
+# Resolution Sniper Jobs
+# -----------------------------------------------
+
+def _job_weather_sniper(config: AppConfig):
+    """Resolution Sniper: Weather - hourly forecasts for today/tomorrow markets."""
+    try:
+        from services.resolution_sniper import run_weather_sniper
+        count = run_weather_sniper(config)
+        if count > 0:
+            logger.info(f"Weather sniper: {count} snipe suggestions created")
+    except Exception as e:
+        logger.error(f"Weather sniper job failed: {e}")
+
+
+def _job_economic_sniper(config: AppConfig):
+    """Resolution Sniper: Economic data - check for fresh CPI/Fed/jobs releases."""
+    try:
+        from services.resolution_sniper import run_economic_sniper
+        count = run_economic_sniper(config)
+        if count > 0:
+            logger.info(f"Economic sniper: {count} snipe suggestions created")
+    except Exception as e:
+        logger.error(f"Economic sniper job failed: {e}")
+
+
+def _job_sport_sniper(config: AppConfig):
+    """Resolution Sniper: Sport scores - check live scores for finished games."""
+    try:
+        from services.resolution_sniper import run_sport_sniper
+        count = run_sport_sniper(config)
+        if count > 0:
+            logger.info(f"Sport sniper: {count} snipe suggestions created")
+    except Exception as e:
+        logger.error(f"Sport sniper job failed: {e}")
+
+
+def _job_edge_sources(config: AppConfig):
+    """Run all edge sources: crypto (Binance), cross-platform (Manifold), weather ensemble."""
+    try:
+        from services.edge_sources import run_all_edge_sources
+        results = run_all_edge_sources(config)
+        total = sum(results.values())
+        if total > 0:
+            logger.info(f"Edge sources: {total} markets updated | {results}")
+    except Exception as e:
+        logger.error(f"Edge sources job failed: {e}")
+
+
+def _job_arbitrage_scan(config: AppConfig):
+    """Scan for arbitrage opportunities across all three types."""
+    try:
+        import json as _json
+        from services.arbitrage_scanner import ArbitrageScanner
+        from services.telegram_alerts import get_alerts as _get_alerts_bt
+        from db import engine
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        trading_cfg = platform_cfg.get("trading", {})
+        mode = trading_cfg.get("mode", "paper")
+
+        arb_cfg = platform_cfg.get("arbitrage", {})
+        min_abs_profit = arb_cfg.get("min_absolute_profit", 1.00)
+
+        scanner = ArbitrageScanner()
+        try:
+            opportunities = scanner.scan_all(min_profit_usd=min_abs_profit, arb_config=arb_cfg)
+        finally:
+            scanner.close()
+
+        if not opportunities:
+            logger.info("Arbitrage scan: no opportunities found")
             return
 
-        patterns = result.get("patterns", [])
+        alerts = TelegramAlerts(config)
+        actionable = 0
+
+        for opp in opportunities:
+            opp_dict = opp.to_dict()
+
+            # Blocklist check: skip if any market is blocklisted
+            if any(_is_market_blocklisted(m.get("question", "")) for m in opp.markets):
+                logger.info(f"Arb blocklist: skipping {opp.description[:60]}")
+                continue
+
+            # Log all opportunities
+            logger.info(
+                f"Arbitrage [{opp.arb_type}]: {opp.description} "
+                f"(profit=${opp.profit_usd:.2f}, confidence={opp.confidence:.0%})"
+            )
+
+            # Only act on opportunities with guaranteed profit > $0.50
+            if opp.profit_usd >= 0.50 and opp.confidence >= 0.85:
+                actionable += 1
+
+                # Create trade suggestion
+                status = "auto_approved" if mode == "full-auto" else "pending"
+                now = datetime.utcnow().isoformat()
+
+                # Build payload for the trade
+                payload = {
+                    "arb_type": opp.arb_type,
+                    "strategy_id": "strat_arbitrage",
+                    "strategy_name": "Arbitrage Scanner",
+                    "markets": opp.markets,
+                    "profit_usd": opp.profit_usd,
+                    "confidence": opp.confidence,
+                    "description": opp.description,
+                }
+
+                # For YES/NO arb with 2 sides, create one suggestion per side
+                if opp.arb_type == "yes_no" and len(opp.markets) == 2:
+                    for mkt in opp.markets:
+                        trade_payload = {
+                            "market_id": mkt["market_id"],
+                            "market_question": mkt["question"][:100],
+                            "side": mkt["side"],
+                            "price": mkt["price"],
+                            "amount_usd": min(12.50, opp.profit_usd * 10),
+                            "edge": opp.profit_usd / 25.0,
+                            "token_id": mkt.get("token_id", ""),
+                            "strategy_id": "strat_arbitrage",
+                            "strategy_name": "Arbitrage Scanner",
+                            "arb_type": opp.arb_type,
+                            "arb_profit": opp.profit_usd,
+                        }
+
+                        # Dedup check (any status in last 24h)
+                        existing = engine.query_one(
+                            "SELECT id, status FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                            "AND created_at > datetime('now', '-24 hours')",
+                            (mkt["market_id"],),
+                        )
+                        if existing:
+                            logger.info(f"Arb dedup: skip {mkt['market_id']} - suggestion exists (status={existing.get('status', '?')})")
+                            continue
+
+                        # Pre-flight check
+                        pf_ok, pf_reason = _preflight(mkt["market_id"], mkt["side"], trade_payload.get("edge", 0), trade_payload.get("amount_usd", 0))
+                        if not pf_ok:
+                            logger.debug(f"Arb preflight reject: {pf_reason}")
+                            continue
+
+                        engine.execute(
+                            """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                "arbitrage-scanner",
+                                "trade",
+                                f"Arbitrage: {mkt['side']} auf '{mkt['question'][:50]}...'",
+                                opp.description,
+                                _json.dumps(trade_payload),
+                                status,
+                                now,
+                            ),
+                        )
+                else:
+                    # For multi-outcome or other types, create info suggestion
+                    # Dedup: check if any market in this arb was suggested in last 24h
+                    _skip_multi = False
+                    for _m in opp.markets:
+                        _mid = _m.get("market_id", "")
+                        if _mid:
+                            _ex = engine.query_one(
+                                "SELECT id FROM suggestions WHERE json_extract(payload, '$.market_id') = ? "
+                                "AND created_at > datetime('now', '-24 hours')",
+                                (_mid,),
+                            )
+                            if _ex:
+                                logger.info(f"Arb dedup (multi): skip - market {_mid} already suggested")
+                                _skip_multi = True
+                                break
+                    if _skip_multi:
+                        continue
+                    engine.execute(
+                        """INSERT INTO suggestions (agent_id, type, title, description, payload, status, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            "arbitrage-scanner",
+                            "trade",
+                            f"Arbitrage ({opp.arb_type}): ${opp.profit_usd:.2f} Profit",
+                            opp.description,
+                            _json.dumps(payload),
+                            status,
+                            datetime.utcnow().isoformat(),
+                        ),
+                    )
+
+                # Telegram alert removed — alerts only at trade execution in trader.py
+                logger.info(f"Arbitrage suggestion created: {opp.arb_type} ${opp.profit_usd:.2f}")
+
         logger.info(
-            f"Strategy Discovery: {result.get('total_patterns')} found, "
-            f"{result.get('qualified_patterns')} qualified"
+            f"Arbitrage scan: {len(opportunities)} opportunities found, "
+            f"{actionable} actionable (>$0.50 profit)"
         )
 
-        if patterns:
-            created = save_patterns_as_strategies(patterns)
-            logger.info(f"Created {len(created)} new strategies from patterns")
-
-            # Send Telegram alert
-            try:
-                from services.telegram_service import send_alert
-                msg = "Strategy Discovery: {} patterns found\n\n".format(len(patterns))
-                for p in patterns[:5]:
-                    msg += (
-                        "- {}: {:.1%} edge ({:,} trades)\n".format(
-                            p["name"], p["expected_edge"], p["sample_size"]
-                        )
-                    )
-                if len(patterns) > 5:
-                    msg += "\n... and {} more".format(len(patterns) - 5)
-                send_alert(msg)
-            except Exception:
-                pass
-
     except Exception as e:
-        logger.error(f"Strategy Discovery job failed: {e}")
+        logger.error(f"Arbitrage scan failed: {e}")
 
 
-def _job_resolution_updater():
-    """Daily incremental update of resolution data from CLOB API."""
+def _job_health_monitor(config):
+    """Check all strategy heartbeats and alert on issues."""
     try:
-        from scripts.build_resolution_table import run_incremental
+        from services.health_monitor import run_health_monitor
+        from config import load_platform_config
 
-        logger.info("Resolution updater starting...")
-        result = run_incremental()
+        platform_cfg = load_platform_config()
+        report = run_health_monitor(platform_cfg)
 
-        if result.get("ok"):
-            new = result.get("new_resolutions", 0)
-            total = result.get("total_existing", 0)
-            logger.info(f"Resolution updater done: {new} new resolutions (total known: {total})")
-        else:
-            logger.error(f"Resolution updater failed: {result}")
-
+        ok = len(report.get("ok", []))
+        warn = len(report.get("warning", []))
+        crit = len(report.get("critical", []))
+        logger.info(f"Health Monitor: {ok} OK, {warn} warnings, {crit} critical")
     except Exception as e:
-        logger.error(f"Resolution updater job failed: {e}")
+        logger.error(f"Health monitor failed: {e}")
 
 
-def _job_volume_flow_scan(config: AppConfig):
+def _job_live_sports_edge(config):
+    """Scan live games for sports trading edges."""
+    try:
+        from services.live_sports_edge import run_live_sports_edge
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        results = run_live_sports_edge(platform_cfg)
+        if results:
+            logger.info(f"Live Sports: {len(results)} edges found")
+    except Exception as e:
+        logger.error(f"Live sports edge scan failed: {e}")
+
+
+def _job_volume_flow_scan(config):
     """Scan active markets for order book imbalance signals."""
     try:
         from services.volume_flow_signal import run_volume_flow_scan
+        from config import AppConfig
 
         logger.info("Volume Flow scan starting...")
         result = run_volume_flow_scan(config)
@@ -1848,7 +1678,6 @@ def _job_volume_flow_scan(config: AppConfig):
             created = result.get("suggestions_created", 0)
             logger.info(f"Volume Flow scan done: {signals} signals, {created} suggestions created")
 
-            # Telegram alert if signals found
             if created > 0:
                 top = result.get("top_signal")
                 try:
@@ -1862,7 +1691,30 @@ def _job_volume_flow_scan(config: AppConfig):
                 except Exception:
                     pass
         else:
-            logger.warning(f"Volume Flow scan returned no results")
+            logger.warning("Volume Flow scan returned no results")
 
     except Exception as e:
         logger.error(f"Volume Flow scan job failed: {e}")
+
+
+def _job_blockchain_indexer(config):
+    """Run blockchain indexer to fetch recent Polymarket trades from Polygon."""
+    try:
+        from services.blockchain_indexer import run_incremental
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        bi_cfg = platform_cfg.get('scheduler', {}).get('blockchain_indexer', {})
+        max_chunks = bi_cfg.get('max_chunks_per_run', 50000)
+
+        logger.info(f'Blockchain indexer starting (max_chunks={max_chunks})...')
+        result = run_incremental(max_chunks=max_chunks)
+
+        if result.get('status') == 'ok' or result.get('trades_fetched', 0) > 0:
+            trades = result.get('trades_fetched', 0)
+            blocks = result.get('blocks_processed', 0)
+            logger.info(f'Blockchain indexer done: {trades} trades from {blocks} blocks')
+        else:
+            logger.info(f'Blockchain indexer: {result}')
+    except Exception as e:
+        logger.error(f'Blockchain indexer failed: {e}')

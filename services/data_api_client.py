@@ -261,28 +261,33 @@ class DataAPIClient:
     # Composite: Smart Money Score
     # ------------------------------------------------------------------
 
-    def compute_smart_money_score(self, condition_id: str) -> float:
+    def compute_smart_money_score(
+        self,
+        condition_id: str,
+        whale_data: dict | None = None,
+        concentration: float | None = None,
+    ) -> float:
         """Compute a 0-100 smart money score for a market.
 
         Combines:
         - Whale net flow direction (+/- signal)
         - Holder concentration (high = insiders know something)
-        - Open interest magnitude
+
+        Pass pre-computed whale_data and concentration to avoid duplicate API calls.
         """
         score = 50.0  # neutral baseline
 
         # Whale flow
-        whale = self.compute_whale_signals(condition_id)
+        whale = whale_data or self.compute_whale_signals(condition_id)
         buy = whale["whale_buy_count"]
         sell = whale["whale_sell_count"]
         total_whale = buy + sell
         if total_whale > 0:
-            # More buys = bullish, more sells = bearish
             buy_ratio = buy / total_whale
             score += (buy_ratio - 0.5) * 40  # +-20 points max
 
         # Holder concentration
-        conc = self.compute_holder_concentration(condition_id)
+        conc = concentration if concentration is not None else self.compute_holder_concentration(condition_id)
         if conc is not None and conc > 0.5:
             score += 10  # high concentration = conviction
 

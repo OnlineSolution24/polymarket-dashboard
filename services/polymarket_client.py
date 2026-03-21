@@ -54,6 +54,44 @@ class PolymarketService:
                 creds = self._auth_client.create_or_derive_api_creds()
                 self._auth_client.set_api_creds(creds)
                 logger.info("Authenticated Polymarket client initialized")
+                # Monkey-patch get_market_order_amounts to cap TAKER amount to 2 decimals
+                # The API requires taker_amount max 2 decimal precision for market orders
+                # but the library uses round_config.amount (3-6) for both limit and market orders
+                try:
+                    from py_clob_client.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
+                    from py_clob_client.order_builder.helpers import round_down, round_up, round_normal, decimal_places, to_token_decimals
+                    from py_order_utils.model import BUY as UtilsBuy, SELL as UtilsSell
+                    from py_clob_client.order_builder.constants import BUY, SELL
+
+                    _orig = OrderBuilder.get_market_order_amounts
+
+                    def _patched_market_amounts(self_ob, side, amount, price, round_config):
+                        TAKER_MAX = round_config.amount  # Use API-expected precision, not hardcoded 2
+                        raw_price = round_normal(price, round_config.price)
+                        if side == BUY or side == UtilsBuy:
+                            raw_maker = round_down(amount, round_config.size)
+                            raw_taker = raw_maker / raw_price
+                            if decimal_places(raw_taker) > TAKER_MAX:
+                                raw_taker = round_up(raw_taker, TAKER_MAX + 4)
+                                if decimal_places(raw_taker) > TAKER_MAX:
+                                    raw_taker = round_down(raw_taker, TAKER_MAX)
+                            return UtilsBuy, to_token_decimals(raw_maker), to_token_decimals(raw_taker)
+                        elif side == SELL or side == UtilsSell:
+                            raw_maker = round_down(amount, round_config.size)
+                            raw_taker = raw_maker * raw_price
+                            if decimal_places(raw_taker) > TAKER_MAX:
+                                raw_taker = round_up(raw_taker, TAKER_MAX + 4)
+                                if decimal_places(raw_taker) > TAKER_MAX:
+                                    raw_taker = round_down(raw_taker, TAKER_MAX)
+                            return UtilsSell, to_token_decimals(raw_maker), to_token_decimals(raw_taker)
+                        else:
+                            return _orig(self_ob, side, amount, price, round_config)
+
+                    OrderBuilder.get_market_order_amounts = _patched_market_amounts
+                    logger.info("Patched get_market_order_amounts: taker amount capped to 2 decimals")
+                except Exception as e:
+                    logger.warning(f"Could not patch market order builder: {e}")
+
         except ImportError:
             logger.warning("py-clob-client not installed. Using mock data.")
         except Exception as e:
@@ -163,7 +201,7 @@ class PolymarketService:
                     "volume": volume,
                     "liquidity": liquidity,
                     "end_date": item.get("endDate", item.get("end_date")),
-                    "category": item.get("groupItemTitle", item.get("category", "")),
+                    "category": self._classify_market_category(item),
                     # Gamma-specific fields
                     "yes_token_id": yes_token,
                     "no_token_id": no_token,
@@ -184,6 +222,32 @@ class PolymarketService:
         except Exception as e:
             logger.error(f"Gamma API fetch failed: {e}")
             return []
+
+    def _classify_market_category(self, item: dict) -> str:
+        """Derive high-level category from Gamma API market item."""
+        try:
+            from services.diversification import classify_category
+            # Extract event tags if available
+            event_tags = []
+            events = item.get("events", [])
+            if events and isinstance(events, list):
+                for evt in events:
+                    tags = evt.get("tags", [])
+                    if isinstance(tags, list):
+                        event_tags.extend(tags)
+            slug = item.get("slug", "")
+            # Also use event slug for better matching
+            if events and isinstance(events, list) and events:
+                evt_slug = events[0].get("slug", "")
+                if evt_slug:
+                    slug = evt_slug + " " + slug
+            return classify_category(
+                slug=slug,
+                question=item.get("question", ""),
+                event_tags=event_tags,
+            )
+        except Exception:
+            return item.get("groupItemTitle", item.get("category", ""))
 
     def fetch_market_events(self, limit: int = 20) -> list[dict]:
         """Fetch active events from Gamma Events API for event grouping."""
@@ -206,22 +270,43 @@ class PolymarketService:
     # Market Resolution (Settlement)
     # ------------------------------------------------------------------
 
-    def get_market_resolution(self, condition_id: str) -> dict | None:
+    def get_market_resolution(self, condition_id: str, token_id: str = "") -> dict | None:
         """
         Check if a market has been resolved via Gamma API.
         Returns dict with 'resolved', 'winning_side', 'outcome_prices' or None on error.
+        Strategy: Query by clob_token_ids (token_id) first (reliable), fallback to condition_id.
         """
         try:
-            response = self._gamma.get("/markets", params={
-                "condition_id": condition_id,
-                "limit": 1,
-            })
-            response.raise_for_status()
-            results = response.json()
-            if not results:
-                return None
+            market = None
 
-            market = results[0] if isinstance(results, list) else results
+            # Strategy 1: Query by token_id (most reliable)
+            if token_id:
+                response = self._gamma.get("/markets", params={
+                    "clob_token_ids": token_id,
+                    "limit": 1,
+                })
+                response.raise_for_status()
+                results = response.json()
+                if results:
+                    market = results[0] if isinstance(results, list) else results
+                    logger.debug(f"Gamma resolution: found market by token_id")
+
+            # Strategy 2: Fallback to condition_id
+            if not market:
+                response = self._gamma.get("/markets", params={
+                    "condition_id": condition_id,
+                    "limit": 1,
+                })
+                response.raise_for_status()
+                results = response.json()
+                if not results:
+                    return None
+                market = results[0] if isinstance(results, list) else results
+                # Verify the match is correct (condition_id should match)
+                gamma_cid = market.get("conditionId", "")
+                if gamma_cid and gamma_cid.lower() != condition_id.lower():
+                    logger.warning(f"Gamma condition_id mismatch: asked={condition_id[:20]}... got={gamma_cid[:20]}...")
+                    return None
             closed = market.get("closed", False)
             resolution_status = market.get("umaResolutionStatus", "")
 
@@ -271,7 +356,10 @@ class PolymarketService:
         try:
             return self._public_client.get_order_book(token_id)
         except Exception as e:
-            logger.error(f"Error fetching order book: {e}")
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.debug(f"No orderbook for token (404): {e}")
+            else:
+                logger.warning(f"Error fetching order book: {e}")
             return {"bids": [], "asks": []}
 
     def get_order_book_analysis(self, token_id: str) -> dict:
@@ -295,6 +383,8 @@ class PolymarketService:
         def _get(obj, key, default=0):
             return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
+        bids = sorted(bids, key=lambda b: float(_get(b, "price", 0)), reverse=True)
+        asks = sorted(asks, key=lambda a: float(_get(a, "price", 0)))
         best_bid = float(_get(bids[0], "price", 0))
         best_ask = float(_get(asks[0], "price", 0))
         spread = best_ask - best_bid if best_ask > best_bid else 0
@@ -332,8 +422,6 @@ class PolymarketService:
 
             # Always BUY the specific outcome token
             # (buying YES token = betting YES, buying NO token = betting NO)
-            # CLOB API: taker amount max 2 decimals, maker amount max 4 decimals
-            amount = round(amount, 2)
             # Round to 2 decimals (Polymarket API requirement for taker amounts)
             amount = round(amount, 2)
             order_args = MarketOrderArgs(
@@ -342,8 +430,9 @@ class PolymarketService:
                 side=BUY,
             )
             order = self._auth_client.create_market_order(order_args)
-            result = self._auth_client.post_order(order)
-            logger.info(f"Order placed: BUY ${amount} on token {token_id[:20]}... (side={side})")
+            from py_clob_client.clob_types import OrderType
+            result = self._auth_client.post_order(order, orderType=OrderType.FOK)
+            logger.info(f"Order placed: BUY ${amount} on token {token_id[:20]}... (side={side}), response: {str(result)[:200]}")
             return {"ok": True, "result": result}
 
         except Exception as e:
@@ -362,8 +451,6 @@ class PolymarketService:
             from py_clob_client.order_builder.constants import SELL
             from py_clob_client.clob_types import MarketOrderArgs
 
-            # CLOB API: taker amount max 2 decimals
-            amount = round(amount, 2)
             # Round to 2 decimals (Polymarket API requirement for taker amounts)
             amount = round(amount, 2)
             order_args = MarketOrderArgs(
@@ -372,20 +459,27 @@ class PolymarketService:
                 side=SELL,
             )
             order = self._auth_client.create_market_order(order_args)
-            result = self._auth_client.post_order(order)
+            from py_clob_client.clob_types import OrderType
+            result = self._auth_client.post_order(order, orderType=OrderType.FOK)
             logger.info(f"Sell order response: {result}")
 
             # Check if order was actually matched/filled
             if isinstance(result, dict):
                 status = result.get("status", "").lower()
-                if status in ("matched", "filled", "delayed"):
+                success = result.get("success", False)
+                if status in ("matched", "filled") and success:
                     return {"ok": True, "result": result, "filled": True}
-                elif status in ("unmatched", "live"):
-                    logger.warn(f"Sell order placed but NOT filled (status={status}). No buyer available.")
+                elif status == "delayed":
+                    # Delayed orders often fill within seconds — mark as pending verification
+                    logger.info(f"Sell order delayed, needs on-chain verification: {result}")
+                    return {"ok": True, "result": result, "filled": False, "delayed": True}
+                else:
+                    logger.warning(f"Sell order NOT filled (status={status}, success={success}): {result}")
                     return {"ok": False, "error": f"Order not filled: {status}", "result": result}
 
-            # Fallback: assume ok if we got a non-error response
-            return {"ok": True, "result": result, "filled": True}
+            # Non-dict response = unexpected, treat as failure
+            logger.warning(f"Sell order unexpected response type ({type(result).__name__}): {result}")
+            return {"ok": False, "error": f"Unexpected response: {result}"}
 
         except Exception as e:
             logger.error(f"Sell order failed: {e}")

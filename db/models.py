@@ -3,7 +3,7 @@ SQLite table definitions (13 tables).
 Each table has a CREATE TABLE statement and helper CRUD functions.
 """
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 TABLES = {
     "schema_version": """
@@ -63,6 +63,7 @@ TABLES = {
             open_interest       REAL,
             oi_change_24h       REAL,
             smart_money_score   REAL,
+            volume_change_24h   REAL,
             description     TEXT,
             last_updated    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )

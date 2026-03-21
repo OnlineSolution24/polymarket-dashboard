@@ -42,9 +42,7 @@ class FlowSignal:
 # Conservative estimates (65% of historical) since order book depth is a proxy.
 FLOW_RATIO_TIERS = [
     # (min_ratio, edge, amount_usd)
-    # Doubled from v1 after Kelly backtest v2 validated on 133K real trades:
-    #   81.5% win rate, +$33K PnL at $10 fixed, only 10.4% max drawdown
-    (5.0, 0.30, 12.0),  # 5x+ → high confidence
+    (5.0, 0.30, 12.0),   # 5x+ → high confidence
     (3.0, 0.18, 8.0),   # 3-5x → medium confidence
     (2.0, 0.08, 4.0),   # 2-3x → low confidence
 ]
@@ -58,7 +56,7 @@ def estimate_edge_from_ratio(ratio: float) -> float:
     return 0.0
 
 
-def get_amount_for_ratio(ratio: float, default: float = 2.0) -> float:
+def get_amount_for_ratio(ratio: float, default: float = 4.0) -> float:
     """Tiered position sizing — stronger signal = larger bet."""
     for threshold, _, amount in FLOW_RATIO_TIERS:
         if ratio >= threshold:
@@ -258,7 +256,8 @@ def create_suggestions_from_signals(signals: list[FlowSignal]) -> int:
             existing = engine.execute(
                 """SELECT COUNT(*) FROM suggestions
                    WHERE json_extract(payload, '$.market_id') = ?
-                   AND status IN ('pending', 'approved')""",
+                   AND status IN ('pending', 'approved', 'auto_approved', 'failed', 'executed')
+                   AND created_at > datetime('now', '-24 hours')""",
                 (signal.condition_id,),
             ).fetchone()
 

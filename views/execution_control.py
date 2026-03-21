@@ -28,10 +28,15 @@ def render():
     equity_curve = perf.get("equity_curve", [])
     total_closed = len(perf.get("closed_markets", []))
 
-    # Calculated values
-    total_pnl = unrealized_pnl + realized_pnl
-    portfolio_total = total_deposited + total_pnl
-    cash_available = max(portfolio_total - positions_value, 0)
+    # Real cash balance from Polygon blockchain (USDC.e)
+    real_cash = perf.get("cash_balance")
+    if real_cash is not None:
+        cash_available = real_cash
+        portfolio_total = positions_value + real_cash
+    else:
+        cash_available = max(total_deposited - positions_cost + realized_pnl, 0)
+        portfolio_total = positions_value + cash_available
+    total_pnl = portfolio_total - total_deposited
     total_pnl_pct = (total_pnl / total_deposited * 100) if total_deposited > 0 else 0
     wr = (wins / total_closed * 100) if total_closed > 0 else 0
 
@@ -43,66 +48,64 @@ def render():
     # ══════════════════════════════════════════════════════════════════
     c1, c2, c3, c4 = st.columns(4)
 
-    _dep_str = f" (${total_deposited:,.0f} eingezahlt)" if total_deposited else ""
-    _today_color = "green" if today_pnl >= 0 else "red"
-    _sign = "+" if today_pnl >= 0 else ""
-    _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0
-    _pnl_color = "green" if total_pnl >= 0 else "red"
-    _u_color = "green" if unrealized_pnl >= 0 else "red"
-    _r_color = "green" if realized_pnl >= 0 else "red"
-
+    # --- Card 1: Portfolio ---
     with c1:
         with st.container(border=True):
-            st.caption(f"Portfolio{_dep_str}")
+            st.caption(f"Portfolio (${total_deposited:,.0f} eingezahlt)")
             st.markdown(f"### ${portfolio_total:,.2f}")
-            st.markdown(f"Verfügbar: **${cash_available:,.2f}**")
-            st.markdown(f":{_today_color}[{_sign}${today_pnl:.2f} ({_sign}{_today_pct:.1f}%) heute]")
+            st.markdown(f"Bargeld: **${cash_available:,.2f}**")
+            _today_color = "green" if today_pnl >= 0 else "red"
+            _sign = "+" if today_pnl >= 0 else ""
+            _today_pct = (today_pnl / portfolio_total * 100) if portfolio_total > 0 else 0
+            st.markdown(f":{_today_color}[{_sign}${today_pnl:.2f} ({_sign}{_today_pct:.2f}%) letzter Tag]")
 
+    # --- Card 2: Gewinn / Verlust + Equity Curve ---
     with c2:
         with st.container(border=True):
+            _pnl_color = "green" if total_pnl >= 0 else "red"
             st.caption("Gewinn/Verlust")
+            period = st.segmented_control(
+                "eq", ["1D", "1W", "1M", "All"],
+                default="All", key="eq_period",
+                label_visibility="collapsed",
+            ) or "All"
             st.markdown(f"### :{_pnl_color}[${total_pnl:+,.2f}]")
             st.markdown(f":{_pnl_color}[{total_pnl_pct:+.1f}%] Gesamt")
-            st.markdown(f"W/L: **{wins}/{losses}** | WR: **{wr:.0f}%**")
+            if equity_curve:
+                df_eq = _filter_equity_curve(equity_curve, period)
+                if not df_eq.empty:
+                    _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
+                    _build_equity_chart(df_eq, _chart_color)
 
+    # --- Card 3: Offene Positionen ---
     with c3:
         with st.container(border=True):
-            st.caption(f"Offene Positionen ({open_markets})")
+            st.caption("Offene Positionen")
             st.markdown(f"### ${positions_value:,.2f}")
             st.markdown(f"Einsatz: **${positions_cost:,.2f}**")
-            st.markdown(f"Unrealisiert: :{_u_color}[${unrealized_pnl:+,.2f}]")
+            _u_color = "green" if unrealized_pnl >= 0 else "red"
+            st.markdown(f"Unrealisiert: **:{_u_color}[${unrealized_pnl:+,.2f}]**")
+            st.caption(f"{open_markets} Maerkte offen")
 
+    # --- Card 4: Realisierter PnL ---
     with c4:
         with st.container(border=True):
             st.caption("Realisiert")
             _r_color = "green" if realized_pnl >= 0 else "red"
             st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
-            _m_label = "Markt" if total_closed == 1 else "Märkte"
-            st.markdown(f"{total_closed} {_m_label} abgeschlossen")
-            st.markdown(f"W/L: **{wins}/{losses}**")
-
-    # Equity curve (compact, below cards)
-    if equity_curve:
-        period = st.segmented_control(
-            "eq", ["1D", "1W", "1M", "All"],
-            default="All", key="eq_period",
-            label_visibility="collapsed",
-        ) or "All"
-        df_eq = _filter_equity_curve(equity_curve, period)
-        if not df_eq.empty:
-            _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
-            _build_equity_chart(df_eq, _chart_color)
+            st.markdown(f"W/L: **{wins}/{losses}** | WR: **{wr:.0f}%**")
+            st.caption(f"{open_markets} Maerkte offen")
 
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
     # 2. OFFENE POSITIONEN (Live from Polymarket API)
     # ══════════════════════════════════════════════════════════════════
-    st.subheader("Offene Positionen (Live)")
+    st.subheader(f"Positionen ({open_markets})")
 
     live_positions = perf.get("live_positions", [])
     if live_positions:
-        # Auto-import: register any untracked on-chain positions in DB
+        # Auto-import untracked on-chain positions
         imported_count = 0
         for pos in live_positions:
             if not pos.get("trade_id") and pos.get("market_id"):
@@ -118,28 +121,105 @@ def render():
                     pos["trade_id"] = result["trade_id"]
                     imported_count += 1
         if imported_count:
-            st.info(f"{imported_count} Position(en) automatisch importiert und werden jetzt vom Bot verwaltet.")
+            st.info(f"{imported_count} Position(en) automatisch importiert.")
 
-        # Compact table: Markt | Einstieg→Aktuell | Shares | Wert | PnL | Sell
-        _W = [3.5, 1.2, 0.6, 0.6, 0.8, 0.4]
+        # --- Filter & Sort controls ---
+        fc1, fc2, fc3 = st.columns([3, 1.5, 1.5])
+        with fc1:
+            search = st.text_input("Suche", placeholder="Markt filtern...", key="pos_search", label_visibility="collapsed")
+        with fc2:
+            sort_by = st.selectbox("Sortieren", ["Gewinn %", "Gewinn $", "Wert", "Name"], key="pos_sort", label_visibility="collapsed")
+        with fc3:
+            filter_pnl = st.selectbox("Filter", ["Alle", "Im Gewinn", "Im Verlust", "Einlösbar"], key="pos_filter", label_visibility="collapsed")
+
+        # Apply filters
+        filtered = live_positions
+        if search:
+            filtered = [p for p in filtered if search.lower() in p.get("title", "").lower()]
+        if filter_pnl == "Im Gewinn":
+            filtered = [p for p in filtered if p.get("pnl", 0) > 0]
+        elif filter_pnl == "Im Verlust":
+            filtered = [p for p in filtered if p.get("pnl", 0) < 0]
+        elif filter_pnl == "Einlösbar":
+            filtered = [p for p in filtered if p.get("redeemable")]
+
+        # Apply sort
+        if sort_by == "Gewinn %":
+            filtered.sort(key=lambda p: p.get("pnl_pct", 0), reverse=True)
+        elif sort_by == "Gewinn $":
+            filtered.sort(key=lambda p: p.get("pnl", 0), reverse=True)
+        elif sort_by == "Wert":
+            filtered.sort(key=lambda p: p.get("value", 0), reverse=True)
+        elif sort_by == "Name":
+            filtered.sort(key=lambda p: p.get("title", ""))
+
+        # --- Header ---
+        _W = [3.2, 1.2, 0.8, 0.8, 1.0, 0.5]
         hdr = st.columns(_W)
-        for col, lbl in zip(hdr, ["Markt", "Einstieg → Aktuell", "Shares", "Wert", "PnL", ""]):
-            col.markdown(f"<span style='color:#5A6478;font-size:0.75rem'>{lbl}</span>", unsafe_allow_html=True)
+        for col, lbl in zip(hdr, ["MARKT", "DURCHSCHN. / JETZT", "WETTE", "WERT", "GEWINN & VERLUST", ""]):
+            col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
 
-        for i, pos in enumerate(live_positions):
+        # --- Position rows ---
+        for i, pos in enumerate(filtered):
+            pnl = pos.get("pnl", 0)
+            pnl_pct = pos.get("pnl_pct", 0)
+            avg_price = pos.get("avg_price", 0)
+            cur_price = pos.get("cur_price", 0)
+            redeemable = pos.get("redeemable", False)
+
+            # Price in cents
+            avg_cents = avg_price * 100
+            cur_cents = cur_price * 100
+            price_color = "#00c853" if cur_price > avg_price else "#ff1744" if cur_price < avg_price else "#ccc"
+            pnl_color = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
+            sign = "+" if pnl >= 0 else ""
+
             row = st.columns(_W)
-            pnl, pnl_pct = pos["pnl"], pos["pnl_pct"]
-            pc = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
 
-            row[0].markdown(f"<span style='font-size:0.82rem'>{pos['title'][:42]}</span>", unsafe_allow_html=True)
-            row[1].markdown(f"<span style='font-size:0.82rem'>${pos['avg_price']:.4f} → ${pos['cur_price']:.4f}</span>", unsafe_allow_html=True)
-            row[2].markdown(f"<span style='font-size:0.82rem'>{pos['shares']:,.0f}</span>", unsafe_allow_html=True)
-            row[3].markdown(f"<span style='font-size:0.82rem'>${pos['value']:.2f}</span>", unsafe_allow_html=True)
-            row[4].markdown(f"<span style='font-size:0.82rem;color:{pc}'>${pnl:+.2f} ({pnl_pct:+.1f}%)</span>", unsafe_allow_html=True)
+            # Col 1: Market name + outcome badge
+            outcome = pos.get("outcome", "YES")
+            badge_color = "#00c853" if outcome == "YES" else "#ff1744"
+            row[0].markdown(
+                f"<div style='font-size:1rem;font-weight:500;line-height:1.3'>{pos['title'][:55]}</div>"
+                f"<span style='background:{badge_color};color:#fff;padding:1px 8px;border-radius:10px;font-size:0.75rem'>"
+                f"{outcome} {cur_cents:.1f}c</span>"
+                f"<span style='color:#8892A0;font-size:0.8rem;margin-left:6px'>{pos['shares']:,.1f} Anteile</span>",
+                unsafe_allow_html=True,
+            )
 
+            # Col 2: Price movement
+            row[1].markdown(
+                f"<div style='font-size:0.95rem'>"
+                f"<span style='color:#8892A0'>{avg_cents:.1f}c</span>"
+                f" <span style='color:{price_color}'>&#8594; {cur_cents:.1f}c</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            # Col 3: Bet amount (cost)
+            row[2].markdown(f"<div style='font-size:0.95rem'>${pos.get('cost', 0):.2f}</div>", unsafe_allow_html=True)
+
+            # Col 4: Current value
+            row[3].markdown(f"<div style='font-size:0.95rem'>${pos.get('value', 0):.2f}</div>", unsafe_allow_html=True)
+
+            # Col 5: PnL
+            if redeemable:
+                row[4].markdown(
+                    f"<div style='font-size:0.95rem;color:#00c853;font-weight:600'>GEWONNEN</div>"
+                    f"<div style='color:#00c853;font-size:0.85rem'>${pos.get('value', 0):.2f}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                row[4].markdown(
+                    f"<div style='font-size:0.95rem;color:{pnl_color};font-weight:500'>"
+                    f"{sign}${pnl:.2f} ({sign}{pnl_pct:.1f}%)</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Col 6: Sell button
             trade_id = pos.get("trade_id")
             if trade_id:
-                if row[5].button("✕", key=f"sell_{trade_id}_{i}", help="Position verkaufen"):
+                btn_label = "Einlösen" if redeemable else "Verkaufen"
+                if row[5].button(btn_label, key=f"sell_{trade_id}_{i}", type="primary"):
                     with st.spinner("Verkaufe..."):
                         res = client.manual_cashout(trade_id)
                     if res and res.get("ok"):
@@ -148,10 +228,21 @@ def render():
                     else:
                         st.error(f"Fehler: {res.get('error', '?') if res else '?'}")
 
-        st.caption(
-            f"**Gesamt:** Einsatz ${positions_cost:.2f} | "
-            f"Wert ${positions_value:.2f} | "
-            f"PnL ${unrealized_pnl:+.2f}"
+            # Separator between rows
+            if i < len(filtered) - 1:
+                st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
+
+        # Summary bar
+        _sum_color = "#00c853" if unrealized_pnl >= 0 else "#ff1744"
+        st.markdown(
+            f"<div style='background:#111827;padding:10px 16px;border-radius:8px;margin-top:12px;"
+            f"font-size:0.95rem;color:#8892A0'>"
+            f"<b>{len(filtered)}</b> Positionen | "
+            f"Einsatz <b>${positions_cost:.2f}</b> | "
+            f"Wert <b>${positions_value:.2f}</b> | "
+            f"PnL <span style='color:{_sum_color}'>"
+            f"<b>${unrealized_pnl:+.2f}</b></span></div>",
+            unsafe_allow_html=True,
         )
     else:
         st.caption("Keine offenen Positionen.")
@@ -161,46 +252,49 @@ def render():
     # ══════════════════════════════════════════════════════════════════
     # 3. ABGESCHLOSSENE MÄRKTE
     # ══════════════════════════════════════════════════════════════════
-    st.subheader("Abgeschlossene Märkte")
-
     closed_markets = perf.get("closed_markets", [])
+    st.subheader(f"Abgeschlossene Märkte ({len(closed_markets)})")
 
     if closed_markets:
-        df_closed = pd.DataFrame(closed_markets)
-        display_cols = {}
-        if "name" in df_closed.columns:
-            display_cols["name"] = "Markt"
-        if "result" in df_closed.columns:
-            display_cols["result"] = "Ergebnis"
-        if "pnl" in df_closed.columns:
-            display_cols["pnl"] = "PnL ($)"
-        if "trade_count" in df_closed.columns:
-            display_cols["trade_count"] = "Trades"
-        df_closed = df_closed.rename(columns=display_cols)
-        if "Ergebnis" in df_closed.columns:
-            df_closed["Ergebnis"] = df_closed["Ergebnis"].str.upper()
-        show_cols = [c for c in ["Markt", "Ergebnis", "PnL ($)", "Trades"] if c in df_closed.columns]
-        st.dataframe(df_closed[show_cols], use_container_width=True, hide_index=True)
+        # Sort by close date (newest first)
+        closed_markets.sort(key=lambda m: m.get("closed_at", ""), reverse=True)
+
+        # --- Header ---
+        _CW = [3.5, 1.2, 1.2]
+        ch = st.columns(_CW)
+        for col, lbl in zip(ch, ["MARKT", "ABGESCHLOSSEN", "NETTO PNL"]):
+            col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
+
+        for j, m in enumerate(closed_markets):
+            cr = st.columns(_CW)
+            m_pnl = m.get("pnl", 0)
+            result_str = m.get("result", "").upper()
+            result_color = "#00c853" if result_str == "WIN" else "#ff1744"
+            pnl_c = "#00c853" if m_pnl > 0 else "#ff1744" if m_pnl < 0 else "#888"
+            closed_date = m.get("closed_at", "")[:10] if m.get("closed_at") else "-"
+
+            # Col 1: Market name + result badge
+            cr[0].markdown(
+                f"<div style='font-size:1rem;font-weight:500;line-height:1.3'>{m.get('name', '?')[:60]}</div>"
+                f"<span style='background:{result_color};color:#fff;padding:1px 8px;border-radius:10px;"
+                f"font-size:0.75rem'>{result_str}</span>",
+                unsafe_allow_html=True,
+            )
+
+            # Col 2: Close date
+            cr[1].markdown(f"<div style='font-size:0.95rem;color:#8892A0'>{closed_date}</div>", unsafe_allow_html=True)
+
+            # Col 3: Net PnL
+            sign = "+" if m_pnl >= 0 else ""
+            cr[2].markdown(
+                f"<div style='font-size:1rem;font-weight:600;color:{pnl_c}'>{sign}${m_pnl:.2f}</div>",
+                unsafe_allow_html=True,
+            )
+
+            if j < len(closed_markets) - 1:
+                st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
     else:
         st.caption("Noch keine abgeschlossenen Märkte.")
-
-    _open_label = "Markt" if open_markets == 1 else "Märkte"
-    st.caption(f"{open_markets} {_open_label} noch offen")
-
-    st.divider()
-
-    # ══════════════════════════════════════════════════════════════════
-    # 4. LETZTE AKTIVITÄTEN
-    # ══════════════════════════════════════════════════════════════════
-    st.subheader("Letzte Aktivität")
-    recent_logs = client.get_logs(limit=10)
-    if recent_logs:
-        for log in recent_logs:
-            level_icon = {"info": "ℹ️", "warn": "⚠️", "error": "❌", "debug": "🔍"}.get(log.get("level", ""), "📝")
-            ts = (log.get("created_at") or "")[:16]
-            st.caption(f"{level_icon} `{ts}` **{log.get('agent_id', 'system')}**: {log.get('message', '')}")
-    else:
-        st.caption("Noch keine Agent-Aktivitäten.")
 
     st.divider()
 

@@ -11,7 +11,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      - bot-data:/app/data
+      - /opt/polymarket-dashboard/data/blockchain:/app/data/blockchain
       - ./platform_config.yaml:/app/platform_config.yaml
       - ./agent_configs:/app/agent_configs
     networks:
@@ -21,6 +22,9 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
+
+volumes:
+  bot-data:
 
 networks:
   bot-net:
