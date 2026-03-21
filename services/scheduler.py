@@ -1050,7 +1050,7 @@ def _job_weather_edge_analysis(config: AppConfig):
             price = r["yes_price"] if side == "YES" else (1 - r["yes_price"])
 
             # Max entry price check - skip if price too high (no upside)
-            max_entry = ws_config.get("max_entry_price", 0.93)
+            max_entry = trading_cfg.get("max_entry_price", 0.93)
             if price > max_entry:
                 logger.debug(f"Weather: skip {market_id[:30]} - price {price:.3f} > max {max_entry}")
                 continue
@@ -1399,8 +1399,8 @@ def _job_daily_backtests():
 
         # Send summary via telegram if available
         try:
-            from services.telegram_alerts import TelegramAlerts
-            alerts = TelegramAlerts()
+            from services.telegram_alerts import get_alerts as _get_alerts_bt
+            alerts = _get_alerts_bt(AppConfig.from_env())
             lines = ["Daily Backtest Results (7d):"]
             for r in sorted(results, key=lambda x: x.get("total_pnl", 0), reverse=True):
                 pnl = r.get("total_pnl", 0)
@@ -1486,7 +1486,7 @@ def _job_arbitrage_scan(config: AppConfig):
     try:
         import json as _json
         from services.arbitrage_scanner import ArbitrageScanner
-        from services.telegram_alerts import TelegramAlerts
+        from services.telegram_alerts import get_alerts as _get_alerts_bt
         from db import engine
         from config import load_platform_config
 

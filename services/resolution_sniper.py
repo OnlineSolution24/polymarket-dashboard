@@ -84,6 +84,11 @@ def _create_sniper_suggestion(engine, config, market_id: str, question: str,
         return False
 
     amount = _calculate_amount(confidence, edge, capital, max_pct)
+
+    # Weather trades: cap at  (lower confidence than settlement data)
+    if sniper_type == 'weather':
+        amount = min(amount, 5.0)
+
     status = "auto_approved" if mode == "full-auto" else "pending"
 
     payload = {
