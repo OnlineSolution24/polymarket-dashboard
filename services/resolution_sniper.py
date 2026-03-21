@@ -114,21 +114,6 @@ def _create_sniper_suggestion(engine, config, market_id: str, question: str,
         ),
     )
 
-    # Telegram alert
-    try:
-        alerts = get_alerts(config)
-        alerts.send(
-            f"\xf0\x9f\x8e\xaf <b>Resolution Snipe</b>\n"
-            f"Markt: {question[:80]}\n"
-            f"Seite: {side} @ {price:.2f}\n"
-            f"Confidence: {confidence:.0%} | Edge: {edge:+.1%}\n"
-            f"Quelle: {data_source}\n"
-            f"Detail: {detail[:120]}\n"
-            f"Betrag: ${amount:.2f} | Modus: {mode}"
-        )
-    except Exception as e:
-        logger.warning(f"Sniper telegram alert failed: {e}")
-
     logger.info(f"Resolution snipe created: {side} {question[:60]} conf={confidence:.0%} edge={edge:+.1%}")
     return True
 

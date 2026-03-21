@@ -579,10 +579,28 @@ class PositionManager:
                 # Only close if > 2 hours old
                 try:
                     if (datetime.utcnow() - created).total_seconds() > 7200:
+                        amount_usd = float(trade['amount_usd'] or 0)
+
                         engine.execute(
                             "UPDATE trades SET status = 'closed', result = 'sold_external' WHERE id = ?",
                             (trade["id"],))
                         logger.info(f"Closed trade {trade['id']} - position gone from chain (sold externally)")
+
+                        # Telegram alert
+                        try:
+                            market = engine.query_one('SELECT question FROM markets WHERE id = ?', (market_id,))
+                            q = html.escape((market['question'] if market else '?')[:70])
+                            self.alerts.send(
+                                f"📤 <b>Position geschlossen (extern)</b>
+"
+                                f"Markt: {q}
+"
+                                f"Seite: {trade['side']} | Einsatz: ${amount_usd:.2f}
+"
+                                f"<i>Position nicht mehr on-chain. Bitte Gewinn/Verlust pruefen.</i>"
+                            )
+                        except Exception:
+                            pass
                 except:
                     pass
 

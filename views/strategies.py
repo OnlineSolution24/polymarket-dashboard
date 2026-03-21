@@ -351,7 +351,7 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
             cashout_min_usd = st.number_input(
                 "Cashout ab Profit $ (Minimum)",
                 value=float(trading_cfg.get("cashout", {}).get("min_profit_usd", 0.50)),
-                min_value=0.10, max_value=50.0, step=0.10,
+                min_value=0.01, max_value=50.0, step=0.01,
                 key=f"gc_cashout_usd_{sid}",
                 help="Zusaetzliche Bedingung: Mindestprofit in Dollar",
             )

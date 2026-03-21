@@ -180,6 +180,16 @@ def start_scheduler(config: AppConfig) -> None:
             logger.info(f"Scheduled: pattern_scanner daily at {pattern_hour}:00 UTC")
             # Settlement: handled by PositionManager (no scheduler job)
 
+            # Blockchain indexer (fetch trades from Polygon chain)
+            bi_cfg = sched_cfg.get("blockchain_indexer", {})
+            if bi_cfg.get("enabled", False):
+                bi_hours = bi_cfg.get("interval_hours", 6)
+                _scheduler.add_job(
+                    _job_blockchain_indexer, "interval", hours=bi_hours,
+                    id="blockchain_indexer", replace_existing=True, args=[config],
+                )
+                logger.info(f"Scheduled: blockchain_indexer every {bi_hours}h")
+
 
 
 
@@ -200,7 +210,7 @@ def start_scheduler(config: AppConfig) -> None:
             logger.info("Scheduled: expire_old_suggestions every 1h")
 
             # Weather edge analysis (every 30 min)
-            # DISABLED: weather_edge (zero results, unnecessary load)
+            scheduler.add_job(_job_weather_edge_analysis, "interval", minutes=30, id="weather_edge")
 
             # Resolution Sniper: Weather (every 15 min - precise hourly forecasts)
             _scheduler.add_job(
@@ -263,7 +273,17 @@ def start_scheduler(config: AppConfig) -> None:
             logger.info("Scheduled: health_monitor every 2h")
 
             # Live Sports Edge (every 5 min during games)
-            # DISABLED: live_sports_edge (zero results, unnecessary load)
+            scheduler.add_job(_job_live_sports_edge, "interval", minutes=10, id="live_sports_edge")
+
+            # Volume Flow Signal (live order book imbalance scanner)
+            vf_cfg = sched_cfg.get("volume_flow", {})
+            if vf_cfg.get("enabled", False):
+                vf_interval = vf_cfg.get("interval_minutes", 30)
+                _scheduler.add_job(
+                    _job_volume_flow_scan, "interval", minutes=vf_interval,
+                    id="volume_flow", replace_existing=True, args=[config],
+                )
+                logger.info(f"Scheduled: volume_flow every {vf_interval}min")
 
             _scheduler.start()
             logger.info("Background scheduler started with all jobs")
@@ -1642,3 +1662,59 @@ def _job_live_sports_edge(config):
             logger.info(f"Live Sports: {len(results)} edges found")
     except Exception as e:
         logger.error(f"Live sports edge scan failed: {e}")
+
+
+def _job_volume_flow_scan(config):
+    """Scan active markets for order book imbalance signals."""
+    try:
+        from services.volume_flow_signal import run_volume_flow_scan
+        from config import AppConfig
+
+        logger.info("Volume Flow scan starting...")
+        result = run_volume_flow_scan(config)
+
+        if result.get("ok"):
+            signals = result.get("signals_found", 0)
+            created = result.get("suggestions_created", 0)
+            logger.info(f"Volume Flow scan done: {signals} signals, {created} suggestions created")
+
+            if created > 0:
+                top = result.get("top_signal")
+                try:
+                    from services.telegram_alerts import send_alert
+                    msg = (
+                        f"📊 Volume Flow: {created} neue Signale\n"
+                        f"Top: {top['side']} auf '{top['market'][:60]}'\n"
+                        f"Flow Ratio: {top['ratio']:.1f}x | Edge: {top['edge']:+.0%}"
+                    ) if top else f"📊 Volume Flow: {created} Signale erstellt"
+                    send_alert(msg)
+                except Exception:
+                    pass
+        else:
+            logger.warning("Volume Flow scan returned no results")
+
+    except Exception as e:
+        logger.error(f"Volume Flow scan job failed: {e}")
+
+
+def _job_blockchain_indexer(config):
+    """Run blockchain indexer to fetch recent Polymarket trades from Polygon."""
+    try:
+        from services.blockchain_indexer import run_incremental
+        from config import load_platform_config
+
+        platform_cfg = load_platform_config()
+        bi_cfg = platform_cfg.get('scheduler', {}).get('blockchain_indexer', {})
+        max_chunks = bi_cfg.get('max_chunks_per_run', 50000)
+
+        logger.info(f'Blockchain indexer starting (max_chunks={max_chunks})...')
+        result = run_incremental(max_chunks=max_chunks)
+
+        if result.get('status') == 'ok' or result.get('trades_fetched', 0) > 0:
+            trades = result.get('trades_fetched', 0)
+            blocks = result.get('blocks_processed', 0)
+            logger.info(f'Blockchain indexer done: {trades} trades from {blocks} blocks')
+        else:
+            logger.info(f'Blockchain indexer: {result}')
+    except Exception as e:
+        logger.error(f'Blockchain indexer failed: {e}')

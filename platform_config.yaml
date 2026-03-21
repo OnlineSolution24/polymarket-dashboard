@@ -50,8 +50,8 @@ trading:
     min_trade_usd: 1.0
   category_blacklist: []
   keyword_blacklist:
-    - "Democratic presidential nomination"
-    - "Democratic vice presidential nomination"
+  - Democratic presidential nomination
+  - Democratic vice presidential nomination
   deduplication:
     enabled: true
     cooldown_hours: 72
@@ -143,6 +143,18 @@ scheduler:
   snapshot_cleanup:
     enabled: true
     interval_hours: 24
+  volume_flow:
+    enabled: true
+    interval_minutes: 30
+    min_flow_ratio: 2.0
+    min_volume_usd: 10000
+    max_markets_per_scan: 80
+    max_suggestions_per_scan: 5
+    amount_usd: 10.0
+  blockchain_indexer:
+    enabled: true
+    interval_hours: 6
+    max_chunks_per_run: 50000
 strategy:
   max_active_strategies: 20
   min_confidence_score: 0.5
