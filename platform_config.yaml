@@ -74,8 +74,8 @@ trading:
     sell_pct: 100
     min_profit_pct: 5
     min_profit_usd: 0.05
-    max_hold_hours: 120
-    force_sell_profit_pct: 2
+    max_hold_hours: 8760
+    force_sell_profit_pct: 999
     cooldown_minutes: 15
     tiered_targets:
     - price_range:
@@ -174,7 +174,7 @@ mcp:
   bot_api_internal_url: http://polymarket-bot:8000
 risk_management:
   stop_loss_pct: -90
-  max_hold_days_losing: 7
+  max_hold_days_losing: 999
   dead_market_bid: 0.005
   dead_market_hours: 24
 diversification:
