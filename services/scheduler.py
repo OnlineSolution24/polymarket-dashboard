@@ -252,12 +252,12 @@ def start_scheduler(config: AppConfig) -> None:
             # Position sync job removed - handled by PositionManager
             logger.info("Scheduled: position_sync every 12h")
 
-            # Arbitrage scanner (every 30 min)
-            _scheduler.add_job(
-                _job_arbitrage_scan, "interval", minutes=30,
-                id="arbitrage_scan", replace_existing=True, args=[config],
-            )
-            logger.info("Scheduled: arbitrage_scan every 30min")
+            # DISABLED: arbitrage_scan (arb_v2 lost money, no proven edge)
+            #             _scheduler.add_job(
+            #                 _job_arbitrage_scan, "interval", minutes=30,
+            #                 id="arbitrage_scan", replace_existing=True, args=[config],
+            #             )
+            #             logger.info("Scheduled: arbitrage_scan every 30min")
             # Edge Sources (every 20 min) — crypto, cross-platform, weather ensemble
             _scheduler.add_job(
                 _job_edge_sources, "interval", minutes=20,
