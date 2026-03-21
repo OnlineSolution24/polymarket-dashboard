@@ -256,7 +256,8 @@ def create_suggestions_from_signals(signals: list[FlowSignal]) -> int:
             existing = engine.execute(
                 """SELECT COUNT(*) FROM suggestions
                    WHERE json_extract(payload, '$.market_id') = ?
-                   AND status IN ('pending', 'approved')""",
+                   AND status IN ('pending', 'approved', 'auto_approved', 'failed', 'executed')
+                   AND created_at > datetime('now', '-24 hours')""",
                 (signal.condition_id,),
             ).fetchone()
 

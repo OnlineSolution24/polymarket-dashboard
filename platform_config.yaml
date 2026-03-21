@@ -18,16 +18,15 @@ arbitrage:
 budgets:
   alert_threshold_percent: 80
   auto_pause_on_budget_exceeded: true
-  daily_limit_usd: 5.0
   monthly_total_usd: 50.0
-  per_agent_daily_usd: 1.0
 cache:
   enabled: true
   max_entries: 1000
   ttl_minutes: 30
 circuit_breaker:
   auto_reset: true
-  max_consecutive_losses: 3
+  enabled: false
+  max_consecutive_losses: 999
   pause_hours: 24
 diversification:
   max_exposure_per_category_pct: 25
