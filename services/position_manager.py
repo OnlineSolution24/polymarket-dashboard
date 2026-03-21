@@ -340,7 +340,7 @@ class PositionManager:
             }
 
         # -- Rule 2: Take Profit (tiered) --
-        tp_pct = self._get_tiered_tp(entry_price, cashout_cfg)
+        tp_pct = self._get_tiered_tp(entry_price, cashout_cfg, pos.get("amount_usd", 0))
         min_profit_usd = cashout_cfg.get("min_profit_usd", 0.05)
 
         # Skip TP if price is near $1.00 — wait for settlement instead (pays full $1/share)
@@ -418,12 +418,21 @@ class PositionManager:
 
         return None  # No exit signal
 
-    def _get_tiered_tp(self, entry_price: float, cashout_cfg: dict) -> float:
-        """Get take-profit percentage based on entry price tier."""
+    def _get_tiered_tp(self, entry_price: float, cashout_cfg: dict, amount_usd: float = 0) -> float:
+        """Get take-profit % based on entry price AND bet size.
+
+        TP Matrix (Entry Price x Bet Size):
+        Small ($1-10): generous TP, let small bets run
+        Medium ($10-50): moderate TP
+        Large ($50-500): tighter TP, protect capital
+        XL ($500+): tightest TP, compounding protection
+        """
         tiers = cashout_cfg.get("tiered_targets", [])
         for tier in tiers:
             pr = tier.get("price_range", [0, 1])
-            if len(pr) == 2 and pr[0] <= entry_price < pr[1]:
+            ar = tier.get("amount_range", [0, 999999])
+            if (len(pr) == 2 and pr[0] <= entry_price < pr[1] and
+                len(ar) == 2 and ar[0] <= amount_usd < ar[1]):
                 return float(tier.get("profit_target", 5))
         return float(cashout_cfg.get("min_profit_pct", 5))
 

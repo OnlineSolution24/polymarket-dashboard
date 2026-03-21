@@ -1,103 +1,87 @@
-platform:
-  name: Polymarket Agent Dashboard
-  version: 1.0.0
-  refresh_interval_minutes: 30
-  log_level: info
-  max_log_retention_days: 30
-budgets:
-  monthly_total_usd: 50.0
-  daily_limit_usd: 5.0
-  per_agent_daily_usd: 1.0
-  alert_threshold_percent: 80
-  auto_pause_on_budget_exceeded: true
 alerts:
+  daily_summary_hour: 20
   enabled: true
+  on_agent_error: true
   on_budget_warning: true
   on_circuit_breaker: true
+  on_daily_summary: true
   on_new_suggestion: false
   on_trade_executed: true
   on_trade_settled: true
-  on_agent_error: true
-  on_daily_summary: true
-  daily_summary_hour: 20
+arbitrage:
+  exclude_from_stoploss: true
+  max_investment: 25.0
+  max_outcomes: 20
+  max_settlement_days: 30
+  min_absolute_profit: 1.0
+  min_profit_pct: 5.0
+budgets:
+  alert_threshold_percent: 80
+  auto_pause_on_budget_exceeded: true
+  daily_limit_usd: 5.0
+  monthly_total_usd: 50.0
+  per_agent_daily_usd: 1.0
+cache:
+  enabled: true
+  max_entries: 1000
+  ttl_minutes: 30
 circuit_breaker:
+  auto_reset: true
   max_consecutive_losses: 3
   pause_hours: 24
-  auto_reset: true
+diversification:
+  max_exposure_per_category_pct: 25
+  max_positions_per_category: 30
+  max_positions_total: 150
+  preferred_categories:
+  - Weather
+  - Sports
+  - Crypto
+  - Politics
+  - Science & Tech
+  - Economics
+edge_sources:
+  cross_platform:
+    enabled: true
+    max_amount: 5
+    min_edge: 0.05
+  crypto_prob:
+    enabled: true
+    max_amount: 5
+    min_edge: 0.05
+  fedwatch:
+    enabled: true
+    max_amount: 5
+    min_edge: 0.05
+  sports_odds:
+    enabled: true
+    max_amount: 5
+    min_edge: 0.05
+gamma_api:
+  base_url: https://gamma-api.polymarket.com
+  markets_limit: 100
+  min_liquidity_usd: 3000
+  min_volume_usd: 5000
+  tag_slugs:
+  - weather
+  - climate
+  timeout_seconds: 30
+mcp:
+  bot_api_internal_url: http://polymarket-bot:8000
+  enabled: true
 model_routing:
   analysis: claude-opus-4-6
+  default: claude-sonnet
   parsing: gemini-flash
   sentiment: haiku
   summarization: haiku
-  default: claude-sonnet
-cache:
-  enabled: true
-  ttl_minutes: 30
-  max_entries: 1000
-trading:
-  market_filters:
-    min_price: 0.05
-    max_price: 0.85
-    min_volume_24h: 1000
-    min_liquidity: 1000
-    min_orderbook_depth: 0
-  mode: full-auto
-  capital_usd: 1400
-  limits:
-    max_position_pct: 1
-    max_daily_loss_usd: 20.0
-    min_edge: 0.15
-    min_trade_usd: 1.0
-  category_blacklist: []
-  keyword_blacklist:
-  - Democratic presidential nomination
-  - Democratic vice presidential nomination
-  deduplication:
-    enabled: true
-    cooldown_hours: 72
-    max_attempts_per_market: 1
-    check_pending_suggestions: true
-  rebuy_cooldown_days: 14
-  weather_min_edge: 0.15
-  analyst_suggestions:
-    min_edge: 0.15
-    min_liquidity: 5000
-    max_amount_usd: 7.0
-  hedging:
-    enabled: false
-    profit_threshold_pct: 15
-    hedge_amount_pct: 50
-    min_profit_usd: 1.0
-    cooldown_minutes: 60
-  cashout:
-    enabled: true
-    sell_pct: 100
-    min_profit_pct: 5
-    min_profit_usd: 0.05
-    max_hold_hours: 8760
-    force_sell_profit_pct: 999
-    cooldown_minutes: 15
-    tiered_targets:
-    - price_range:
-      - 0.0
-      - 0.05
-      profit_target: 3
-    - price_range:
-      - 0.05
-      - 0.2
-      profit_target: 12
-    - price_range:
-      - 0.2
-      - 0.5
-      profit_target: 6
-    - price_range:
-      - 0.5
-      - 0.9
-      profit_target: 3
+platform:
+  log_level: info
+  max_log_retention_days: 30
+  name: Polymarket Agent Dashboard
+  refresh_interval_minutes: 30
+  version: 1.0.0
 polymarket:
-  markets_limit: 100
-  min_volume_usd: 5000
-  min_liquidity_usd: 3000
   categories:
   - politics
   - crypto
@@ -106,114 +90,226 @@ polymarket:
   - economics
   - weather
   - entertainment
+  markets_limit: 100
+  min_liquidity_usd: 3000
+  min_volume_usd: 5000
+risk_management:
+  dead_market_bid: 0.005
+  dead_market_hours: 24
+  max_hold_days_losing: 999
+  stop_loss_pct: -90
 scheduler:
-  market_refresh:
-    enabled: true
-    interval_minutes: 15
-  sentiment_update:
-    enabled: true
-    interval_minutes: 60
-  cost_aggregation:
-    enabled: true
-    interval_minutes: 60
   agent_health_check:
     enabled: true
     interval_minutes: 15
-  chief_analysis_hour: 19
   analyst_hour: 8
+  blockchain_indexer:
+    enabled: true
+    interval_hours: 6
+    max_chunks_per_run: 50000
+  chief_analysis_hour: 19
+  cost_aggregation:
+    enabled: true
+    interval_minutes: 60
+  daily_summary:
+    enabled: true
+    hour: 20
+  market_refresh:
+    enabled: true
+    interval_minutes: 15
   ml_retrain:
     enabled: true
     interval_days: 1
+  pattern_scanner_hour: 9
+  sentiment_update:
+    enabled: true
+    interval_minutes: 60
+  settlement:
+    enabled: true
+    interval_minutes: 30
+  snapshot_cleanup:
+    enabled: true
+    interval_hours: 24
   strategy_evaluation:
     enabled: true
     interval_minutes: 15
   trader_cycle:
     enabled: true
     interval_minutes: 2
-  daily_summary:
-    enabled: true
-    hour: 20
-  pattern_scanner_hour: 9
-  settlement:
+  volume_flow:
+    amount_usd: 10.0
     enabled: true
     interval_minutes: 30
+    max_markets_per_scan: 80
+    max_suggestions_per_scan: 5
+    min_flow_ratio: 2.0
+    min_volume_usd: 10000
   weather_edge:
     enabled: true
     interval_minutes: 30
-  snapshot_cleanup:
-    enabled: true
-    interval_hours: 24
-  volume_flow:
-    enabled: true
-    interval_minutes: 30
-    min_flow_ratio: 2.0
-    min_volume_usd: 10000
-    max_markets_per_scan: 80
-    max_suggestions_per_scan: 5
-    amount_usd: 10.0
-  blockchain_indexer:
-    enabled: true
-    interval_hours: 6
-    max_chunks_per_run: 50000
 strategy:
   max_active_strategies: 20
   min_confidence_score: 0.5
   retire_after_trades: 50
   retire_on_drawdown_pct: 15
-gamma_api:
-  base_url: https://gamma-api.polymarket.com
-  markets_limit: 100
-  min_volume_usd: 5000
-  min_liquidity_usd: 3000
-  timeout_seconds: 30
-  tag_slugs:
-  - weather
-  - climate
-mcp:
-  enabled: true
-  bot_api_internal_url: http://polymarket-bot:8000
-risk_management:
-  stop_loss_pct: -90
-  max_hold_days_losing: 999
-  dead_market_bid: 0.005
-  dead_market_hours: 24
-diversification:
-  max_positions_per_category: 30
-  max_positions_total: 150
-  max_exposure_per_category_pct: 25
-  preferred_categories:
-  - Weather
-  - Sports
-  - Crypto
-  - Politics
-  - Science & Tech
-  - Economics
-arbitrage:
-  min_profit_pct: 5.0
-  max_settlement_days: 30
-  max_outcomes: 20
-  min_absolute_profit: 1.0
-  max_investment: 25.0
-  exclude_from_stoploss: true
-edge_sources:
-  sports_odds:
+trading:
+  analyst_suggestions:
+    max_amount_usd: 7.0
+    min_edge: 0.15
+    min_liquidity: 5000
+  capital_usd: 1400
+  cashout:
+    cooldown_minutes: 15
     enabled: true
-    min_edge: 0.05
-    max_amount: 5
-  crypto_prob:
+    force_sell_profit_pct: 999
+    max_hold_hours: 8760
+    min_profit_pct: 100
+    min_profit_usd: 0.05
+    sell_pct: 100
+    tiered_targets:
+    - amount_range:
+      - 0
+      - 10
+      price_range:
+      - 0
+      - 0.15
+      profit_target: 50
+    - amount_range:
+      - 0
+      - 10
+      price_range:
+      - 0.15
+      - 0.35
+      profit_target: 80
+    - amount_range:
+      - 0
+      - 10
+      price_range:
+      - 0.35
+      - 0.65
+      profit_target: 100
+    - amount_range:
+      - 0
+      - 10
+      price_range:
+      - 0.65
+      - 1.0
+      profit_target: 999
+    - amount_range:
+      - 10
+      - 50
+      price_range:
+      - 0
+      - 0.15
+      profit_target: 30
+    - amount_range:
+      - 10
+      - 50
+      price_range:
+      - 0.15
+      - 0.35
+      profit_target: 50
+    - amount_range:
+      - 10
+      - 50
+      price_range:
+      - 0.35
+      - 0.65
+      profit_target: 80
+    - amount_range:
+      - 10
+      - 50
+      price_range:
+      - 0.65
+      - 1.0
+      profit_target: 999
+    - amount_range:
+      - 50
+      - 500
+      price_range:
+      - 0
+      - 0.15
+      profit_target: 20
+    - amount_range:
+      - 50
+      - 500
+      price_range:
+      - 0.15
+      - 0.35
+      profit_target: 30
+    - amount_range:
+      - 50
+      - 500
+      price_range:
+      - 0.35
+      - 0.65
+      profit_target: 50
+    - amount_range:
+      - 50
+      - 500
+      price_range:
+      - 0.65
+      - 1.0
+      profit_target: 80
+    - amount_range:
+      - 500
+      - 999999
+      price_range:
+      - 0
+      - 0.15
+      profit_target: 15
+    - amount_range:
+      - 500
+      - 999999
+      price_range:
+      - 0.15
+      - 0.35
+      profit_target: 20
+    - amount_range:
+      - 500
+      - 999999
+      price_range:
+      - 0.35
+      - 0.65
+      profit_target: 30
+    - amount_range:
+      - 500
+      - 999999
+      price_range:
+      - 0.65
+      - 1.0
+      profit_target: 50
+  category_blacklist: []
+  deduplication:
+    check_pending_suggestions: true
+    cooldown_hours: 72
     enabled: true
-    min_edge: 0.05
-    max_amount: 5
-  fedwatch:
-    enabled: true
-    min_edge: 0.05
-    max_amount: 5
-  cross_platform:
-    enabled: true
-    min_edge: 0.05
-    max_amount: 5
+    max_attempts_per_market: 1
+  hedging:
+    cooldown_minutes: 60
+    enabled: false
+    hedge_amount_pct: 50
+    min_profit_usd: 1.0
+    profit_threshold_pct: 15
+  keyword_blacklist:
+  - Democratic presidential nomination
+  - Democratic vice presidential nomination
+  limits:
+    max_daily_loss_usd: 20.0
+    max_position_pct: 1
+    min_edge: 0.15
+    min_trade_usd: 1.0
+  market_filters:
+    max_price: 0.85
+    min_liquidity: 1000
+    min_orderbook_depth: 0
+    min_price: 0.05
+    min_volume_24h: 1000
+  mode: full-auto
+  rebuy_cooldown_days: 14
+  weather_min_edge: 0.15
 weather_sniper:
   breakeven_enabled: true
-  breakeven_trigger_pct: 66
   breakeven_sl_pct: 1
+  breakeven_trigger_pct: 66
   max_entry_price: 0.93
