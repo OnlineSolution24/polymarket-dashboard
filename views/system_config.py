@@ -196,5 +196,30 @@ def render():
             else:
                 st.error("Fehler beim Fortsetzen.")
 
+    # --- Database Download ---
+    st.divider()
+    st.subheader("Datenbank Export")
+    st.caption("Komplette SQLite-Datenbank herunterladen (Trades, Suggestions, Märkte, etc.)")
+
+    db_bytes = None
+    if st.button("Datenbank vorbereiten"):
+        with st.spinner("Lade Datenbank vom Bot..."):
+            db_bytes = client.download_database()
+        if db_bytes:
+            st.session_state["db_download"] = db_bytes
+            st.success(f"Bereit! ({len(db_bytes) / 1024 / 1024:.1f} MB)")
+        else:
+            st.error("Download fehlgeschlagen. Ist der Bot erreichbar?")
+
+    if "db_download" in st.session_state:
+        from datetime import datetime
+        filename = f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
+        st.download_button(
+            label="Download starten",
+            data=st.session_state["db_download"],
+            file_name=filename,
+            mime="application/x-sqlite3",
+        )
+
     st.divider()
     st.caption("Konfigurationsänderungen laden den Scheduler automatisch neu.")

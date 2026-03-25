@@ -266,6 +266,24 @@ class BotAPIClient:
         return self._post(f"/api/code/{change_id}/rollback")
 
     # ------------------------------------------------------------------
+    # Database download
+    # ------------------------------------------------------------------
+
+    def download_database(self) -> bytes | None:
+        """Download the full SQLite database file as bytes."""
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/api/database/download",
+                headers=self._headers,
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            return resp.content
+        except Exception as e:
+            logger.error(f"Database download failed: {e}")
+            return None
+
+    # ------------------------------------------------------------------
     # Health check
     # ------------------------------------------------------------------
 

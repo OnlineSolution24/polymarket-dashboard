@@ -1469,6 +1469,33 @@ def create_app(config: AppConfig) -> FastAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    # ------------------------------------------------------------------
+    # Database download
+    # ------------------------------------------------------------------
+
+    @app.get("/api/database/download", dependencies=[Depends(verify_api_key)])
+    async def download_database():
+        """Download a snapshot of the SQLite database file."""
+        from fastapi.responses import FileResponse
+        import shutil
+        import tempfile
+
+        db_path = engine.get_db_path()
+        if not db_path.exists():
+            raise HTTPException(status_code=404, detail="Database file not found")
+
+        # Copy to temp file so WAL is checkpointed and download is consistent
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        tmp.close()
+        engine.get_connection().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        shutil.copy2(str(db_path), tmp.name)
+
+        return FileResponse(
+            tmp.name,
+            media_type="application/x-sqlite3",
+            filename="dashboard.db",
+        )
+
     # Self-Modification (code change proposals by AI agents)
     # ------------------------------------------------------------------
 
