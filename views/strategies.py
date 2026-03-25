@@ -146,8 +146,12 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
                     key=f"eo_{sid}_{i}", label_visibility="collapsed",
                 )
             with c3:
+                try:
+                    float_value = float(value)
+                except (ValueError, TypeError):
+                    float_value = 0.0
                 new_val = st.number_input(
-                    "Wert", value=float(value), step=0.01, format="%.4f",
+                    "Wert", value=float_value, step=0.01, format="%.4f",
                     key=f"ev_{sid}_{i}", label_visibility="collapsed",
                 )
             with c4:
@@ -186,8 +190,12 @@ def _render_strategy_details(client, sid: str, name: str, definition: dict, stra
                         key=f"xo_{sid}_{i}", label_visibility="collapsed",
                     )
                 with c3:
+                    try:
+                        exit_float = float(rule.get("value", 0))
+                    except (ValueError, TypeError):
+                        exit_float = 0.0
                     new_val = st.number_input(
-                        "Wert", value=float(rule.get("value", 0)), step=0.01, format="%.4f",
+                        "Wert", value=exit_float, step=0.01, format="%.4f",
                         key=f"xv_{sid}_{i}", label_visibility="collapsed",
                     )
                 new_exit_rule = {"field": new_field, "op": new_op, "value": new_val}
