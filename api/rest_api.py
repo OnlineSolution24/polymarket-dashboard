@@ -262,7 +262,9 @@ def create_app(config: AppConfig) -> FastAPI:
                    result, pnl as realized_pnl, user_cmd, executed_at
             FROM trades
             WHERE result IN ('win', 'loss', 'cashout', 'hedge', 'settled',
-                             'settlement_win', 'take_profit', 'stop_loss', 'penny_cleanup')
+                             'settlement_win', 'take_profit', 'stop_loss',
+                             'penny_cleanup', 'sold_external', 'phantom',
+                             'STOP-LOSS (MANUAL)')
               AND amount_usd > 0
             ORDER BY executed_at DESC
             LIMIT 500

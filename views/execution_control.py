@@ -78,6 +78,7 @@ def render():
                     _build_equity_chart(df_eq, _chart_color, total_deposited)
 
     # --- Card 3: Offene Positionen ---
+    live_count = len(perf.get("live_positions", []))
     with c3:
         with st.container(border=True):
             st.caption("Offene Positionen")
@@ -85,7 +86,7 @@ def render():
             st.markdown(f"Einsatz: **${positions_cost:,.2f}**")
             _u_color = "green" if unrealized_pnl >= 0 else "red"
             st.markdown(f"Unrealisiert: **:{_u_color}[${unrealized_pnl:+,.2f}]**")
-            st.caption(f"{open_markets} Maerkte offen")
+            st.caption(f"{live_count} Positionen offen")
 
     # --- Card 4: Realisierter PnL ---
     with c4:
@@ -94,7 +95,7 @@ def render():
             _r_color = "green" if realized_pnl >= 0 else "red"
             st.markdown(f"### :{_r_color}[${realized_pnl:+,.2f}]")
             st.markdown(f"W/L: **{wins}/{losses}** | WR: **{wr:.0f}%**")
-            st.caption(f"{open_markets} Maerkte offen")
+            st.caption(f"{live_count} Positionen offen")
 
     st.divider()
 
@@ -324,10 +325,10 @@ def render():
             elif result == "loss":
                 badge_label = "LOSS"
                 badge_color = "#ff1744"
-            elif result in ("cashout", "take_profit", "stop_loss"):
+            elif result in ("cashout", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)"):
                 badge_label = "SOLD"
                 badge_color = "#448AFF"
-            elif result == "penny_cleanup":
+            elif result in ("penny_cleanup", "phantom"):
                 badge_label = "CLEANUP"
                 badge_color = "#888"
             else:
@@ -352,7 +353,7 @@ def render():
             hr[2].markdown(f"<div style='font-size:0.9rem'>${amount:.2f}</div>", unsafe_allow_html=True)
 
             # Col 4: PnL (for sells and wins — show value + %)
-            if result in ("cashout", "take_profit", "stop_loss", "win", "settlement_win", "settled", "loss"):
+            if result in ("cashout", "take_profit", "stop_loss", "win", "settlement_win", "settled", "loss", "sold_external", "STOP-LOSS (MANUAL)", "phantom", "penny_cleanup"):
                 pnl_color = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
                 pnl_sign = "+" if pnl >= 0 else ""
                 pnl_pct = (pnl / amount * 100) if amount > 0 else 0
