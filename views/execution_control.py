@@ -294,21 +294,21 @@ def render():
         st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 3. HISTORY (all closed trades — buys, sells, wins, losses)
+    # 3. HISTORY (Polymarket-style activity feed)
     # ══════════════════════════════════════════════════════════════════
     history = client.get_closed_trades()
     st.subheader(f"History ({len(history)})")
 
     if history:
-        # Sort by executed_at newest first
         history.sort(key=lambda t: t.get("executed_at", "") or "", reverse=True)
 
         # --- Header ---
-        _HW = [3.2, 0.8, 0.8, 1.2]
+        _HW = [1.0, 3.5, 1.0, 1.0]
         hh = st.columns(_HW)
-        for col, lbl in zip(hh, ["MARKT", "DATUM", "EINSATZ", "PNL"]):
-            col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
+        for col, lbl in zip(hh, ["AKTIVITÄT", "MARKT", "WERT", "ZEIT"]):
+            col.markdown(f"**<span style='color:#8892A0;font-size:0.8rem'>{lbl}</span>**", unsafe_allow_html=True)
 
+        now = datetime.utcnow()
         for j, t in enumerate(history):
             hr = st.columns(_HW)
             result = (t.get("result") or "").lower()
@@ -316,63 +316,92 @@ def render():
             amount = float(t.get("amount_usd") or 0)
             entry_price = float(t.get("entry_price") or 0)
             side = t.get("side", "YES")
-            exec_date = (t.get("executed_at") or "")[:10]
 
-            # Determine action type and badge
+            # Relative time
+            try:
+                exec_dt = datetime.fromisoformat(str(t.get("executed_at", "")))
+                delta = now - exec_dt
+                if delta.days == 0:
+                    time_str = "Heute"
+                elif delta.days == 1:
+                    time_str = "Gestern"
+                elif delta.days < 30:
+                    time_str = f"{delta.days}T"
+                else:
+                    time_str = f"{delta.days // 30}Mo"
+            except (ValueError, TypeError):
+                time_str = "-"
+
+            # Activity type (Polymarket-style)
             if not result or result == "open":
-                badge_label = "BUY"
-                badge_color = "#00D4AA"
+                activity = "Gekauft"
+                activity_color = "#E8ECF1"
+                value_str = f"-${amount:.2f}"
+                value_color = "#ff1744"
             elif result in ("win", "settlement_win", "settled"):
-                badge_label = "WIN"
-                badge_color = "#00c853"
+                activity = "Beansprucht"
+                activity_color = "#00c853"
+                value_str = f"+${pnl + amount:.2f}" if pnl + amount > 0 else f"+${amount:.2f}"
+                value_color = "#00c853"
             elif result == "loss":
-                badge_label = "LOSS"
-                badge_color = "#ff1744"
+                activity = "Verloren"
+                activity_color = "#ff1744"
+                value_str = f"-${amount:.2f}"
+                value_color = "#ff1744"
             elif result in ("cashout", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)"):
-                badge_label = "SOLD"
-                badge_color = "#448AFF"
+                activity = "Verkauft"
+                activity_color = "#E8ECF1"
+                value_amount = amount + pnl if pnl != 0 else amount
+                value_str = f"+${value_amount:.2f}" if value_amount >= 0 else f"-${abs(value_amount):.2f}"
+                value_color = "#00c853" if value_amount > 0 else "#ff1744"
             elif result in ("penny_cleanup", "phantom"):
-                badge_label = "CLEANUP"
-                badge_color = "#888"
+                activity = "Bereinigt"
+                activity_color = "#888"
+                value_str = f"${pnl:+.2f}" if pnl != 0 else "$0.00"
+                value_color = "#888"
             else:
-                badge_label = result.upper()
-                badge_color = "#888"
+                activity = result.capitalize()
+                activity_color = "#888"
+                value_str = f"${amount:.2f}"
+                value_color = "#888"
 
-            # Col 1: Market name + badge
-            name = t.get("market_question", "?")[:55]
+            # Col 1: Activity label
             hr[0].markdown(
-                f"<div style='font-size:0.95rem;font-weight:500;line-height:1.3'>{name}</div>"
-                f"<span style='background:{badge_color};color:#fff;padding:1px 8px;border-radius:10px;"
-                f"font-size:0.75rem'>{badge_label}</span>"
-                f"<span style='color:#8892A0;font-size:0.8rem;margin-left:6px'>"
-                f"{side} @ {entry_price*100:.1f}c</span>",
+                f"<div style='font-size:0.9rem;font-weight:600;color:{activity_color}'>{activity}</div>",
                 unsafe_allow_html=True,
             )
 
-            # Col 2: Date
-            hr[1].markdown(f"<div style='font-size:0.9rem;color:#8892A0'>{exec_date}</div>", unsafe_allow_html=True)
-
-            # Col 3: Amount
-            hr[2].markdown(f"<div style='font-size:0.9rem'>${amount:.2f}</div>", unsafe_allow_html=True)
-
-            # Col 4: PnL (for sells and wins — show value + %)
-            if result and result not in ("open",):
-                pnl_color = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
-                pnl_sign = "+" if pnl >= 0 else ""
-                pnl_pct = (pnl / amount * 100) if amount > 0 else 0
-                pct_sign = "+" if pnl_pct >= 0 else ""
-                hr[3].markdown(
-                    f"<div style='font-size:0.95rem;font-weight:600;color:{pnl_color}'>"
-                    f"{pnl_sign}${pnl:.2f}"
-                    f"<span style='font-size:0.8rem;opacity:0.8;margin-left:4px'>"
-                    f"({pct_sign}{pnl_pct:.1f}%)</span></div>",
+            # Col 2: Market name + badge for buys
+            name = t.get("market_question", "?")[:55]
+            if not result or result == "open":
+                badge_color = "#00c853" if side == "YES" else "#ff1744"
+                price_cents = entry_price * 100
+                badge = (f"<span style='background:{badge_color};color:#fff;padding:1px 8px;"
+                         f"border-radius:10px;font-size:0.72rem'>{side} {price_cents:.0f}c</span>")
+                hr[1].markdown(
+                    f"<div style='font-size:0.9rem;font-weight:500;line-height:1.4'>{name}</div>{badge}",
                     unsafe_allow_html=True,
                 )
             else:
-                hr[3].markdown("<div style='color:#555'>—</div>", unsafe_allow_html=True)
+                hr[1].markdown(
+                    f"<div style='font-size:0.9rem;font-weight:500;line-height:1.4'>{name}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Col 3: Value
+            hr[2].markdown(
+                f"<div style='font-size:0.95rem;font-weight:600;color:{value_color}'>{value_str}</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Col 4: Relative time
+            hr[3].markdown(
+                f"<div style='font-size:0.85rem;color:#8892A0'>{time_str}</div>",
+                unsafe_allow_html=True,
+            )
 
             if j < len(history) - 1:
-                st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
+                st.markdown("<hr style='margin:3px 0;border-color:#1e2530'>", unsafe_allow_html=True)
     else:
         st.caption("Noch keine History.")
 
