@@ -342,14 +342,15 @@ def render():
             elif result == "loss":
                 activity = "Verloren"
                 activity_color = "#ff1744"
-            elif result in ("cashout", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)"):
+            elif result in ("cashout", "take_profit", "stop_loss", "sold_external",
+                            "STOP-LOSS (MANUAL)", "sell"):
                 activity = "Verkauft"
                 activity_color = "#448AFF"
             elif result in ("penny_cleanup", "phantom"):
                 activity = "Bereinigt"
                 activity_color = "#888"
             else:
-                activity = result.capitalize()
+                activity = result.capitalize() if result else "?"
                 activity_color = "#888"
 
             # Col 1: Activity label
