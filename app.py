@@ -330,14 +330,13 @@ with st.sidebar:
     status = client.get_status()
 
     if status:
-        active_agents = status.get("active_agents", 0)
-        _or = get_openrouter_costs(os.getenv("OPENROUTER_API_KEY", "")) or {}
-        cost_today = _or.get("usage_daily", status.get("cost_today_usd", 0))
         pending = status.get("pending_suggestions", 0)
         cb = status.get("circuit_breaker", {})
         paused_until = cb.get("paused_until")
         trading_mode = status.get("trading_mode", "?")
         bot_paused = status.get("bot_paused", False)
+        open_positions = status.get("open_positions", 0)
+        today_pnl = status.get("pnl_today", 0)
 
         # Mode styling
         mode_styles = {
@@ -349,6 +348,8 @@ with st.sidebar:
         status_color = "#FF5252" if bot_paused else "#00D4AA"
         status_dot = "🔴" if bot_paused else "🟢"
         status_label = "Pausiert" if bot_paused else "Aktiv"
+        pnl_color = "#00c853" if today_pnl >= 0 else "#ff1744"
+        pnl_sign = "+" if today_pnl >= 0 else ""
 
         # Combined status card
         st.markdown(f"""
@@ -369,13 +370,13 @@ with st.sidebar:
             </div>
             <div style="display: flex; gap: 12px;">
                 <div style="flex: 1; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px; text-align: center;">
-                    <div style="color: #5A6478; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em;">Agents</div>
-                    <div style="color: #00D4AA; font-size: 1.3rem; font-weight: 700;">{active_agents}</div>
+                    <div style="color: #5A6478; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em;">Positionen</div>
+                    <div style="color: #00D4AA; font-size: 1.3rem; font-weight: 700;">{open_positions}</div>
                 </div>
                 <div style="flex: 1; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px; text-align: center;">
-                    <div style="color: #5A6478; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em;">Kosten</div>
-                    <div style="color: {'#FF5252' if cost_today > 4.0 else '#FFB74D' if cost_today > 2.0 else '#E8ECF1'};
-                                font-size: 1.3rem; font-weight: 700;">${cost_today:.2f}</div>
+                    <div style="color: #5A6478; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em;">Heute PnL</div>
+                    <div style="color: {pnl_color};
+                                font-size: 1.3rem; font-weight: 700;">{pnl_sign}${today_pnl:.2f}</div>
                 </div>
             </div>
         </div>
