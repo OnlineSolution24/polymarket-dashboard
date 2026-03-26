@@ -294,7 +294,7 @@ def render():
         st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 3. HISTORY (Polymarket-style activity feed)
+    # 3. HISTORY (Polymarket-style activity feed with PnL)
     # ══════════════════════════════════════════════════════════════════
     history = client.get_closed_trades()
     st.subheader(f"History ({len(history)})")
@@ -303,9 +303,9 @@ def render():
         history.sort(key=lambda t: t.get("executed_at", "") or "", reverse=True)
 
         # --- Header ---
-        _HW = [1.0, 3.5, 1.0, 1.0]
+        _HW = [0.9, 3.0, 0.7, 0.7, 1.0, 0.6]
         hh = st.columns(_HW)
-        for col, lbl in zip(hh, ["AKTIVITÄT", "MARKT", "WERT", "ZEIT"]):
+        for col, lbl in zip(hh, ["AKTIVITÄT", "MARKT", "EINSATZ", "PNL", "ZEIT", ""]):
             col.markdown(f"**<span style='color:#8892A0;font-size:0.8rem'>{lbl}</span>**", unsafe_allow_html=True)
 
         now = datetime.utcnow()
@@ -332,73 +332,70 @@ def render():
             except (ValueError, TypeError):
                 time_str = "-"
 
-            # Activity type (Polymarket-style)
+            # Activity type
             if not result or result == "open":
                 activity = "Gekauft"
                 activity_color = "#E8ECF1"
-                value_str = f"-${amount:.2f}"
-                value_color = "#ff1744"
             elif result in ("win", "settlement_win", "settled"):
                 activity = "Beansprucht"
                 activity_color = "#00c853"
-                value_str = f"+${pnl + amount:.2f}" if pnl + amount > 0 else f"+${amount:.2f}"
-                value_color = "#00c853"
             elif result == "loss":
                 activity = "Verloren"
                 activity_color = "#ff1744"
-                value_str = f"-${amount:.2f}"
-                value_color = "#ff1744"
             elif result in ("cashout", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)"):
                 activity = "Verkauft"
-                activity_color = "#E8ECF1"
-                value_amount = amount + pnl if pnl != 0 else amount
-                value_str = f"+${value_amount:.2f}" if value_amount >= 0 else f"-${abs(value_amount):.2f}"
-                value_color = "#00c853" if value_amount > 0 else "#ff1744"
+                activity_color = "#448AFF"
             elif result in ("penny_cleanup", "phantom"):
                 activity = "Bereinigt"
                 activity_color = "#888"
-                value_str = f"${pnl:+.2f}" if pnl != 0 else "$0.00"
-                value_color = "#888"
             else:
                 activity = result.capitalize()
                 activity_color = "#888"
-                value_str = f"${amount:.2f}"
-                value_color = "#888"
 
             # Col 1: Activity label
             hr[0].markdown(
-                f"<div style='font-size:0.9rem;font-weight:600;color:{activity_color}'>{activity}</div>",
+                f"<div style='font-size:0.85rem;font-weight:600;color:{activity_color}'>{activity}</div>",
                 unsafe_allow_html=True,
             )
 
-            # Col 2: Market name + badge for buys
-            name = t.get("market_question", "?")[:55]
+            # Col 2: Market name + badge
+            name = t.get("market_question", "?")[:50]
+            badge_color = "#00c853" if side == "YES" else "#ff1744"
+            price_cents = entry_price * 100
+            badge = (f"<span style='background:{badge_color};color:#fff;padding:1px 6px;"
+                     f"border-radius:10px;font-size:0.7rem'>{side} {price_cents:.0f}c</span>")
+            hr[1].markdown(
+                f"<div style='font-size:0.88rem;font-weight:500;line-height:1.3'>{name}</div>{badge}",
+                unsafe_allow_html=True,
+            )
+
+            # Col 3: Einsatz
+            hr[2].markdown(f"<div style='font-size:0.9rem'>${amount:.2f}</div>", unsafe_allow_html=True)
+
+            # Col 4: PnL ($ and %)
             if not result or result == "open":
-                badge_color = "#00c853" if side == "YES" else "#ff1744"
-                price_cents = entry_price * 100
-                badge = (f"<span style='background:{badge_color};color:#fff;padding:1px 8px;"
-                         f"border-radius:10px;font-size:0.72rem'>{side} {price_cents:.0f}c</span>")
-                hr[1].markdown(
-                    f"<div style='font-size:0.9rem;font-weight:500;line-height:1.4'>{name}</div>{badge}",
-                    unsafe_allow_html=True,
-                )
+                hr[3].markdown("<div style='color:#555;font-size:0.9rem'>—</div>", unsafe_allow_html=True)
             else:
-                hr[1].markdown(
-                    f"<div style='font-size:0.9rem;font-weight:500;line-height:1.4'>{name}</div>",
+                pnl_color = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#8892A0"
+                pnl_sign = "+" if pnl >= 0 else ""
+                pnl_pct = (pnl / amount * 100) if amount > 0 else 0
+                pct_sign = "+" if pnl_pct >= 0 else ""
+                hr[3].markdown(
+                    f"<div style='font-size:0.9rem;font-weight:600;color:{pnl_color}'>"
+                    f"{pnl_sign}${pnl:.2f}</div>"
+                    f"<div style='font-size:0.75rem;color:{pnl_color};opacity:0.8'>"
+                    f"({pct_sign}{pnl_pct:.1f}%)</div>",
                     unsafe_allow_html=True,
                 )
 
-            # Col 3: Value
-            hr[2].markdown(
-                f"<div style='font-size:0.95rem;font-weight:600;color:{value_color}'>{value_str}</div>",
-                unsafe_allow_html=True,
-            )
-
-            # Col 4: Relative time
-            hr[3].markdown(
+            # Col 5: Relative time
+            hr[4].markdown(
                 f"<div style='font-size:0.85rem;color:#8892A0'>{time_str}</div>",
                 unsafe_allow_html=True,
             )
+
+            # Col 6: empty (alignment)
+            hr[5].markdown("", unsafe_allow_html=True)
 
             if j < len(history) - 1:
                 st.markdown("<hr style='margin:3px 0;border-color:#1e2530'>", unsafe_allow_html=True)
