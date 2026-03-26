@@ -538,9 +538,9 @@ def _calc_today_pnl(equity_curve: list, current_unrealized: float, current_reali
 def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float = 0) -> pd.DataFrame:
     """Filter equity curve to daily portfolio value (like Polymarket).
 
-    Portfolio value = total_deposited - positions_cost + realized_pnl + positions_value
-    This equals: cash_balance + positions_value (the real portfolio total).
-    total_deposited comes from the settings table (reliable), not from snapshots (often 0).
+    Uses equity_pnl (= positions_value + cash - deposited) from snapshots,
+    which is the ground-truth calculated from on-chain USDC balance.
+    Skips snapshots where equity_pnl is NULL (old data before fix).
     """
     if not equity_curve:
         return pd.DataFrame()
@@ -564,12 +564,14 @@ def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float
             continue
         if cutoff and dt < cutoff:
             continue
-        pos_value = float(snap.get("positions_value", 0) or 0)
-        pos_cost = float(snap.get("positions_cost", 0) or 0)
-        realized = float(snap.get("realized_pnl", 0) or 0)
-        # cash = what's left from deposit after buying positions + any realized gains/losses
-        cash = total_deposited - pos_cost + realized
-        portfolio_value = pos_value + max(cash, 0)
+
+        equity_pnl = snap.get("equity_pnl")
+        if equity_pnl is not None:
+            # Best source: real on-chain equity PnL
+            portfolio_value = total_deposited + float(equity_pnl)
+        else:
+            # Skip snapshots without equity_pnl (unreliable)
+            continue
         all_rows.append({"date": dt, "day": dt.strftime("%Y-%m-%d"), "value": portfolio_value})
 
     if not all_rows:

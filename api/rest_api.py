@@ -369,7 +369,7 @@ def create_app(config: AppConfig) -> FastAPI:
         # ---- Equity curve from snapshots ----
         equity_curve = engine.query("""
             SELECT snapshot_at, positions_value, positions_cost,
-                   unrealized_pnl, realized_pnl
+                   unrealized_pnl, realized_pnl, equity_pnl
             FROM portfolio_snapshots
             ORDER BY snapshot_at
         """) or []
