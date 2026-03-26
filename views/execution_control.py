@@ -293,55 +293,84 @@ def render():
         st.divider()
 
     # ══════════════════════════════════════════════════════════════════
-    # 3. ABGESCHLOSSENE MÄRKTE
+    # 3. HISTORY (all closed trades — buys, sells, wins, losses)
     # ══════════════════════════════════════════════════════════════════
-    closed_markets = perf.get("closed_markets", [])
-    st.subheader(f"Abgeschlossene Märkte ({len(closed_markets)})")
+    history = client.get_closed_trades()
+    st.subheader(f"History ({len(history)})")
 
-    if closed_markets:
-        # Sort by close date (newest first)
-        closed_markets.sort(key=lambda m: m.get("closed_at", ""), reverse=True)
+    if history:
+        # Sort by executed_at newest first
+        history.sort(key=lambda t: t.get("executed_at", "") or "", reverse=True)
 
         # --- Header ---
-        _CW = [3.5, 1.2, 1.2]
-        ch = st.columns(_CW)
-        for col, lbl in zip(ch, ["MARKT", "ABGESCHLOSSEN", "NETTO PNL"]):
+        _HW = [3.2, 0.8, 0.8, 1.2]
+        hh = st.columns(_HW)
+        for col, lbl in zip(hh, ["MARKT", "DATUM", "EINSATZ", "PNL"]):
             col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
 
-        for j, m in enumerate(closed_markets):
-            cr = st.columns(_CW)
-            m_pnl = m.get("pnl", 0)
-            result_str = m.get("result", "").upper()
-            result_color = "#00c853" if result_str == "WIN" else "#ff1744"
-            pnl_c = "#00c853" if m_pnl > 0 else "#ff1744" if m_pnl < 0 else "#888"
-            closed_date = m.get("closed_at", "")[:10] if m.get("closed_at") else "-"
+        for j, t in enumerate(history):
+            hr = st.columns(_HW)
+            result = (t.get("result") or "").lower()
+            pnl = float(t.get("realized_pnl") or 0)
+            amount = float(t.get("amount_usd") or 0)
+            entry_price = float(t.get("entry_price") or 0)
+            side = t.get("side", "YES")
+            exec_date = (t.get("executed_at") or "")[:10]
 
-            # Col 1: Market name + result badge
-            cr[0].markdown(
-                f"<div style='font-size:1rem;font-weight:500;line-height:1.3'>{m.get('name', '?')[:60]}</div>"
-                f"<span style='background:{result_color};color:#fff;padding:1px 8px;border-radius:10px;"
-                f"font-size:0.75rem'>{result_str}</span>",
+            # Determine action type and badge
+            if result in ("win", "settlement_win", "settled"):
+                badge_label = "WIN"
+                badge_color = "#00c853"
+            elif result == "loss":
+                badge_label = "LOSS"
+                badge_color = "#ff1744"
+            elif result in ("cashout", "take_profit", "stop_loss"):
+                badge_label = "SOLD"
+                badge_color = "#448AFF"
+            elif result == "penny_cleanup":
+                badge_label = "CLEANUP"
+                badge_color = "#888"
+            else:
+                badge_label = result.upper() if result else "CLOSED"
+                badge_color = "#888"
+
+            # Col 1: Market name + badge
+            name = t.get("market_question", "?")[:55]
+            hr[0].markdown(
+                f"<div style='font-size:0.95rem;font-weight:500;line-height:1.3'>{name}</div>"
+                f"<span style='background:{badge_color};color:#fff;padding:1px 8px;border-radius:10px;"
+                f"font-size:0.75rem'>{badge_label}</span>"
+                f"<span style='color:#8892A0;font-size:0.8rem;margin-left:6px'>"
+                f"{side} @ {entry_price*100:.1f}c</span>",
                 unsafe_allow_html=True,
             )
 
-            # Col 2: Close date
-            cr[1].markdown(f"<div style='font-size:0.95rem;color:#8892A0'>{closed_date}</div>", unsafe_allow_html=True)
+            # Col 2: Date
+            hr[1].markdown(f"<div style='font-size:0.9rem;color:#8892A0'>{exec_date}</div>", unsafe_allow_html=True)
 
-            # Col 3: Net PnL (value + %)
-            sign = "+" if m_pnl >= 0 else ""
-            pnl_pct = m.get("pnl_pct", 0)
-            pct_sign = "+" if pnl_pct >= 0 else ""
-            cr[2].markdown(
-                f"<div style='font-size:1rem;font-weight:600;color:{pnl_c}'>{sign}${m_pnl:.2f}"
-                f"<span style='font-size:0.8rem;color:{pnl_c};opacity:0.8;margin-left:6px'>"
-                f"({pct_sign}{pnl_pct:.1f}%)</span></div>",
-                unsafe_allow_html=True,
-            )
+            # Col 3: Amount
+            hr[2].markdown(f"<div style='font-size:0.9rem'>${amount:.2f}</div>", unsafe_allow_html=True)
 
-            if j < len(closed_markets) - 1:
+            # Col 4: PnL (for sells and wins — show value + %)
+            if result in ("cashout", "take_profit", "stop_loss", "win", "settlement_win", "settled", "loss"):
+                pnl_color = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
+                pnl_sign = "+" if pnl >= 0 else ""
+                pnl_pct = (pnl / amount * 100) if amount > 0 else 0
+                pct_sign = "+" if pnl_pct >= 0 else ""
+                hr[3].markdown(
+                    f"<div style='font-size:0.95rem;font-weight:600;color:{pnl_color}'>"
+                    f"{pnl_sign}${pnl:.2f}"
+                    f"<span style='font-size:0.8rem;opacity:0.8;margin-left:4px'>"
+                    f"({pct_sign}{pnl_pct:.1f}%)</span></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                hr[3].markdown("<div style='color:#555'>—</div>", unsafe_allow_html=True)
+
+            if j < len(history) - 1:
                 st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
     else:
-        st.caption("Noch keine abgeschlossenen Märkte.")
+        st.caption("Noch keine History.")
 
     st.divider()
 

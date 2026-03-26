@@ -256,15 +256,16 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/trades/closed", dependencies=[Depends(verify_api_key)])
     def get_closed_trades():
-        """Closed trades with realized PnL (profit only, no cost basis)."""
+        """All closed/resolved trades with realized PnL."""
         return engine.query("""
             SELECT id, market_question, side, amount_usd, price as entry_price,
                    result, pnl as realized_pnl, user_cmd, executed_at
             FROM trades
-            WHERE result IN ('win', 'loss', 'cashout', 'hedge', 'settled')
+            WHERE result IN ('win', 'loss', 'cashout', 'hedge', 'settled',
+                             'settlement_win', 'take_profit', 'stop_loss', 'penny_cleanup')
               AND amount_usd > 0
             ORDER BY executed_at DESC
-            LIMIT 100
+            LIMIT 500
         """)
 
     @app.get("/api/trades/performance", dependencies=[Depends(verify_api_key)])
