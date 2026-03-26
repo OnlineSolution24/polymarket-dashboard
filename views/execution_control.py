@@ -284,10 +284,14 @@ def render():
             # Col 2: Close date
             cr[1].markdown(f"<div style='font-size:0.95rem;color:#8892A0'>{closed_date}</div>", unsafe_allow_html=True)
 
-            # Col 3: Net PnL
+            # Col 3: Net PnL (value + %)
             sign = "+" if m_pnl >= 0 else ""
+            pnl_pct = m.get("pnl_pct", 0)
+            pct_sign = "+" if pnl_pct >= 0 else ""
             cr[2].markdown(
-                f"<div style='font-size:1rem;font-weight:600;color:{pnl_c}'>{sign}${m_pnl:.2f}</div>",
+                f"<div style='font-size:1rem;font-weight:600;color:{pnl_c}'>{sign}${m_pnl:.2f}"
+                f"<span style='font-size:0.8rem;color:{pnl_c};opacity:0.8;margin-left:6px'>"
+                f"({pct_sign}{pnl_pct:.1f}%)</span></div>",
                 unsafe_allow_html=True,
             )
 
