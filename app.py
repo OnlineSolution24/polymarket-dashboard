@@ -295,9 +295,9 @@ from views import (
 # --- Navigation ---
 pages = [
     st.Page(execution_control.render, title="Dashboard", icon="📊", default=True, url_path="dashboard"),
-    st.Page(live_monitoring.render, title="Live Monitoring", icon="📈", url_path="monitoring"),
+    st.Page(alpha_scanner.render, title="Whale Scanner", icon="🐋", url_path="alpha-scanner"),
     st.Page(strategies.render, title="Strategien", icon="🎯", url_path="strategies"),
-    st.Page(alpha_scanner.render, title="Alpha Scanner", icon="🔍", url_path="alpha-scanner"),
+    st.Page(live_monitoring.render, title="Live Monitoring", icon="📈", url_path="monitoring"),
     st.Page(suggestions.render, title="Vorschläge", icon="💡", url_path="suggestions"),
     st.Page(agent_manager.render, title="Agent Manager", icon="🤖", url_path="agents"),
     st.Page(cost_tracker_ui.render, title="Kosten Tracker", icon="💰", url_path="costs"),

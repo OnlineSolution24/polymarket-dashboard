@@ -72,10 +72,10 @@ def render():
             st.markdown(f"### :{_pnl_color}[${total_pnl:+,.2f}]")
             st.markdown(f":{_pnl_color}[{total_pnl_pct:+.1f}%] Gesamt")
             if equity_curve:
-                df_eq = _filter_equity_curve(equity_curve, period)
+                df_eq = _filter_equity_curve(equity_curve, period, total_deposited)
                 if not df_eq.empty:
                     _chart_color = "#00c853" if total_pnl >= 0 else "#ff1744"
-                    _build_equity_chart(df_eq, _chart_color)
+                    _build_equity_chart(df_eq, _chart_color, total_deposited)
 
     # --- Card 3: Offene Positionen ---
     with c3:
@@ -101,7 +101,9 @@ def render():
     # ══════════════════════════════════════════════════════════════════
     # 2. OFFENE POSITIONEN (Live from Polymarket API)
     # ══════════════════════════════════════════════════════════════════
-    st.subheader(f"Positionen ({open_markets})")
+    _pos_pnl_color = "#00c853" if unrealized_pnl >= 0 else "#ff1744"
+    _pos_sign = "+" if unrealized_pnl >= 0 else ""
+    st.subheader(f"Open Positions ({len(perf.get('live_positions', []))} | ${positions_cost:.2f} Einsatz | ${positions_value:.2f} Wert | {_pos_sign}${unrealized_pnl:.2f} PnL)")
 
     live_positions = perf.get("live_positions", [])
     if live_positions:
@@ -492,7 +494,7 @@ def _calc_today_pnl(equity_curve: list, current_unrealized: float, current_reali
     return current_total - prev_total
 
 
-def _filter_equity_curve(equity_curve: list, period: str) -> pd.DataFrame:
+def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float = 0) -> pd.DataFrame:
     """Filter equity curve data by time period and return DataFrame for charting."""
     if not equity_curve:
         return pd.DataFrame()
@@ -517,7 +519,8 @@ def _filter_equity_curve(equity_curve: list, period: str) -> pd.DataFrame:
         if cutoff and dt < cutoff:
             continue
         total_pnl = (snap.get("unrealized_pnl", 0) or 0) + (snap.get("realized_pnl", 0) or 0)
-        rows.append({"date": dt, "pnl": total_pnl})
+        portfolio_value = total_deposited + total_pnl
+        rows.append({"date": dt, "pnl": total_pnl, "value": portfolio_value})
 
     if not rows:
         return pd.DataFrame()
@@ -525,20 +528,25 @@ def _filter_equity_curve(equity_curve: list, period: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _build_equity_chart(df: pd.DataFrame, color: str):
-    """Render a clean area chart without axis backgrounds."""
+def _build_equity_chart(df: pd.DataFrame, color: str, total_deposited: float = 0):
+    """Render equity curve as portfolio value line (like Polymarket)."""
     import plotly.graph_objects as go
 
     fig = go.Figure()
+    # Deposit baseline
+    fig.add_hline(
+        y=total_deposited, line_dash="dot",
+        line_color="rgba(136,146,164,0.3)", line_width=1,
+    )
+    # Portfolio value line
     fig.add_trace(go.Scatter(
-        x=df["date"], y=df["pnl"],
-        fill="tozeroy",
+        x=df["date"], y=df["value"],
+        mode="lines",
         line=dict(color=color, width=2),
-        fillcolor=f"rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.15)",
-        hovertemplate="%{y:$.2f}<extra></extra>",
+        hovertemplate="$%{y:,.2f}<extra></extra>",
     ))
     fig.update_layout(
-        height=90,
+        height=100,
         margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
