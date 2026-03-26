@@ -256,13 +256,17 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/trades/closed", dependencies=[Depends(verify_api_key)])
     def get_closed_trades():
-        """All executed trades (buys, sells, wins, losses) for history view."""
+        """All trades (buys, sells, wins, losses) for history view."""
         return engine.query("""
             SELECT id, market_question, side, amount_usd, price as entry_price,
                    result, pnl as realized_pnl, user_cmd, executed_at
             FROM trades
-            WHERE status = 'executed'
+            WHERE status IN ('executed', 'closed')
               AND amount_usd > 0
+              AND (result IS NULL OR result NOT LIKE 'error%')
+              AND result != 'duplicate'
+              AND result != 'failed'
+              AND result != 'dead_market'
             ORDER BY executed_at DESC
             LIMIT 500
         """)
