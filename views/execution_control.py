@@ -274,8 +274,8 @@ def render():
             original = o.get("original_size", 0)
             fill_str = f"{matched:.0f} / {original:.0f}" if original > 0 else "-"
 
-            # Market name: fetch from asset_id or show short ID
-            market_label = o.get("market", o.get("asset_id", "?"))[:55]
+            # Market name from bot API (resolved from markets table)
+            market_label = o.get("market_name") or o.get("market", "?")[:16]
             outcome = o.get("outcome", "")
             badge = f"<span style='background:{side_color};color:#fff;padding:1px 8px;border-radius:10px;font-size:0.75rem'>{side} {outcome}</span>" if outcome else ""
 
@@ -319,7 +319,10 @@ def render():
             exec_date = (t.get("executed_at") or "")[:10]
 
             # Determine action type and badge
-            if result in ("win", "settlement_win", "settled"):
+            if not result or result == "open":
+                badge_label = "BUY"
+                badge_color = "#00D4AA"
+            elif result in ("win", "settlement_win", "settled"):
                 badge_label = "WIN"
                 badge_color = "#00c853"
             elif result == "loss":
@@ -332,7 +335,7 @@ def render():
                 badge_label = "CLEANUP"
                 badge_color = "#888"
             else:
-                badge_label = result.upper() if result else "CLOSED"
+                badge_label = result.upper()
                 badge_color = "#888"
 
             # Col 1: Market name + badge
@@ -353,7 +356,7 @@ def render():
             hr[2].markdown(f"<div style='font-size:0.9rem'>${amount:.2f}</div>", unsafe_allow_html=True)
 
             # Col 4: PnL (for sells and wins — show value + %)
-            if result in ("cashout", "take_profit", "stop_loss", "win", "settlement_win", "settled", "loss", "sold_external", "STOP-LOSS (MANUAL)", "phantom", "penny_cleanup"):
+            if result and result not in ("open",):
                 pnl_color = "#00c853" if pnl > 0 else "#ff1744" if pnl < 0 else "#888"
                 pnl_sign = "+" if pnl >= 0 else ""
                 pnl_pct = (pnl / amount * 100) if amount > 0 else 0
