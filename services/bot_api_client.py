@@ -116,6 +116,9 @@ class BotAPIClient:
     def get_open_positions(self) -> list:
         return self._get("/api/trades/positions") or []
 
+    def get_open_orders(self) -> list:
+        return self._get("/api/orders/open") or []
+
     def get_closed_trades(self) -> list:
         return self._get("/api/trades/closed") or []
 

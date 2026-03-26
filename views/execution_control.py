@@ -252,6 +252,47 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════
+    # 2b. OFFENE LIMIT ORDERS
+    # ══════════════════════════════════════════════════════════════════
+    open_orders = client.get_open_orders()
+    if open_orders:
+        total_order_usd = sum(o.get("total_usd", 0) for o in open_orders)
+        st.subheader(f"Offene Orders ({len(open_orders)} | ${total_order_usd:,.2f})")
+
+        _OW = [3.5, 0.8, 0.8, 0.8, 0.8]
+        oh = st.columns(_OW)
+        for col, lbl in zip(oh, ["MARKT", "SEITE", "PREIS", "GESAMT", "AUSGEFÜHRT"]):
+            col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
+
+        for k, o in enumerate(open_orders):
+            orow = st.columns(_OW)
+            side = o.get("side", "BUY")
+            side_color = "#00c853" if side == "BUY" else "#ff1744"
+            price_cents = o.get("price", 0) * 100
+            matched = o.get("size_matched", 0)
+            original = o.get("original_size", 0)
+            fill_str = f"{matched:.0f} / {original:.0f}" if original > 0 else "-"
+
+            # Market name: fetch from asset_id or show short ID
+            market_label = o.get("market", o.get("asset_id", "?"))[:55]
+            outcome = o.get("outcome", "")
+            badge = f"<span style='background:{side_color};color:#fff;padding:1px 8px;border-radius:10px;font-size:0.75rem'>{side} {outcome}</span>" if outcome else ""
+
+            orow[0].markdown(
+                f"<div style='font-size:0.95rem;font-weight:500'>{market_label}</div>{badge}",
+                unsafe_allow_html=True,
+            )
+            orow[1].markdown(f"<span style='color:{side_color};font-weight:600'>{side}</span>", unsafe_allow_html=True)
+            orow[2].markdown(f"<div style='font-size:0.95rem'>{price_cents:.1f}c</div>", unsafe_allow_html=True)
+            orow[3].markdown(f"<div style='font-size:0.95rem'>${o.get('total_usd', 0):.2f}</div>", unsafe_allow_html=True)
+            orow[4].markdown(f"<div style='font-size:0.95rem;color:#8892A0'>{fill_str}</div>", unsafe_allow_html=True)
+
+            if k < len(open_orders) - 1:
+                st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
+
+        st.divider()
+
+    # ══════════════════════════════════════════════════════════════════
     # 3. ABGESCHLOSSENE MÄRKTE
     # ══════════════════════════════════════════════════════════════════
     closed_markets = perf.get("closed_markets", [])
@@ -495,7 +536,7 @@ def _calc_today_pnl(equity_curve: list, current_unrealized: float, current_reali
 
 
 def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float = 0) -> pd.DataFrame:
-    """Filter equity curve data by time period and return DataFrame for charting."""
+    """Filter equity curve to daily portfolio value snapshots (like Polymarket)."""
     if not equity_curve:
         return pd.DataFrame()
 
@@ -509,7 +550,8 @@ def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float
     else:
         cutoff = None
 
-    rows = []
+    # Collect all snapshots, then pick one per day (last snapshot of each day)
+    all_rows = []
     for snap in equity_curve:
         snap_at = snap.get("snapshot_at", "")
         try:
@@ -518,14 +560,26 @@ def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float
             continue
         if cutoff and dt < cutoff:
             continue
-        total_pnl = (snap.get("unrealized_pnl", 0) or 0) + (snap.get("realized_pnl", 0) or 0)
-        portfolio_value = total_deposited + total_pnl
-        rows.append({"date": dt, "pnl": total_pnl, "value": portfolio_value})
+        # Portfolio value = deposited + positions_value - positions_cost + realized
+        # Or simpler: deposited + unrealized + realized (= total PnL)
+        positions_value = float(snap.get("positions_value", 0) or 0)
+        cash_approx = total_deposited - float(snap.get("positions_cost", 0) or 0) + float(snap.get("realized_pnl", 0) or 0)
+        portfolio_value = positions_value + max(cash_approx, 0)
+        # Fallback: use deposited + pnl if positions_value is 0
+        if positions_value == 0:
+            total_pnl = (snap.get("unrealized_pnl", 0) or 0) + (snap.get("realized_pnl", 0) or 0)
+            portfolio_value = total_deposited + total_pnl
+        all_rows.append({"date": dt, "day": dt.strftime("%Y-%m-%d"), "value": portfolio_value})
 
-    if not rows:
+    if not all_rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows)
+    # Keep last snapshot per day for clean daily line
+    df = pd.DataFrame(all_rows)
+    df = df.sort_values("date")
+    daily = df.groupby("day").last().reset_index()
+    daily["date"] = pd.to_datetime(daily["day"])
+    return daily[["date", "value"]]
 
 
 def _build_equity_chart(df: pd.DataFrame, color: str, total_deposited: float = 0):
