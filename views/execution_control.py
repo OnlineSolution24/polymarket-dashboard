@@ -257,7 +257,7 @@ def render():
     open_orders = client.get_open_orders()
     if open_orders:
         total_order_usd = sum(o.get("total_usd", 0) for o in open_orders)
-        st.subheader(f"Offene Orders ({len(open_orders)} | ${total_order_usd:,.2f})")
+        st.subheader(f"Open Limit Orders ({len(open_orders)} | ${total_order_usd:,.2f})")
 
         _OW = [3.5, 0.8, 0.8, 0.8, 0.8]
         oh = st.columns(_OW)
@@ -536,7 +536,12 @@ def _calc_today_pnl(equity_curve: list, current_unrealized: float, current_reali
 
 
 def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float = 0) -> pd.DataFrame:
-    """Filter equity curve to daily portfolio value snapshots (like Polymarket)."""
+    """Filter equity curve to daily portfolio value (like Polymarket).
+
+    Portfolio value = total_deposited - positions_cost + realized_pnl + positions_value
+    This equals: cash_balance + positions_value (the real portfolio total).
+    total_deposited comes from the settings table (reliable), not from snapshots (often 0).
+    """
     if not equity_curve:
         return pd.DataFrame()
 
@@ -550,7 +555,6 @@ def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float
     else:
         cutoff = None
 
-    # Collect all snapshots, then pick one per day (last snapshot of each day)
     all_rows = []
     for snap in equity_curve:
         snap_at = snap.get("snapshot_at", "")
@@ -560,21 +564,18 @@ def _filter_equity_curve(equity_curve: list, period: str, total_deposited: float
             continue
         if cutoff and dt < cutoff:
             continue
-        # Portfolio value = deposited + positions_value - positions_cost + realized
-        # Or simpler: deposited + unrealized + realized (= total PnL)
-        positions_value = float(snap.get("positions_value", 0) or 0)
-        cash_approx = total_deposited - float(snap.get("positions_cost", 0) or 0) + float(snap.get("realized_pnl", 0) or 0)
-        portfolio_value = positions_value + max(cash_approx, 0)
-        # Fallback: use deposited + pnl if positions_value is 0
-        if positions_value == 0:
-            total_pnl = (snap.get("unrealized_pnl", 0) or 0) + (snap.get("realized_pnl", 0) or 0)
-            portfolio_value = total_deposited + total_pnl
+        pos_value = float(snap.get("positions_value", 0) or 0)
+        pos_cost = float(snap.get("positions_cost", 0) or 0)
+        realized = float(snap.get("realized_pnl", 0) or 0)
+        # cash = what's left from deposit after buying positions + any realized gains/losses
+        cash = total_deposited - pos_cost + realized
+        portfolio_value = pos_value + max(cash, 0)
         all_rows.append({"date": dt, "day": dt.strftime("%Y-%m-%d"), "value": portfolio_value})
 
     if not all_rows:
         return pd.DataFrame()
 
-    # Keep last snapshot per day for clean daily line
+    # One point per day (last snapshot of each day)
     df = pd.DataFrame(all_rows)
     df = df.sort_values("date")
     daily = df.groupby("day").last().reset_index()
