@@ -157,7 +157,7 @@ def render():
             filtered.sort(key=lambda p: p.get("title", ""))
 
         # --- Header ---
-        _W = [3.2, 1.2, 0.8, 0.8, 1.0, 0.5]
+        _W = [3.0, 1.2, 0.8, 0.8, 1.0, 0.7]
         hdr = st.columns(_W)
         for col, lbl in zip(hdr, ["MARKT", "DURCHSCHN. / JETZT", "WETTE", "WERT", "GEWINN & VERLUST", ""]):
             col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
