@@ -449,6 +449,11 @@ def render():
     filter_val = None if status_filter == "Alle" else status_filter
     strategies = client.get_strategies(status=filter_val)
 
+    if strategies:
+        # Sort: active first, then by status priority, then name
+        _STATUS_ORDER = {"active": 0, "validated": 1, "backtested": 2, "pending_backtest": 3, "draft": 4, "retired": 5, "rejected": 6}
+        strategies.sort(key=lambda s: (_STATUS_ORDER.get(s.get("status", ""), 9), s.get("name", "")))
+
     if not strategies:
         st.info("Keine Strategien gefunden. Der Strategy Agent wird automatisch neue Strategien entdecken.")
         return
