@@ -218,11 +218,11 @@ def render():
                     unsafe_allow_html=True,
                 )
 
-            # Col 6: Sell button
+            # Col 6: Sell button (compact)
             trade_id = pos.get("trade_id")
             if trade_id:
-                btn_label = "Einlösen" if redeemable else "Verkaufen"
-                if row[5].button(btn_label, key=f"sell_{trade_id}_{i}", type="primary"):
+                btn_label = "✓" if redeemable else "Sell"
+                if row[5].button(btn_label, key=f"sell_{trade_id}_{i}"):
                     with st.spinner("Verkaufe..."):
                         res = client.manual_cashout(trade_id)
                     if res and res.get("ok"):
