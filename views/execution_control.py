@@ -257,38 +257,53 @@ def render():
     # ══════════════════════════════════════════════════════════════════
     open_orders = client.get_open_orders()
     if open_orders:
+        # Group orders by market (like Polymarket UI)
+        from collections import defaultdict
+        grouped = defaultdict(lambda: {"orders": [], "total_usd": 0, "total_matched": 0, "total_size": 0})
+        for o in open_orders:
+            key = o.get("market", o.get("id", ""))
+            grouped[key]["orders"].append(o)
+            grouped[key]["total_usd"] += o.get("total_usd", 0)
+            grouped[key]["total_matched"] += o.get("size_matched", 0)
+            grouped[key]["total_size"] += o.get("original_size", 0)
+            grouped[key]["name"] = o.get("market_name") or o.get("market", "?")[:16]
+            grouped[key]["side"] = o.get("side", "BUY")
+            grouped[key]["outcome"] = o.get("outcome", "")
+            # Use best (lowest buy / highest sell) price for display
+            if "price" not in grouped[key]:
+                grouped[key]["price"] = o.get("price", 0)
+
+        markets = list(grouped.values())
         total_order_usd = sum(o.get("total_usd", 0) for o in open_orders)
-        st.subheader(f"Open Limit Orders ({len(open_orders)} | ${total_order_usd:,.2f})")
+        st.subheader(f"Open Limit Orders ({len(markets)} | ${total_order_usd:,.2f})")
 
         _OW = [3.5, 0.8, 0.8, 0.8, 0.8]
         oh = st.columns(_OW)
         for col, lbl in zip(oh, ["MARKT", "SEITE", "PREIS", "GESAMT", "AUSGEFÜHRT"]):
             col.markdown(f"**<span style='color:#8892A0;font-size:0.85rem'>{lbl}</span>**", unsafe_allow_html=True)
 
-        for k, o in enumerate(open_orders):
+        for k, g in enumerate(markets):
             orow = st.columns(_OW)
-            side = o.get("side", "BUY")
+            side = g["side"]
             side_color = "#00c853" if side == "BUY" else "#ff1744"
-            price_cents = o.get("price", 0) * 100
-            matched = o.get("size_matched", 0)
-            original = o.get("original_size", 0)
-            fill_str = f"{matched:.0f} / {original:.0f}" if original > 0 else "-"
+            price_cents = g["price"] * 100
+            fill_str = f"{g['total_matched']:.0f} / {g['total_size']:.0f}"
+            order_count = len(g["orders"])
+            count_badge = f"<span style='color:#8892A0;font-size:0.75rem;margin-left:6px'>({order_count}x)</span>" if order_count > 1 else ""
 
-            # Market name from bot API (resolved from markets table)
-            market_label = o.get("market_name") or o.get("market", "?")[:16]
-            outcome = o.get("outcome", "")
+            outcome = g["outcome"]
             badge = f"<span style='background:{side_color};color:#fff;padding:1px 8px;border-radius:10px;font-size:0.75rem'>{side} {outcome}</span>" if outcome else ""
 
             orow[0].markdown(
-                f"<div style='font-size:0.95rem;font-weight:500'>{market_label}</div>{badge}",
+                f"<div style='font-size:0.95rem;font-weight:500'>{g['name']}{count_badge}</div>{badge}",
                 unsafe_allow_html=True,
             )
             orow[1].markdown(f"<span style='color:{side_color};font-weight:600'>{side}</span>", unsafe_allow_html=True)
             orow[2].markdown(f"<div style='font-size:0.95rem'>{price_cents:.1f}c</div>", unsafe_allow_html=True)
-            orow[3].markdown(f"<div style='font-size:0.95rem'>${o.get('total_usd', 0):.2f}</div>", unsafe_allow_html=True)
+            orow[3].markdown(f"<div style='font-size:0.95rem'>${g['total_usd']:.2f}</div>", unsafe_allow_html=True)
             orow[4].markdown(f"<div style='font-size:0.95rem;color:#8892A0'>{fill_str}</div>", unsafe_allow_html=True)
 
-            if k < len(open_orders) - 1:
+            if k < len(markets) - 1:
                 st.markdown("<hr style='margin:4px 0;border-color:#1e2530'>", unsafe_allow_html=True)
 
         st.divider()
