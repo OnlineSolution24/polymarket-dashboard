@@ -392,7 +392,40 @@ class TraderAgent(BaseAgent):
         amount = payload.get("amount_usd", 0)
         question = payload.get("market_question", "")
 
-        # Global deduplication check
+        # ── FIRST: Ask Polymarket API — the only source of truth ──
+        try:
+            import os, httpx
+            funder = os.getenv("POLYMARKET_FUNDER", "")
+            market_row = engine.query_one(
+                "SELECT yes_token_id, no_token_id FROM markets WHERE id = ?",
+                (market_id,),
+            )
+            if funder and market_row:
+                token_id = market_row.get("yes_token_id") if side == "YES" else market_row.get("no_token_id")
+                # Check BOTH tokens — if we hold YES or NO in this market, skip
+                check_tokens = set()
+                if market_row.get("yes_token_id"):
+                    check_tokens.add(market_row["yes_token_id"])
+                if market_row.get("no_token_id"):
+                    check_tokens.add(market_row["no_token_id"])
+
+                if check_tokens:
+                    resp = httpx.get(
+                        "https://data-api.polymarket.com/positions",
+                        params={"user": funder},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        for pos in resp.json():
+                            pos_token = pos.get("asset", "")
+                            pos_size = float(pos.get("size") or 0)
+                            if pos_token in check_tokens and pos_size > 0.01:
+                                self.log("info", f"SKIP: Position exists on-chain for {market_id[:30]} ({pos_size:.2f} shares)")
+                                return False
+        except Exception as e:
+            self.log("debug", f"Pre-trade API check failed (proceeding with DB checks): {e}")
+
+        # ── SECOND: DB-based deduplication (backup if API is down) ──
         allowed, reason = self._check_deduplication(market_id, side, suggestion_id=None)
         if not allowed:
             self.log("info", reason)
@@ -427,10 +460,11 @@ class TraderAgent(BaseAgent):
             service = PolymarketService(config)
 
             # Resolve correct CLOB token ID from market data
-            market_row = engine.query_one(
-                "SELECT yes_token_id, no_token_id FROM markets WHERE id = ?",
-                (market_id,),
-            )
+            if not market_row:
+                market_row = engine.query_one(
+                    "SELECT yes_token_id, no_token_id FROM markets WHERE id = ?",
+                    (market_id,),
+                )
             if not market_row:
                 self._finalize_trade(trade_id, "failed", payload, error="Market not found in DB")
                 self.log("error", f"Market {market_id[:30]} nicht in DB gefunden")
@@ -441,27 +475,6 @@ class TraderAgent(BaseAgent):
                 self._finalize_trade(trade_id, "failed", payload, error="No CLOB token ID available")
                 self.log("error", f"Kein CLOB Token-ID für {market_id[:30]} (side={side})")
                 return False
-
-            # SAFETY CHECK: Verify position does NOT already exist on Polymarket
-            try:
-                import os, httpx
-                funder = os.getenv("POLYMARKET_FUNDER", "")
-                if funder:
-                    resp = httpx.get(
-                        f"https://data-api.polymarket.com/positions?user={funder}",
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        for pos in resp.json():
-                            pos_token = pos.get("asset", "")
-                            pos_size = float(pos.get("size") or 0)
-                            if pos_token == token_id and pos_size > 0.01:
-                                self._finalize_trade(trade_id, "failed", payload,
-                                    error=f"Position already exists on-chain ({pos_size:.2f} shares)")
-                                self.log("warn", f"SAFETY: Position existiert bereits on-chain für {market_id[:30]} ({pos_size:.2f} shares)")
-                                return False
-            except Exception as e:
-                self.log("debug", f"On-chain position check failed (proceeding): {e}")
 
             # Pre-check: verify orderbook exists (with retry)
             book = None

@@ -48,6 +48,53 @@ def _calculate_amount(confidence: float, edge: float, capital: float, max_pct: f
     return amount
 
 
+def _check_position_on_chain(market_id: str) -> bool:
+    """Check via Polymarket API if we already hold a position in this market.
+    Returns True if position exists on-chain."""
+    try:
+        import os
+        funder = os.getenv("POLYMARKET_FUNDER", "")
+        if not funder:
+            return False
+
+        # Get token IDs for this market from DB
+        from db import engine as _eng
+        market_row = _eng.query_one(
+            "SELECT yes_token_id, no_token_id FROM markets WHERE id = ?",
+            (market_id,),
+        )
+        if not market_row:
+            return False
+
+        token_ids = set()
+        if market_row.get("yes_token_id"):
+            token_ids.add(market_row["yes_token_id"])
+        if market_row.get("no_token_id"):
+            token_ids.add(market_row["no_token_id"])
+        if not token_ids:
+            return False
+
+        resp = httpx.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": funder},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return False
+
+        for pos in resp.json():
+            pos_token = pos.get("asset", "")
+            pos_size = float(pos.get("size") or 0)
+            if pos_token in token_ids and pos_size > 0.01:
+                logger.info(f"Sniper: position exists ON-CHAIN for {market_id[:30]} ({pos_size:.2f} shares)")
+                return True
+
+        return False
+    except Exception as e:
+        logger.debug(f"On-chain position check failed: {e}")
+        return False
+
+
 def _create_sniper_suggestion(engine, config, market_id: str, question: str,
                                side: str, price: float, confidence: float,
                                edge: float, data_source: str, detail: str,
@@ -63,14 +110,19 @@ def _create_sniper_suggestion(engine, config, market_id: str, question: str,
     limits = trading_cfg.get("limits", {})
     max_pct = limits.get("max_position_pct", 5) / 100
 
-    # Skip if we already have open position
+    # FIRST CHECK: Ask Polymarket API directly — the only source of truth
+    if _check_position_on_chain(market_id):
+        logger.info(f"Sniper: skip {market_id}, position exists ON-CHAIN (API check)")
+        return False
+
+    # Fallback: also check DB for open positions (in case API is slow/down)
     open_pos = engine.query_one(
         "SELECT id FROM trades WHERE market_id = ? AND status IN ('executed', 'executing') "
         "AND (result IS NULL OR result = 'open')",
         (market_id,),
     )
     if open_pos:
-        logger.debug(f"Sniper: skip {market_id}, open position exists")
+        logger.debug(f"Sniper: skip {market_id}, open position exists (DB)")
         return False
 
     # Skip if ANY pending/queued suggestion exists (no time window — prevent all duplicates)
