@@ -73,14 +73,34 @@ def _create_sniper_suggestion(engine, config, market_id: str, question: str,
         logger.debug(f"Sniper: skip {market_id}, open position exists")
         return False
 
-    # Skip if recent suggestion already exists
-    existing = engine.query_one(
-        "SELECT id FROM suggestions WHERE status IN ('pending', 'auto_approved') "
-        "AND payload LIKE ? AND created_at > datetime('now', '-2 hours')",
+    # Skip if ANY pending/queued suggestion exists (no time window — prevent all duplicates)
+    pending_suggestion = engine.query_one(
+        "SELECT id FROM suggestions WHERE status IN ('pending', 'auto_approved', 'processing') "
+        "AND payload LIKE ?",
         (f'%"market_id": "{market_id}"%',),
     )
-    if existing:
-        logger.debug(f"Sniper: skip {market_id}, recent suggestion exists")
+    if pending_suggestion:
+        logger.debug(f"Sniper: skip {market_id}, pending suggestion exists")
+        return False
+
+    # Skip if suggestion was already executed/failed in last 24h (prevent rapid re-suggestion)
+    recent_suggestion = engine.query_one(
+        "SELECT id FROM suggestions WHERE status IN ('executed', 'failed') "
+        "AND payload LIKE ? AND created_at > datetime('now', '-24 hours')",
+        (f'%"market_id": "{market_id}"%',),
+    )
+    if recent_suggestion:
+        logger.debug(f"Sniper: skip {market_id}, suggestion already processed in last 24h")
+        return False
+
+    # Skip if ANY trade exists for this market (executed, cancelled, failed) in last 24h
+    recent_trade = engine.query_one(
+        "SELECT id FROM trades WHERE market_id = ? "
+        "AND created_at > datetime('now', '-24 hours')",
+        (market_id,),
+    )
+    if recent_trade:
+        logger.debug(f"Sniper: skip {market_id}, trade exists in last 24h")
         return False
 
     amount = _calculate_amount(confidence, edge, capital, max_pct)

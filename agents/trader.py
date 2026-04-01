@@ -252,7 +252,16 @@ class TraderAgent(BaseAgent):
         if open_position:
             return False, f"Skipping market {market_id[:30]} - open position exists ({open_position['side']})"
 
-        # 2. Re-buy cooldown (from _validate_trade, checked here too for early exit)
+        # 2. Check for ANY recent trade (including cancelled/failed) in last 24h
+        recent_trade = engine.query_one(
+            "SELECT id, status FROM trades WHERE market_id = ? "
+            "AND created_at > datetime('now', '-24 hours') AND status != 'paper'",
+            (market_id,),
+        )
+        if recent_trade:
+            return False, f"Skipping market {market_id[:30]} - trade exists in last 24h (status={recent_trade['status']})"
+
+        # 3. Re-buy cooldown (from _validate_trade, checked here too for early exit)
         rebuy_cooldown_days = trading_cfg.get("rebuy_cooldown_days", 7)
         last_closed = engine.query_one(
             "SELECT MAX(executed_at) as last_close FROM trades WHERE market_id = ? "
