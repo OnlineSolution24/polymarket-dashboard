@@ -347,7 +347,7 @@ def render():
             except (ValueError, TypeError):
                 time_str = "-"
 
-            # Activity type
+            # Activity type (Polymarket-style)
             if not result or result == "open":
                 activity = "Gekauft"
                 activity_color = "#E8ECF1"
@@ -361,6 +361,9 @@ def render():
                             "STOP-LOSS (MANUAL)", "sell"):
                 activity = "Verkauft"
                 activity_color = "#448AFF"
+            elif result == "yield":
+                activity = "Belohnung"
+                activity_color = "#FFB74D"
             elif result in ("penny_cleanup", "phantom"):
                 activity = "Bereinigt"
                 activity_color = "#888"
