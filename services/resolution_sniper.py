@@ -28,12 +28,10 @@ logger = logging.getLogger(__name__)
 def _should_buy(confidence: float, market_price: float) -> bool:
     """Decide whether to buy based on confidence and current market price.
 
-    Tier 1: confidence >= 0.95 AND price <= 0.85 -> BUY (almost certain)
-    Tier 2: confidence >= 0.90 AND price <= 0.70 -> BUY (high confidence, needs better price)
+    Only enter at 85-95c — high probability markets where we still have upside to $1.
+    Below 85c = too uncertain, above 95c = not enough profit margin.
     """
-    if confidence >= 0.95 and market_price <= 0.85:
-        return True
-    if confidence >= 0.90 and market_price <= 0.70:
+    if confidence >= 0.95 and 0.85 <= market_price <= 0.95:
         return True
     return False
 
