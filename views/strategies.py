@@ -437,7 +437,7 @@ def render():
     with col_filter:
         status_filter = st.selectbox(
             "Status-Filter",
-            ["Alle", "draft", "pending_backtest", "backtested", "validated", "active", "retired", "rejected"],
+            ["Alle", "active", "dry_run", "validated", "backtested", "pending_backtest", "draft", "retired", "rejected"],
             index=0,
             label_visibility="collapsed",
         )
@@ -451,7 +451,7 @@ def render():
 
     if strategies:
         # Sort: active first, then by status priority, then name
-        _STATUS_ORDER = {"active": 0, "validated": 1, "backtested": 2, "pending_backtest": 3, "draft": 4, "retired": 5, "rejected": 6}
+        _STATUS_ORDER = {"active": 0, "dry_run": 1, "validated": 2, "backtested": 3, "pending_backtest": 4, "draft": 5, "retired": 6, "rejected": 7}
         strategies.sort(key=lambda s: (_STATUS_ORDER.get(s.get("status", ""), 9), s.get("name", "")))
 
     if not strategies:
