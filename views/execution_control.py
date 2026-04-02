@@ -312,10 +312,25 @@ def render():
     # 3. HISTORY (Polymarket-style activity feed with PnL)
     # ══════════════════════════════════════════════════════════════════
     history = client.get_closed_trades()
-    st.subheader(f"History ({len(history)})")
 
     if history:
         history.sort(key=lambda t: t.get("executed_at", "") or "", reverse=True)
+
+        # --- Filter ---
+        fc1, fc2 = st.columns([3, 1.5])
+        with fc1:
+            hist_search = st.text_input("Suche", placeholder="Markt filtern...", key="hist_search", label_visibility="collapsed")
+        with fc2:
+            hist_type = st.selectbox("Typ", ["Alle", "Gekauft", "Verkauft", "Beansprucht", "Belohnung"], key="hist_type", label_visibility="collapsed")
+
+        if hist_search:
+            history = [t for t in history if hist_search.lower() in (t.get("market_question") or "").lower()]
+        if hist_type != "Alle":
+            _type_map = {"Gekauft": [None, "", "open"], "Verkauft": ["cashout", "sell", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)"], "Beansprucht": ["win", "settlement_win", "settled"], "Belohnung": ["yield"]}
+            allowed = _type_map.get(hist_type, [])
+            history = [t for t in history if (t.get("result") or "").lower() in [str(a).lower() if a else "" for a in allowed] or (t.get("result") is None and None in allowed)]
+
+        st.subheader(f"History ({len(history)})")
 
         # --- Header ---
         _HW = [0.9, 3.0, 0.7, 0.7, 1.0, 0.6]
