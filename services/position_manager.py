@@ -362,7 +362,7 @@ class PositionManager:
             is_weather = any(kw in question.lower() for kw in
                 ["temperature", "\u00b0f", "\u00b0c", "\u00baf", "\u00bac", "rainfall", "snowfall", "hurricane"])
 
-            if is_weather:
+            if is_weather and tp_pct is not None:
                 be_trigger = ws_cfg.get("breakeven_trigger_pct", 66) / 100.0
                 be_sl = ws_cfg.get("breakeven_sl_pct", 1) / 100.0
 

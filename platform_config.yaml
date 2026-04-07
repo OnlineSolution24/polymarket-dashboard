@@ -45,7 +45,7 @@ edge_sources:
     max_amount: 5
     min_edge: 0.05
   crypto_prob:
-    enabled: true
+    enabled: false
     max_amount: 5
     min_edge: 0.05
   fedwatch:
