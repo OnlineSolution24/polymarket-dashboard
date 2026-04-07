@@ -600,12 +600,9 @@ class PositionManager:
                             market = engine.query_one('SELECT question FROM markets WHERE id = ?', (market_id,))
                             q = html.escape((market['question'] if market else '?')[:70])
                             self.alerts.send(
-                                f"📤 <b>Position geschlossen (extern)</b>
-"
-                                f"Markt: {q}
-"
-                                f"Seite: {trade['side']} | Einsatz: ${amount_usd:.2f}
-"
+                                f"📤 <b>Position geschlossen (extern)</b>\n"
+                                f"Markt: {q}\n"
+                                f"Seite: {trade['side']} | Einsatz: ${amount_usd:.2f}\n"
                                 f"<i>Position nicht mehr on-chain. Bitte Gewinn/Verlust pruefen.</i>"
                             )
                         except Exception:
