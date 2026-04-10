@@ -321,12 +321,18 @@ def render():
         with fc1:
             hist_search = st.text_input("Suche", placeholder="Markt filtern...", key="hist_search", label_visibility="collapsed")
         with fc2:
-            hist_type = st.selectbox("Typ", ["Alle", "Gekauft", "Verkauft", "Beansprucht", "Belohnung"], key="hist_type", label_visibility="collapsed")
+            hist_type = st.selectbox("Typ", ["Alle", "Gekauft", "Verkauft", "Verloren", "Beansprucht", "Belohnung"], key="hist_type", label_visibility="collapsed")
 
         if hist_search:
             history = [t for t in history if hist_search.lower() in (t.get("market_question") or "").lower()]
         if hist_type != "Alle":
-            _type_map = {"Gekauft": [None, "", "open"], "Verkauft": ["cashout", "sell", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)"], "Beansprucht": ["win", "settlement_win", "settled"], "Belohnung": ["yield"]}
+            _type_map = {
+                "Gekauft": [None, "", "open"],
+                "Verkauft": ["cashout", "sell", "take_profit", "stop_loss", "sold_external", "STOP-LOSS (MANUAL)", "pm_sync_closed", "sync_not_onchain", "expired"],
+                "Verloren": ["loss"],
+                "Beansprucht": ["win", "settlement_win", "settled", "settled_recovered"],
+                "Belohnung": ["yield"],
+            }
             allowed = _type_map.get(hist_type, [])
             history = [t for t in history if (t.get("result") or "").lower() in [str(a).lower() if a else "" for a in allowed] or (t.get("result") is None and None in allowed)]
 
@@ -366,14 +372,15 @@ def render():
             if not result or result == "open":
                 activity = "Gekauft"
                 activity_color = "#E8ECF1"
-            elif result in ("win", "settlement_win", "settled"):
+            elif result in ("win", "settlement_win", "settled", "settled_recovered"):
                 activity = "Beansprucht"
                 activity_color = "#00c853"
             elif result == "loss":
                 activity = "Verloren"
                 activity_color = "#ff1744"
             elif result in ("cashout", "take_profit", "stop_loss", "sold_external",
-                            "STOP-LOSS (MANUAL)", "sell"):
+                            "STOP-LOSS (MANUAL)", "sell", "pm_sync_closed",
+                            "sync_not_onchain", "expired"):
                 activity = "Verkauft"
                 activity_color = "#448AFF"
             elif result == "yield":
