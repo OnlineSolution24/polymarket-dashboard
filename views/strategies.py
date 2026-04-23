@@ -551,7 +551,13 @@ def render():
 
                 m5, m6 = st.columns(2)
                 with m5:
+                    dry_count = live_stats.get("dry_run_count", 0)
+                    live_count = live_stats.get("live_count", 0)
                     trades_label = f"{ls_trades} ({ls_wins}W/{ls_losses}L/{ls_open}O)"
+                    if dry_count > 0 and live_count == 0:
+                        trades_label += f" [DRY]"
+                    elif dry_count > 0:
+                        trades_label += f" ({dry_count} dry)"
                     st.markdown(_metric_card("Trades", trades_label), unsafe_allow_html=True)
                 with m6:
                     lwr_c = "#00D4AA" if ls_wr >= 60 else "#FFB74D" if ls_wr >= 45 else "#FF5252"
